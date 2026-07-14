@@ -33,7 +33,7 @@ cmake --build --preset ninja-msvc-x64
 
 # 4. 部署到游戏并启用
 cmake --build --preset ninja-msvc-x64 --target deploy
-#    -> Pal/Binaries/Win64/Mods/MyPalMod/dlls/main.dll（+ enabled.txt）
+#    -> Pal/Binaries/Win64/ue4ss/Mods/MyPalMod/dlls/main.dll（+ enabled.txt）
 ```
 
 启动 Palworld。UE4SS 控制台应打印 `MyPalMod loaded`，扫描结束后打印
@@ -45,7 +45,7 @@ cmake --build --preset ninja-msvc-x64 --target deploy
 Palworld/
 ├── CMakeLists.txt        super-build：add_subdirectory(RE-UE4SS)；add_subdirectory(mods)
 ├── CMakePresets.json     Ninja + MSVC x64 preset（UE4SS_VERSION_CHECK=OFF）
-├── cmake/Deploy.cmake    `deploy` 自定义 target -> 游戏 Mods/<ModName>/dlls/main.dll
+├── cmake/Deploy.cmake    `deploy` 自定义 target -> 游戏 ue4ss/Mods/<ModName>/dlls/main.dll
 ├── scripts/              setup.ps1（克隆 RE-UE4SS）、build.ps1、deploy.ps1
 ├── RE-UE4SS/             由 setup.ps1 克隆（已 gitignore）——提供 UE4SS target
 └── mods/MyPalMod/        mod 本体：CMakeLists.txt + src/dllmain.cpp
@@ -63,7 +63,7 @@ Palworld/
   必须显式设置——否则 imgui 依赖（经其 examples 的 `if(NOT CMAKE_BUILD_TYPE) set(Debug FORCE)`）会把默认改成
   `Debug`，导致 UE4SS 的 triplet 宏不生效、编译失败。
 - 如果你想用加载顺序控制来启用 mod（而不是用 `enabled.txt`），可在
-  `Pal/Binaries/Win64/Mods/mods.txt` 中 `Keybinds` 行的**上方**加一行 `MyPalMod : 1`。
+  `Pal/Binaries/Win64/ue4ss/Mods/mods.txt` 中 `Keybinds` 行的**上方**加一行 `MyPalMod : 1`。
 
 ## 编辑器（clangd / clang-format / clang-tidy）
 

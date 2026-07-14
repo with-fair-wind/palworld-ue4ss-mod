@@ -33,7 +33,7 @@ function(palworld_add_deploy_target MOD_TARGET)
         return()
     endif()
 
-    set(_mods_root "${PALWORLD_INSTALL_DIR}/Pal/Binaries/Win64/Mods")
+    set(_mods_root "${PALWORLD_INSTALL_DIR}/Pal/Binaries/Win64/ue4ss/Mods")
     set(_mod_dir   "${_mods_root}/${_mod_name}")
     set(_dll_dest  "${_mod_dir}/dlls/main.dll")
 

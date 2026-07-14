@@ -44,7 +44,7 @@ cmake --preset ninja-msvc-x64
 # 4. 构建   -> build/Game__Shipping__Win64/bin/MyPalMod.dll
 cmake --build --preset ninja-msvc-x64
 
-# 5. 部署到游戏 -> Pal/Binaries/Win64/Mods/MyPalMod/dlls/main.dll（+ enabled.txt）
+# 5. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/MyPalMod/dlls/main.dll（+ enabled.txt）
 cmake --build --preset ninja-msvc-x64 --target deploy
 
 # 完全重新构建
@@ -76,9 +76,9 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 `RC::Output::send<LogLevel::Verbose>(STR("...{ }...\n"))`（底层是 std::format；`STR()` 会选择正确的字符
 宽度）。Unreal API（`RC::Unreal::*`、`UObjectGlobals` 等）只能在 `on_unreal_init()` 内部及之后使用。
 
-**部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/` 下的 `Mods/<ModName>/dlls/main.dll`（把构建出的
+**部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
-`Mods/mods.txt` 中 `Keybinds` 行的上方加一行 `<ModName> : 1`。`deploy` target（`cmake/Deploy.cmake`）通过
+`ue4ss/Mods/mods.txt` 中 `Keybinds` 行的上方加一行 `<ModName> : 1`。`deploy` target（`cmake/Deploy.cmake`）通过
 `$<TARGET_FILE:MyPalMod>` 自动完成这件事，因此无论当前 triplet 输出目录是哪个，源文件路径都始终正确。
 
 ## 工具链（clangd / clang-tidy / clang-format）
