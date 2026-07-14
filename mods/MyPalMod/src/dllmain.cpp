@@ -23,7 +23,7 @@ public:
         ModName = STR("MyPalMod");
         ModVersion = STR("0.1.0");
         ModDescription = STR("Minimal UE4SS mod for Palworld 1.0");
-        ModAuthors = STR("Your Name");
+        ModAuthors = STR("with-fair-wind");
 
         // Propagated to the log file, the console, and the GUI console.
         Output::send<LogLevel::Verbose>(STR("MyPalMod loaded\n"));
