@@ -1,0 +1,25 @@
+# Build output
+/build/
+
+# Cloned dependency (fetched by scripts/setup.ps1 — not vendored)
+/RE-UE4SS/
+
+# Per-user CMake presets
+CMakeUserPresets.json
+
+# Generated compile database (also lives under build/, ignored there)
+compile_commands.json
+
+# IDE / editor
+*.user
+.vs/
+.vscode/
+.idea/
+*.swp
+
+# Build logs (transient configure/build output)
+/configure.log
+/build.log
+
+# Claude Code per-user local settings (shared settings.json may be committed)
+/.claude/settings.local.json

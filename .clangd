@@ -1,0 +1,38 @@
+# .clangd — configuration for the clangd language server.
+#
+# clangd consumes build/compile_commands.json, which RE-UE4SS emits because the
+# preset sets CMAKE_EXPORT_COMPILE_COMMANDS=ON. The project builds with MSVC, so
+# that file records cl.exe invocations; clangd translates them to its clang-cl
+# frontend automatically — no separate clang toolchain is required.
+#
+# After structural changes (CMake edits, new sources) re-run:
+#   cmake --preset ninja-msvc-x64
+# to refresh build/compile_commands.json.
+#
+# If clangd can't find the Windows SDK / MSVC headers, let it query the driver:
+#   VS Code:  "clangd.arguments": ["--query-driver=C:/Program Files/Microsoft Visual Studio/**/Hostx64/x64/cl.exe"]
+
+CompileFlags:
+  CompilationDatabase: build/
+  Add:
+    # Help clang-cl resolve the MSVC triple + Windows SDK system headers.
+    - --target=x86_64-pc-windows-msvc
+
+InlayHints:
+  Enabled: Yes
+  ParameterNames: Yes
+  DeducedTypes: Yes
+
+Hover:
+  ShowAKA: Yes
+
+# The vendored RE-UE4SS/ headers target MSVC and are third-party. Silence clangd
+# diagnostics inside them so the editor stays focused on the mod's own code.
+# (Requires clangd >= 17 for Suppress regex; harmless on older versions.)
+---
+If:
+  PathMatch: 'RE-UE4SS[/\\].*'
+Diagnostics:
+  Suppress: ['.*']
+  UnusedIncludes: None
+...

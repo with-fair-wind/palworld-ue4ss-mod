@@ -1,0 +1,29 @@
+# MyPalMod — a single UE4SS C++ mod target.
+#
+# To add another mod: copy this folder, change TARGET, and add_subdirectory() it
+# from a parent CMakeLists.txt.
+
+cmake_minimum_required(VERSION 3.22)
+
+set(TARGET MyPalMod)
+project(${TARGET} LANGUAGES CXX)
+
+# Match RE-UE4SS's language settings (defensive — UE4SS already sets these
+# globally, but we restate them so this target is correct in isolation).
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+add_library(${TARGET} SHARED src/dllmain.cpp)
+
+target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+
+# UE4SS supplies all headers, compile flags, and definitions transitively.
+target_link_libraries(${TARGET} PRIVATE UE4SS)
+
+# Output name = MyPalMod (DLL: MyPalMod.dll; UE4SS installs it as dlls/main.dll).
+set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME ${TARGET})
+
+# One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
+include(${CMAKE_SOURCE_DIR}/cmake/Deploy.cmake)
+palworld_add_deploy_target(${TARGET})

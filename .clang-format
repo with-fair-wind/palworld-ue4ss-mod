@@ -1,0 +1,35 @@
+---
+# .clang-format — formatting for the mod's C/C++ sources.
+# Allman braces + 4-space indent + 120-column limit, matching the existing code and
+# the UE4SS style we interoperate with. Run on a file:  clang-format -i <file>
+
+BasedOnStyle: Microsoft
+Language: Cpp
+Standard: c++20
+ColumnLimit: 120
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+AccessModifierOffset: -4
+AlignAfterOpenBracket: Align
+AlignTrailingComments: true
+AlignOperands: true
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Allman
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+ContinuationIndentWidth: 4
+Cpp11BracedListStyle: true
+DerivePointerAlignment: false
+FixNamespaceComments: true
+IncludeBlocks: Preserve
+IndentCaseLabels: true
+PointerAlignment: Left
+ReflowComments: true
+SortIncludes: CaseSensitive
+SpaceBeforeParens: ControlStatements
+SpacesBeforeTrailingComments: 1
+SpacesInAngles: Never
+SpacesInParentheses: false
+SpacesInSquareBrackets: false

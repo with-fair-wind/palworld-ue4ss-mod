@@ -1,0 +1,26 @@
+# Normalize text files to LF in both the repo and the working tree, so the project
+# has one consistent line ending regardless of platform / core.autocrlf settings.
+* text=auto eol=lf
+
+# --- Binaries: never touch line endings or diff content ---
+*.dll  binary
+*.exe  binary
+*.lib  binary
+*.exp  binary
+*.pdb  binary
+*.obj  binary
+*.ilk  binary
+*.a    binary
+*.so   binary
+*.dylib binary
+
+# --- Images / archives ---
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.bmp  binary
+*.zip  binary
+*.7z   binary
+*.gz   binary

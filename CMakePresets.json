@@ -1,0 +1,32 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 22, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "ninja-msvc-x64",
+      "displayName": "Ninja + MSVC (x64)",
+      "description": "Configure with the Ninja generator using the MSVC x64 toolchain. Run from an 'x64 Native Tools Command Prompt for VS 2022' (or VS Developer PowerShell) so cl.exe/ninja are on PATH.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "UE4SS_VERSION_CHECK": "OFF",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "CMAKE_BUILD_TYPE": "Game__Shipping__Win64"
+      },
+      "architecture": { "value": "x64", "strategy": "external" },
+      "toolset": { "value": "v143", "strategy": "external" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "ninja-msvc-x64",
+      "configurePreset": "ninja-msvc-x64",
+      "jobs": 0
+    },
+    {
+      "name": "deploy",
+      "configurePreset": "ninja-msvc-x64",
+      "targets": [ "deploy" ]
+    }
+  ]
+}
