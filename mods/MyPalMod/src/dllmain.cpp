@@ -65,17 +65,38 @@ auto query_item_count() -> void
         return;
     }
 
-    // The property exists but is not a simple int (e.g. an array of slots). Extend here:
-    //   CastField<FArrayProperty>  -> iterate the TArray and sum per-slot counts.
-    //   CastField<FStructProperty> -> read struct sub-fields.
-    //
-    // Alternative: call a game UFunction that returns the count directly, e.g.
-    //   auto* fn = UObjectGlobals::StaticFindObject<UFunction*>(
-    //       nullptr, nullptr, STR("/Script/Pal.<Class>:<GetCountFunc>"));
-    //   struct { /* in params */ } params{};
-    //   inventory->ProcessEvent(fn, &params); // out params written back to `params`
     Output::send<LogLevel::Warning>(STR("ItemCount: '{}' is not an int property (more type info needed)\n"),
                                     kCountPropertyName);
+}
+
+// Discovery scan: walk every UObject once and log the full name of any object whose
+// name hints at Pal/items. This reveals the REAL Palworld class names for the current
+// game version (so the placeholders above can be filled in). Runs once automatically
+// when the player is in-game — see on_update(). Uses only ForEachUObject + GetFullName,
+// both verified to compile. May briefly pause the game (one-shot, full scan).
+auto discover_objects() -> void
+{
+    Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects (may pause briefly) ===\n"));
+    int matched = 0;
+    constexpr int kMaxLogged = 300;
+    UObjectGlobals::ForEachUObject(
+        [&](UObject* obj, int32_t, int32_t) -> LoopAction
+        {
+            const auto full = obj->GetFullName();
+            if (full.find(STR("PalIndividualCharacter")) != std::wstring::npos ||
+                full.find(STR("Inventory")) != std::wstring::npos ||
+                full.find(STR("ItemContainer")) != std::wstring::npos ||
+                full.find(STR("PalItem")) != std::wstring::npos || full.find(STR("PassiveSkill")) != std::wstring::npos)
+            {
+                Output::send<LogLevel::Warning>(STR("[discover] {}\n"), full);
+                if (++matched >= kMaxLogged)
+                {
+                    return LoopAction::Break;
+                }
+            }
+            return LoopAction::Continue;
+        });
+    Output::send<LogLevel::Warning>(STR("=== discovery done: {} matched ===\n"), matched);
 }
 } // namespace
 
@@ -122,8 +143,24 @@ public:
 
     auto on_update() -> void override
     {
-        // Called every frame while the game runs. Keep it cheap.
+        // One-shot discovery: once the player is in-game (a Pal exists), dump the names
+        // of all Pal/item-related objects to the log. Send the [discover] lines back so
+        // the real class names can be wired into the placeholders above.
+        // Throttled — FindFirstOf is a full scan, so only check ~once per second.
+        if (discovery_done_ || (++tick_counter_ % 60) != 0)
+        {
+            return;
+        }
+        if (UObjectGlobals::FindFirstOf(STR("PalIndividualCharacter")) != nullptr)
+        {
+            discovery_done_ = true;
+            discover_objects();
+        }
     }
+
+private:
+    bool discovery_done_{false};
+    int tick_counter_{0};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
