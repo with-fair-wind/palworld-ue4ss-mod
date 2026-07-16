@@ -14,33 +14,42 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
-#include <string_view> // std::wstring_view
+#include <map>
+#include <string>
+#include <string_view>
 
 using namespace RC;
 using namespace RC::Unreal;
 
 namespace
 {
-// ============================================================================
-// PLACEHOLDERS — replace after discovering the real Palworld symbols.
-//   How to discover them:
-//     - Live Property Viewer (UE4SS in-game GUI), or
-//     - SDK dump: enable GenerateSDK/DumpAllObjects in UE4SS-settings.ini, then
-//       grep the dump under <game>\Pal\Binaries\Win64\dumps\ for "Inventory"/"Item"/
-//       "Slot"/"Count". The names below are EXAMPLES only and will not resolve until
-//       you fill in the real ones — the code stays safe (logs "not found") until then.
-// ============================================================================
+// Broad keywords used to surface candidate Pal/item class names during discovery.
+// Intentionally wide — the goal is to SEE which real Palworld class names exist.
+constexpr std::wstring_view kDiscoveryKeywords[] = {
+    L"Pal",
+    L"Item",
+    L"Invent",
+    L"Character",
+    L"Player",
+    L"Container",
+    L"Slot",
+    L"Skill",
+    L"Passive",
+    L"Talent",
+    L"Rank",
+    L"Stat",
+    L"Status",
+    L"Otter",
+    L"Wallet",
+    L"Box",
+    L"Storage",
+};
 
-// The UClass that holds the player's items (example name only).
+// PLACEHOLDER for the item-count query (filled in once discovery reveals real names).
 constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
-// An int32 property on that class representing a stack/total count (example only).
 constexpr const TCHAR* kCountPropertyName = STR("StackCount");
-// The console command that triggers the query (typed in the UE4SS console in-game).
 constexpr const TCHAR* kConsoleCommand = STR("mypal.itemcount");
 
-// Demonstrates the property-reflection route: locate an object by class name, then
-// read an int32 property by name. Compiles and runs as-is (a safe no-op that logs
-// "not found" until the real Palworld names are filled in above).
 auto query_item_count() -> void
 {
     UObject* inventory = UObjectGlobals::FindFirstOf(kInventoryClassName);
@@ -49,7 +58,6 @@ auto query_item_count() -> void
         Output::send<LogLevel::Warning>(STR("ItemCount: inventory class '{}' not found\n"), kInventoryClassName);
         return;
     }
-
     FProperty* property = inventory->GetPropertyByNameInChain(kCountPropertyName);
     if (property == nullptr)
     {
@@ -57,46 +65,57 @@ auto query_item_count() -> void
             STR("ItemCount: property '{}' not found on '{}'\n"), kCountPropertyName, kInventoryClassName);
         return;
     }
-
     if (auto* int_property = CastField<FIntProperty>(property))
     {
         const int32 count = int_property->GetPropertyValueInContainer(inventory);
         Output::send<LogLevel::Verbose>(STR("ItemCount: {} = {}\n"), kCountPropertyName, count);
         return;
     }
-
-    Output::send<LogLevel::Warning>(STR("ItemCount: '{}' is not an int property (more type info needed)\n"),
-                                    kCountPropertyName);
+    Output::send<LogLevel::Warning>(STR("ItemCount: '{}' is not an int property\n"), kCountPropertyName);
 }
 
-// Discovery scan: walk every UObject once and log the full name of any object whose
-// name hints at Pal/items. This reveals the REAL Palworld class names for the current
-// game version (so the placeholders above can be filled in). Runs once automatically
-// when the player is in-game — see on_update(). Uses only ForEachUObject + GetFullName,
-// both verified to compile. May briefly pause the game (one-shot, full scan).
+// Discovery v2: scan every UObject once, build a histogram of class names that match
+// any broad keyword, and log "[discover] <ClassName> (x<count>)". This reveals the REAL
+// Palworld class names for the running version without guessing. Triggered once after a
+// short delay (see on_update) so the player is in-game by then. May briefly pause the
+// game (one-shot, full scan).
 auto discover_objects() -> void
 {
-    Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects (may pause briefly) ===\n"));
-    int matched = 0;
-    constexpr int kMaxLogged = 300;
+    Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery v2: scanning UObjects ===\n"));
+    std::map<std::wstring, int> matching;
+    int total = 0;
     UObjectGlobals::ForEachUObject(
         [&](UObject* obj, int32_t, int32_t) -> LoopAction
         {
-            const auto full = obj->GetFullName();
-            if (full.find(STR("PalIndividualCharacter")) != std::wstring::npos ||
-                full.find(STR("Inventory")) != std::wstring::npos ||
-                full.find(STR("ItemContainer")) != std::wstring::npos ||
-                full.find(STR("PalItem")) != std::wstring::npos || full.find(STR("PassiveSkill")) != std::wstring::npos)
+            ++total;
+            UClass* cls = obj->GetClassPrivate();
+            if (cls == nullptr)
             {
-                Output::send<LogLevel::Warning>(STR("[discover] {}\n"), full);
-                if (++matched >= kMaxLogged)
+                return LoopAction::Continue;
+            }
+            std::wstring name = cls->GetName();
+            for (auto kw : kDiscoveryKeywords)
+            {
+                if (name.find(kw) != std::wstring::npos)
                 {
-                    return LoopAction::Break;
+                    ++matching[name];
+                    break;
                 }
             }
             return LoopAction::Continue;
         });
-    Output::send<LogLevel::Warning>(STR("=== discovery done: {} matched ===\n"), matched);
+    Output::send<LogLevel::Warning>(
+        STR("=== discovery: {} total objects, {} matching class types ===\n"), total, matching.size());
+    int n = 0;
+    for (const auto& [cls_name, cnt] : matching)
+    {
+        Output::send<LogLevel::Warning>(STR("[discover] {} (x{})\n"), cls_name, cnt);
+        if (++n >= 200)
+        {
+            break;
+        }
+    }
+    Output::send<LogLevel::Warning>(STR("=== discovery done ===\n"));
 }
 } // namespace
 
@@ -106,30 +125,24 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.1.0");
+        ModVersion = STR("0.2.0");
         ModDescription = STR("Minimal UE4SS mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        // Propagated to the log file, the console, and the GUI console.
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded\n"));
+        // Unique marker so you can confirm this build is loaded.
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (discovery v2)\n"));
     }
 
     ~MyPalMod() override = default;
 
-    // Fires once after Unreal is initialized — the Unreal namespace is safe to use
-    // here and everywhere after.
     auto on_unreal_init() -> void override
     {
-        // Sanity check: the Unreal reflection API is reachable.
         if (const auto object =
                 UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/CoreUObject.Object")))
         {
             Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
         }
 
-        // Register an on-demand console command. In-game, open the UE4SS console and
-        // type `mypal.itemcount` to run the query. (C++ keybinds aren't exposed in this
-        // UE4SS revision; a console command is the most reliable on-demand trigger.)
         Hook::RegisterProcessConsoleExecGlobalPreCallback(
             [](auto& /*info*/, UObject* /*context*/, const TCHAR* cmd, FOutputDevice& /*ar*/, UObject* /*executor*/)
             {
@@ -143,15 +156,9 @@ public:
 
     auto on_update() -> void override
     {
-        // One-shot discovery: once the player is in-game (a Pal exists), dump the names
-        // of all Pal/item-related objects to the log. Send the [discover] lines back so
-        // the real class names can be wired into the placeholders above.
-        // Throttled — FindFirstOf is a full scan, so only check ~once per second.
-        if (discovery_done_ || (++tick_counter_ % 60) != 0)
-        {
-            return;
-        }
-        if (UObjectGlobals::FindFirstOf(STR("PalIndividualCharacter")) != nullptr)
+        // Run the one-shot discovery ~20s after the game starts ticking (by then the
+        // player is usually in-game). Time-based, not gated on any class name guess.
+        if (!discovery_done_ && ++tick_counter_ >= 1200)
         {
             discovery_done_ = true;
             discover_objects();
