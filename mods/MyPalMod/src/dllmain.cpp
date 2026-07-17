@@ -1,16 +1,19 @@
-// MyPalMod — minimal UE4SS C++ mod skeleton for Palworld 1.0.
+// MyPalMod — UE4SS C++ mod for Palworld 1.0.
 //
 //   Build:   cmake --preset ninja-msvc-x64 && cmake --build --preset ninja-msvc-x64
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
 //
-// Entry-point contract: UE4SS loads this DLL, calls start_mod() to construct the mod
-// instance, and uninstall_mod() to destroy it. The lifecycle hooks (on_update,
-// on_unreal_init) come from CppUserModBase.
+// Discovered Palworld API (from UHTHeaderDump, Pal module):
+//   Items : UPalPlayerInventoryData::RequestAddItem_ForDebug(FName StaticItemId, int32 Count, bool IsAssignPassive)
+//   Pals  : UPalIndividualCharacterParameter — AddPassiveSkill/RemovePassiveSkill/GetPassiveSkillList,
+//           and SaveParameter (FPalIndividualCharacterSaveParameter) with PassiveSkillList (TArray<FName>),
+//           Talent_HP/Melee/Shot/Defense (uint8 IVs), Rank, Level, Rank_HP/Attack/Defence/CraftSpeed.
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FIntProperty, FProperty, CastField
 #include <Unreal/Hooks/Hooks.hpp>                    // RegisterProcessConsoleExecGlobalPreCallback
+#include <Unreal/NameTypes.hpp>                      // FName
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
@@ -23,8 +26,15 @@ using namespace RC::Unreal;
 
 namespace
 {
-// Broad keywords used to surface candidate Pal/item class names during discovery.
-// Intentionally wide — the goal is to SEE which real Palworld class names exist.
+// ============================================================================
+// TWEAK THESE — item give feature. kItemId must be a real Palworld StaticItemId
+// (FName). Find valid IDs by grepping UHTHeaderDump for item data tables, e.g.
+// PalStaticItemDataStruct.h / EPalItemType*.h, or watch the inventory in Live View.
+// ============================================================================
+constexpr const TCHAR* kItemId = STR("ItemName_Stone");
+constexpr int32 kItemCount = 10;
+
+// Broad keywords for the discovery histogram (surfaces real class names).
 constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Pal",
     L"Item",
@@ -45,43 +55,53 @@ constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Storage",
 };
 
-// PLACEHOLDER for the item-count query (filled in once discovery reveals real names).
+constexpr const TCHAR* kConsoleCommand = STR("mypal.itemcount");
 constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
 constexpr const TCHAR* kCountPropertyName = STR("StackCount");
-constexpr const TCHAR* kConsoleCommand = STR("mypal.itemcount");
 
-auto query_item_count() -> void
+// Give items by calling UPalPlayerInventoryData::RequestAddItem_ForDebug via ProcessEvent.
+// Param layout must match the UFunction: { FName StaticItemId; int32 Count; bool IsAssignPassive; }.
+auto give_items() -> void
 {
+    Output::send<LogLevel::Warning>(STR("=== MyPalMod give_items: start ===\n"));
+
     UObject* inventory = UObjectGlobals::FindFirstOf(kInventoryClassName);
     if (inventory == nullptr)
     {
-        Output::send<LogLevel::Warning>(STR("ItemCount: inventory class '{}' not found\n"), kInventoryClassName);
+        Output::send<LogLevel::Warning>(STR("give_items: '{}' instance not found (not in-game?)\n"),
+                                        kInventoryClassName);
         return;
     }
-    FProperty* property = inventory->GetPropertyByNameInChain(kCountPropertyName);
-    if (property == nullptr)
+
+    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:RequestAddItem_ForDebug"));
+    if (fn == nullptr)
     {
-        Output::send<LogLevel::Warning>(
-            STR("ItemCount: property '{}' not found on '{}'\n"), kCountPropertyName, kInventoryClassName);
+        Output::send<LogLevel::Warning>(STR("give_items: RequestAddItem_ForDebug UFunction not found\n"));
         return;
     }
-    if (auto* int_property = CastField<FIntProperty>(property))
+
+    struct FRequestAddItemParams
     {
-        const int32 count = int_property->GetPropertyValueInContainer(inventory);
-        Output::send<LogLevel::Verbose>(STR("ItemCount: {} = {}\n"), kCountPropertyName, count);
-        return;
-    }
-    Output::send<LogLevel::Warning>(STR("ItemCount: '{}' is not an int property\n"), kCountPropertyName);
+        FName StaticItemId;
+        int32_t Count;
+        bool IsAssignPassive;
+    };
+    FRequestAddItemParams params{};
+    params.StaticItemId = FName(kItemId);
+    params.Count = kItemCount;
+    params.IsAssignPassive = false;
+
+    inventory->ProcessEvent(fn, &params);
+    Output::send<LogLevel::Warning>(
+        STR("give_items: called RequestAddItem_ForDebug('{}', x{})\n"), kItemId, params.Count);
 }
 
-// Discovery v2: scan every UObject once, build a histogram of class names that match
-// any broad keyword, and log "[discover] <ClassName> (x<count>)". This reveals the REAL
-// Palworld class names for the running version without guessing. Triggered once after a
-// short delay (see on_update) so the player is in-game by then. May briefly pause the
-// game (one-shot, full scan).
+// Discovery: histogram of class names matching broad keywords. Reveals the real
+// Palworld class names for the running version. One-shot, full scan.
 auto discover_objects() -> void
 {
-    Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery v2: scanning UObjects ===\n"));
+    Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects ===\n"));
     std::map<std::wstring, int> matching;
     int total = 0;
     UObjectGlobals::ForEachUObject(
@@ -125,12 +145,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.2.0");
-        ModDescription = STR("Minimal UE4SS mod for Palworld 1.0");
+        ModVersion = STR("0.3.0");
+        ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        // Unique marker so you can confirm this build is loaded.
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (discovery v2)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.3 give-items)\n"));
     }
 
     ~MyPalMod() override = default;
@@ -148,7 +167,9 @@ public:
             {
                 if (std::wstring_view(cmd).starts_with(kConsoleCommand))
                 {
-                    query_item_count();
+                    // placeholder: read an int property (fills in real names later)
+                    Output::send<LogLevel::Warning>(STR("mypal.itemcount: (placeholder) inventory='{}'\n"),
+                                                    kInventoryClassName);
                 }
             },
             Hook::FCallbackOptions{.OwnerModName = STR("MyPalMod"), .HookName = STR("ItemCountConsoleCmd")});
@@ -156,17 +177,24 @@ public:
 
     auto on_update() -> void override
     {
-        // Run the one-shot discovery ~20s after the game starts ticking (by then the
-        // player is usually in-game). Time-based, not gated on any class name guess.
+        // One-shot discovery ~20s after gameplay starts.
         if (!discovery_done_ && ++tick_counter_ >= 1200)
         {
             discovery_done_ = true;
             discover_objects();
         }
+        // Give items a bit later (~25s) — one shot per session. Edit kItemId/kItemCount
+        // at the top of the file, rebuild, redeploy, and load a save to test again.
+        if (!give_done_ && tick_counter_ >= 1500)
+        {
+            give_done_ = true;
+            give_items();
+        }
     }
 
 private:
     bool discovery_done_{false};
+    bool give_done_{false};
     int tick_counter_{0};
 };
 
