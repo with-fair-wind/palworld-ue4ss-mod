@@ -27,11 +27,12 @@ using namespace RC::Unreal;
 namespace
 {
 // ============================================================================
-// TWEAK THESE — item give feature. kItemId must be a real Palworld StaticItemId
-// (FName). Find valid IDs by grepping UHTHeaderDump for item data tables, e.g.
-// PalStaticItemDataStruct.h / EPalItemType*.h, or watch the inventory in Live View.
+// TWEAK THESE — item give feature. kItemId is a Palworld StaticItemId (FName): the
+// BARE item name, no prefix. Verified list: github.com/KURAMAAA0/PalModding ItemIDs.txt.
+// Examples: Stone, Wood, Fiber, Coal, CopperOre, PalSphere, PalSphere_Tera,
+// PalSphere_Master, PalSphere_Legend, PalSphere_Exotic, AncientParts2, PalEgg_Normal_01.
 // ============================================================================
-constexpr const TCHAR* kItemId = STR("ItemName_Stone");
+constexpr const TCHAR* kItemId = STR("PalSphere_Tera");
 constexpr int32 kItemCount = 10;
 
 // Broad keywords for the discovery histogram (surfaces real class names).
@@ -145,11 +146,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.3.0");
+        ModVersion = STR("0.3.1");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.3 give-items)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.3.1 PalSphere_Tera)\n"));
     }
 
     ~MyPalMod() override = default;
