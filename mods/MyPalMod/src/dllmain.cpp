@@ -3,10 +3,14 @@
 //   Build:   cmake --preset ninja-msvc-x64 && cmake --build --preset ninja-msvc-x64
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
 //
-// Features are triggered via the in-game console (opens with F10 / Tilde via the
-// built-in ConsoleEnablerMod). Load into a save first, open the console, then type:
-//   mypal.discover   - scan all UObjects, log a histogram of Pal/item-related classes
-//   mypal.give       - add kItemCount of item kItemId to the player's inventory
+// Triggered via a custom tab in the UE4SS GUI window (the separate window that opens
+// alongside the game — NOT the F10 in-game console, which is broken by Palworld's
+// ambiguous ConsoleManager signature). Open the UE4SS GUI, go to the "MyPalMod" tab,
+// click a button. Button clicks set atomic flags; the actual game-function calls run
+// on the game thread in on_update (safe — UE reflection is not thread-safe).
+//
+//   "Give items"     - add kItemCount of kItemId to the player's inventory
+//   "Discover"       - scan all UObjects, log a histogram of Pal/item-related classes
 //
 // Discovered Palworld API (from UHTHeaderDump, Pal module):
 //   Items : UPalPlayerInventoryData::RequestAddItem_ForDebug(FName StaticItemId, int32 Count, bool IsAssignPassive)
@@ -15,13 +19,16 @@
 //           Talent_HP/Melee/Shot/Defense (uint8 IVs), Rank, Level.
 
 #include <DynamicOutput/DynamicOutput.hpp>
+#include <GUI/GUITab.hpp>
 #include <Mod/CppUserModBase.hpp>
-#include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FIntProperty, FProperty, CastField
-#include <Unreal/Hooks/Hooks.hpp>                    // RegisterProcessConsoleExecGlobalPreCallback
+#include <UE4SSProgram.hpp>                          // UE4SS_ENABLE_IMGUI
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FProperty, CastField
 #include <Unreal/NameTypes.hpp>                      // FName
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <imgui.h>
 
+#include <atomic>
 #include <map>
 #include <string>
 #include <string_view>
@@ -38,7 +45,6 @@ constexpr const TCHAR* kItemId = STR("PalSphere_Tera");
 constexpr int32 kItemCount = 10;
 constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
 
-// Broad keywords for the discovery histogram (surfaces real class names + live counts).
 constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Pal",
     L"Item",
@@ -61,6 +67,7 @@ constexpr std::wstring_view kDiscoveryKeywords[] = {
 
 // Give items by calling UPalPlayerInventoryData::RequestAddItem_ForDebug via ProcessEvent.
 // Param layout must match the UFunction: { FName StaticItemId; int32 Count; bool IsAssignPassive; }.
+// MUST be called on the game thread.
 auto give_items() -> void
 {
     Output::send<LogLevel::Warning>(STR("=== MyPalMod give_items: start ===\n"));
@@ -97,8 +104,9 @@ auto give_items() -> void
         STR("give_items: called RequestAddItem_ForDebug('{}', x{})\n"), kItemId, params.Count);
 }
 
-// Discovery: histogram of class names matching broad keywords. Reveals the real Palworld
+// Discovery: histogram of class names matching broad keywords. Reveals real Palworld
 // class names + how many LIVE instances exist right now. Full scan (may briefly pause).
+// MUST be called on the game thread.
 auto discover_objects() -> void
 {
     Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects ===\n"));
@@ -145,45 +153,66 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.4.0");
+        ModVersion = STR("0.5.0");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.4 console cmds)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.5 GUI tab)\n"));
+
+        // Register a tab in the UE4SS GUI window. The render callback runs on the GUI
+        // thread, so it only sets atomic flags; the actual work runs on the game thread
+        // in on_update (UE reflection is not thread-safe).
+        // NOTE: ImGui uses narrow char*, so UI labels are narrow string literals.
+        register_tab(STR("MyPalMod"),
+                     [](CppUserModBase* mod)
+                     {
+                         UE4SS_ENABLE_IMGUI()
+                         auto* self = static_cast<MyPalMod*>(mod);
+                         ImGui::TextUnformatted("MyPalMod v0.5");
+                         ImGui::Separator();
+                         if (ImGui::Button("Give items (PalSphere_Tera x10)"))
+                         {
+                             self->want_give_.store(true);
+                         }
+                         ImGui::SameLine();
+                         if (ImGui::Button("Discover (scan objects)"))
+                         {
+                             self->want_discover_.store(true);
+                         }
+                         ImGui::Separator();
+                         ImGui::TextWrapped("Load into a save first. Actions run on the next game tick. "
+                                            "Results are printed to the UE4SS Console tab.");
+                     });
     }
 
     ~MyPalMod() override = default;
 
     auto on_unreal_init() -> void override
     {
+        // Sanity check: the Unreal reflection API is reachable.
         if (const auto object =
                 UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, STR("/Script/CoreUObject.Object")))
         {
             Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
         }
-
-        // Console commands: open the in-game console (F10 / Tilde) and type the command.
-        Hook::RegisterProcessConsoleExecGlobalPreCallback(
-            [](auto& /*info*/, UObject* /*context*/, const TCHAR* cmd, FOutputDevice& /*ar*/, UObject* /*executor*/)
-            {
-                const std::wstring_view c(cmd);
-                if (c.starts_with(STR("mypal.discover")))
-                {
-                    discover_objects();
-                }
-                else if (c.starts_with(STR("mypal.give")))
-                {
-                    give_items();
-                }
-            },
-            Hook::FCallbackOptions{.OwnerModName = STR("MyPalMod"), .HookName = STR("MyPalCommands")});
     }
 
     auto on_update() -> void override
     {
-        // Features are console-triggered (see on_unreal_init). The old timer triggers
-        // fired at the main menu, before live in-game instances existed.
+        // Game thread: safe to call game functions here. Flags are set by the GUI thread.
+        if (want_give_.exchange(false))
+        {
+            give_items();
+        }
+        if (want_discover_.exchange(false))
+        {
+            discover_objects();
+        }
     }
+
+private:
+    std::atomic<bool> want_give_{false};
+    std::atomic<bool> want_discover_{false};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
