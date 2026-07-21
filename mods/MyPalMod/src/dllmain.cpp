@@ -3,24 +3,20 @@
 //   Build:   cmake --preset ninja-msvc-x64 && cmake --build --preset ninja-msvc-x64
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
 //
-// Triggered via a custom "MyPalMod" tab in the UE4SS GUI window (the separate window
-// that opens alongside the game — NOT the F10 in-game console, which is broken by
-// Palworld's ambiguous ConsoleManager signature). Button clicks hand the request to
-// on_update (game thread) via a mutex / atomic; UE reflection is not thread-safe, so
-// all actual game-function calls happen there.
+// UI is a floating ImGui window inside the UE4SS GUI (select the "MyPalMod" tab and a
+// movable window pops up). NOT the F10 in-game console (broken by Palworld's ambiguous
+// ConsoleManager signature). Button clicks stage a request (mutex/atomic); the actual
+// game-function calls run on the game thread in on_update (UE reflection isn't thread-safe).
 //
-//   Give items    - type an item ID + count, click Give -> AddItem_ServerInternal
-//   Discover      - scan all UObjects, log a histogram of Pal/item-related classes
-//
-// Item IDs are the BARE Palworld StaticItemId (FName): PalSphere, PalSphere_Tera,
-// Stone, Wood, Money, ... Full list: github.com/KURAMAAA0/PalModding ItemIDs.txt.
+//   Give items       - type an item ID + count, click Give -> AddItem_ServerInternal
+//   Discover         - scan UObjects, log a histogram of Pal/item classes
+//   Probe inventory  - verify we can reach the player's item container (logs container + slot count)
 //
 // Discovered Palworld API (from UHTHeaderDump, Pal module):
-//   Items : UPalPlayerInventoryData::AddItem_ServerInternal(FName StaticItemId, int32 Count,
-//           bool IsAssignPassive, float LogDelay, bool bNotifyLog) -> EPalItemOperationResult
-//   Pals  : UPalIndividualCharacterParameter — AddPassiveSkill/RemovePassiveSkill/GetPassiveSkillList,
-//           SaveParameter (FPalIndividualCharacterSaveParameter) with PassiveSkillList (TArray<FName>),
-//           Talent_HP/Melee/Shot/Defense (uint8 IVs), Rank, Level.
+//   Items : UPalPlayerInventoryData::AddItem_ServerInternal(FName,int32,bool,float,bool)->EPalItemOperationResult
+//           UPalPlayerInventoryData::TryGetContainerFromInventoryType(EPalPlayerInventoryType, UPalItemContainer*&)
+//           UPalItemContainer::Num() / Get(i) -> UPalItemSlot
+//           UPalItemSlot: StackCount (int32), ItemId.StaticId (FName)
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
@@ -33,7 +29,6 @@
 #include <imgui.h>
 
 #include <atomic>
-#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -54,9 +49,7 @@ constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"PalCharacterContainer",
 };
 
-// Add `count` of `item_id` to the player's inventory via UPalPlayerInventoryData::AddItem_ServerInternal.
-// `item_id` is a narrow (UTF-8/ASCII) string from the UI; converted to FName internally.
-// MUST be called on the game thread.
+// Add `count` of `item_id` to the player's inventory via AddItem_ServerInternal. Game thread only.
 auto give_items(const std::string& item_id, int32 count) -> void
 {
     Output::send<LogLevel::Warning>(STR("=== MyPalMod give_items: start ===\n"));
@@ -68,7 +61,6 @@ auto give_items(const std::string& item_id, int32 count) -> void
                                         kInventoryClassName);
         return;
     }
-    Output::send<LogLevel::Warning>(STR("give_items: inventory instance = {}\n"), inventory->GetFullName());
 
     UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal"));
@@ -78,12 +70,8 @@ auto give_items(const std::string& item_id, int32 count) -> void
         return;
     }
 
-    // Narrow (UI) -> wide (FName). Item IDs are ASCII, so a simple char->wchar_t widen is enough.
-    std::wstring wide(item_id.begin(), item_id.end());
+    const std::wstring wide(item_id.begin(), item_id.end());
 
-    // Param layout must match the UFunction:
-    //   { FName StaticItemId; int32 Count; bool IsAssignPassive; float LogDelay; bool bNotifyLog; }
-    //   + return EPalItemOperationResult (int32-sized space, output-only).
     struct FAddItemServerInternalParams
     {
         FName StaticItemId;
@@ -91,7 +79,7 @@ auto give_items(const std::string& item_id, int32 count) -> void
         bool IsAssignPassive;
         float LogDelay;
         bool bNotifyLog;
-        int32_t Result; // EPalItemOperationResult (out)
+        int32_t Result;
     };
     FAddItemServerInternalParams params{};
     params.StaticItemId = FName(wide.c_str());
@@ -101,14 +89,67 @@ auto give_items(const std::string& item_id, int32 count) -> void
     params.bNotifyLog = false;
 
     inventory->ProcessEvent(fn, &params);
-    // Convert item_id back to wide only for logging (Output::send uses wide).
     Output::send<LogLevel::Warning>(
-        STR("give_items: called AddItem_ServerInternal('{}', x{}) -> result={}\n"), wide, params.Count, params.Result);
+        STR("give_items: AddItem_ServerInternal('{}', x{}) -> result={}\n"), wide, params.Count, params.Result);
 }
 
-// Discovery: histogram of class names matching narrow keywords. Reveals real Palworld
-// class names + how many LIVE instances exist right now. Full scan (may briefly pause).
-// MUST be called on the game thread.
+// Verify we can reach the player's main inventory container and read its slot count.
+// Step 1 of the inventory-editor feature. Game thread only.
+auto probe_inventory() -> void
+{
+    Output::send<LogLevel::Warning>(STR("=== MyPalMod probe_inventory ===\n"));
+
+    UObject* inventory = UObjectGlobals::FindFirstOf(kInventoryClassName);
+    if (inventory == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("probe: inventory not found (not in-game?)\n"));
+        return;
+    }
+
+    // bool TryGetContainerFromInventoryType(EPalPlayerInventoryType inventoryType, UPalItemContainer*& OutContainer)
+    // EPalPlayerInventoryType is uint8; Common == 0 (the main bag). Layout: {uint8@0, ptr@8, bool ret@16}.
+    UFunction* fnGetContainer = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:TryGetContainerFromInventoryType"));
+    if (fnGetContainer == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("probe: TryGetContainerFromInventoryType UFunction not found\n"));
+        return;
+    }
+    struct FGetContainerParams
+    {
+        uint8_t InventoryType;
+        UObject* OutContainer;
+        bool Result;
+    };
+    FGetContainerParams gp{};
+    gp.InventoryType = 0; // EPalPlayerInventoryType::Common
+    gp.OutContainer = nullptr;
+    inventory->ProcessEvent(fnGetContainer, &gp);
+
+    if (gp.OutContainer == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("probe: container is null (ret={})\n"), gp.Result ? 1 : 0);
+        return;
+    }
+    Output::send<LogLevel::Warning>(STR("probe: container = {}\n"), gp.OutContainer->GetFullName());
+
+    // int32 UPalItemContainer::Num()
+    UFunction* fnNum =
+        UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Num"));
+    if (fnNum == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("probe: Num UFunction not found\n"));
+        return;
+    }
+    struct FNumParams
+    {
+        int32_t Result;
+    };
+    FNumParams np{};
+    gp.OutContainer->ProcessEvent(fnNum, &np);
+    Output::send<LogLevel::Warning>(STR("probe: slot count (Num) = {}\n"), np.Result);
+}
+
 auto discover_objects() -> void
 {
     Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects ===\n"));
@@ -155,44 +196,49 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.6.0");
+        ModVersion = STR("0.7.0");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.6.0 item UI)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.7.0 floating window)\n"));
 
-        // Register a tab in the UE4SS GUI window. The render callback runs on the GUI
-        // thread, so it only stages a request (under a mutex); the actual game-function
-        // calls run on the game thread in on_update.
-        // NOTE: ImGui uses narrow char*, so the item-id input is narrow and widened later.
+        // Floating ImGui window inside the UE4SS GUI. Select the "MyPalMod" tab and the
+        // window pops up (movable). Render runs on the GUI thread -> only stages requests.
         register_tab(STR("MyPalMod"),
                      [](CppUserModBase* mod)
                      {
                          UE4SS_ENABLE_IMGUI()
                          auto* self = static_cast<MyPalMod*>(mod);
-
-                         ImGui::TextUnformatted("Give items");
-                         ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
-                         ImGui::InputInt("Count", &self->count_input_);
-                         self->count_input_ = clamp(self->count_input_, 1, 9999);
-                         if (ImGui::Button("Give"))
+                         ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
+                         if (ImGui::Begin("MyPalMod v0.7", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
                          {
-                             const std::lock_guard lock(self->give_mutex_);
-                             self->give_item_ = self->item_buf_;
-                             self->give_count_ = self->count_input_;
-                             self->give_requested_ = true;
+                             ImGui::TextUnformatted("Give items");
+                             ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
+                             ImGui::InputInt("Count", &self->count_input_);
+                             self->count_input_ = clamp(self->count_input_, 1, 9999);
+                             if (ImGui::Button("Give"))
+                             {
+                                 const std::lock_guard lock(self->give_mutex_);
+                                 self->give_item_ = self->item_buf_;
+                                 self->give_count_ = self->count_input_;
+                                 self->give_requested_ = true;
+                             }
+                             ImGui::Separator();
+                             if (ImGui::Button("Probe inventory"))
+                             {
+                                 self->want_probe_.store(true);
+                             }
+                             ImGui::SameLine();
+                             if (ImGui::Button("Discover"))
+                             {
+                                 self->want_discover_.store(true);
+                             }
+                             ImGui::Separator();
+                             ImGui::TextWrapped("Item IDs (bare): PalSphere, PalSphere_Tera, Stone, Wood, "
+                                                "Money, ... Full list: github.com/KURAMAAA0/PalModding "
+                                                "ItemIDs.txt. Results -> UE4SS Console tab.");
                          }
-                         ImGui::SameLine();
-                         if (ImGui::Button("Discover"))
-                         {
-                             self->want_discover_.store(true);
-                         }
-
-                         ImGui::Separator();
-                         ImGui::TextWrapped("Item IDs (bare): PalSphere, PalSphere_Tera, PalSphere_Master, "
-                                            "PalSphere_Legend, Stone, Wood, Money, AncientParts2, ...  "
-                                            "Full list: github.com/KURAMAAA0/PalModding ItemIDs.txt");
-                         ImGui::TextUnformatted("Load into a save first. Results -> UE4SS Console tab.");
+                         ImGui::End();
                      });
     }
 
@@ -209,7 +255,6 @@ public:
 
     auto on_update() -> void override
     {
-        // Game thread: safe to call game functions here.
         std::string item;
         int count = 0;
         bool do_give = false;
@@ -227,6 +272,10 @@ public:
         {
             give_items(item, static_cast<int32>(count));
         }
+        if (want_probe_.exchange(false))
+        {
+            probe_inventory();
+        }
         if (want_discover_.exchange(false))
         {
             discover_objects();
@@ -239,16 +288,15 @@ private:
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
-    // UI state (GUI thread)
     char item_buf_[64] = "PalSphere_Tera";
     int count_input_ = 10;
 
-    // Handoff to game thread (protected by give_mutex_)
     std::mutex give_mutex_;
     std::string give_item_;
     int give_count_ = 0;
     bool give_requested_ = false;
 
+    std::atomic<bool> want_probe_{false};
     std::atomic<bool> want_discover_{false};
 };
 
