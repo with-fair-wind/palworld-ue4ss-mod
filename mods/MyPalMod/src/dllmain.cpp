@@ -3,11 +3,16 @@
 //   Build:   cmake --preset ninja-msvc-x64 && cmake --build --preset ninja-msvc-x64
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
 //
+// Features are triggered via the in-game console (opens with F10 / Tilde via the
+// built-in ConsoleEnablerMod). Load into a save first, open the console, then type:
+//   mypal.discover   - scan all UObjects, log a histogram of Pal/item-related classes
+//   mypal.give       - add kItemCount of item kItemId to the player's inventory
+//
 // Discovered Palworld API (from UHTHeaderDump, Pal module):
 //   Items : UPalPlayerInventoryData::RequestAddItem_ForDebug(FName StaticItemId, int32 Count, bool IsAssignPassive)
 //   Pals  : UPalIndividualCharacterParameter — AddPassiveSkill/RemovePassiveSkill/GetPassiveSkillList,
-//           and SaveParameter (FPalIndividualCharacterSaveParameter) with PassiveSkillList (TArray<FName>),
-//           Talent_HP/Melee/Shot/Defense (uint8 IVs), Rank, Level, Rank_HP/Attack/Defence/CraftSpeed.
+//           SaveParameter (FPalIndividualCharacterSaveParameter) with PassiveSkillList (TArray<FName>),
+//           Talent_HP/Melee/Shot/Defense (uint8 IVs), Rank, Level.
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Mod/CppUserModBase.hpp>
@@ -26,16 +31,14 @@ using namespace RC::Unreal;
 
 namespace
 {
-// ============================================================================
-// TWEAK THESE — item give feature. kItemId is a Palworld StaticItemId (FName): the
-// BARE item name, no prefix. Verified list: github.com/KURAMAAA0/PalModding ItemIDs.txt.
-// Examples: Stone, Wood, Fiber, Coal, CopperOre, PalSphere, PalSphere_Tera,
-// PalSphere_Master, PalSphere_Legend, PalSphere_Exotic, AncientParts2, PalEgg_Normal_01.
-// ============================================================================
+// Item give feature. kItemId is a Palworld StaticItemId (FName): the BARE item name.
+// Verified list: github.com/KURAMAAA0/PalModding ItemIDs.txt. Examples: Stone, Wood,
+// PalSphere, PalSphere_Tera, PalSphere_Master, PalSphere_Legend, Money, AncientParts2.
 constexpr const TCHAR* kItemId = STR("PalSphere_Tera");
 constexpr int32 kItemCount = 10;
+constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
 
-// Broad keywords for the discovery histogram (surfaces real class names).
+// Broad keywords for the discovery histogram (surfaces real class names + live counts).
 constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Pal",
     L"Item",
@@ -55,10 +58,6 @@ constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Box",
     L"Storage",
 };
-
-constexpr const TCHAR* kConsoleCommand = STR("mypal.itemcount");
-constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
-constexpr const TCHAR* kCountPropertyName = STR("StackCount");
 
 // Give items by calling UPalPlayerInventoryData::RequestAddItem_ForDebug via ProcessEvent.
 // Param layout must match the UFunction: { FName StaticItemId; int32 Count; bool IsAssignPassive; }.
@@ -98,8 +97,8 @@ auto give_items() -> void
         STR("give_items: called RequestAddItem_ForDebug('{}', x{})\n"), kItemId, params.Count);
 }
 
-// Discovery: histogram of class names matching broad keywords. Reveals the real
-// Palworld class names for the running version. One-shot, full scan.
+// Discovery: histogram of class names matching broad keywords. Reveals the real Palworld
+// class names + how many LIVE instances exist right now. Full scan (may briefly pause).
 auto discover_objects() -> void
 {
     Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects ===\n"));
@@ -146,11 +145,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.3.1");
+        ModVersion = STR("0.4.0");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.3.1 PalSphere_Tera)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.4 console cmds)\n"));
     }
 
     ~MyPalMod() override = default;
@@ -163,40 +162,28 @@ public:
             Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
         }
 
+        // Console commands: open the in-game console (F10 / Tilde) and type the command.
         Hook::RegisterProcessConsoleExecGlobalPreCallback(
             [](auto& /*info*/, UObject* /*context*/, const TCHAR* cmd, FOutputDevice& /*ar*/, UObject* /*executor*/)
             {
-                if (std::wstring_view(cmd).starts_with(kConsoleCommand))
+                const std::wstring_view c(cmd);
+                if (c.starts_with(STR("mypal.discover")))
                 {
-                    // placeholder: read an int property (fills in real names later)
-                    Output::send<LogLevel::Warning>(STR("mypal.itemcount: (placeholder) inventory='{}'\n"),
-                                                    kInventoryClassName);
+                    discover_objects();
+                }
+                else if (c.starts_with(STR("mypal.give")))
+                {
+                    give_items();
                 }
             },
-            Hook::FCallbackOptions{.OwnerModName = STR("MyPalMod"), .HookName = STR("ItemCountConsoleCmd")});
+            Hook::FCallbackOptions{.OwnerModName = STR("MyPalMod"), .HookName = STR("MyPalCommands")});
     }
 
     auto on_update() -> void override
     {
-        // One-shot discovery ~20s after gameplay starts.
-        if (!discovery_done_ && ++tick_counter_ >= 1200)
-        {
-            discovery_done_ = true;
-            discover_objects();
-        }
-        // Give items a bit later (~25s) — one shot per session. Edit kItemId/kItemCount
-        // at the top of the file, rebuild, redeploy, and load a save to test again.
-        if (!give_done_ && tick_counter_ >= 1500)
-        {
-            give_done_ = true;
-            give_items();
-        }
+        // Features are console-triggered (see on_unreal_init). The old timer triggers
+        // fired at the main menu, before live in-game instances existed.
     }
-
-private:
-    bool discovery_done_{false};
-    bool give_done_{false};
-    int tick_counter_{0};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
