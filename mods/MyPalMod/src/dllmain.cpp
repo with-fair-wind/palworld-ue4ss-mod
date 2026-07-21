@@ -55,9 +55,11 @@ constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"PalCharacterContainer",
 };
 
-// Give items by calling UPalPlayerInventoryData::RequestAddItem_ForDebug via ProcessEvent.
-// Param layout must match the UFunction: { FName StaticItemId; int32 Count; bool IsAssignPassive; }.
-// MUST be called on the game thread.
+// Give items by calling UPalPlayerInventoryData::AddItem_ServerInternal via ProcessEvent.
+// RequestAddItem_ForDebug was a no-op on the live instance (likely disabled in Shipping);
+// AddItem_ServerInternal is the real server-side add (single-player host == server).
+// Param layout: { FName StaticItemId; int32 Count; bool IsAssignPassive; float LogDelay;
+// bool bNotifyLog; } + return EPalItemOperationResult. MUST be called on the game thread.
 auto give_items() -> void
 {
     Output::send<LogLevel::Warning>(STR("=== MyPalMod give_items: start ===\n"));
@@ -74,27 +76,34 @@ auto give_items() -> void
     Output::send<LogLevel::Warning>(STR("give_items: inventory instance = {}\n"), inventory->GetFullName());
 
     UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:RequestAddItem_ForDebug"));
+        nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal"));
     if (fn == nullptr)
     {
-        Output::send<LogLevel::Warning>(STR("give_items: RequestAddItem_ForDebug UFunction not found\n"));
+        Output::send<LogLevel::Warning>(STR("give_items: AddItem_ServerInternal UFunction not found\n"));
         return;
     }
 
-    struct FRequestAddItemParams
+    struct FAddItemServerInternalParams
     {
         FName StaticItemId;
         int32_t Count;
         bool IsAssignPassive;
+        float LogDelay;
+        bool bNotifyLog;
+        int32_t Result; // EPalItemOperationResult (out)
     };
-    FRequestAddItemParams params{};
+    FAddItemServerInternalParams params{};
     params.StaticItemId = FName(kItemId);
     params.Count = kItemCount;
     params.IsAssignPassive = false;
+    params.LogDelay = 0.0f;
+    params.bNotifyLog = false;
 
     inventory->ProcessEvent(fn, &params);
-    Output::send<LogLevel::Warning>(
-        STR("give_items: called RequestAddItem_ForDebug('{}', x{})\n"), kItemId, params.Count);
+    Output::send<LogLevel::Warning>(STR("give_items: called AddItem_ServerInternal('{}', x{}) -> result={}\n"),
+                                    kItemId,
+                                    params.Count,
+                                    params.Result);
 }
 
 // Discovery: histogram of class names matching broad keywords. Reveals real Palworld
@@ -146,11 +155,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.5.0");
+        ModVersion = STR("0.5.2");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.5 GUI tab)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.5.2 AddItem_ServerInternal)\n"));
 
         // Register a tab in the UE4SS GUI window. The render callback runs on the GUI
         // thread, so it only sets atomic flags; the actual work runs on the game thread
