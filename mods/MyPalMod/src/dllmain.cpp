@@ -10,6 +10,7 @@
 //
 //   Give items        - item ID + count -> AddItem_ServerInternal
 //   Refresh inventory - read the main bag, list item x count in the window
+//   Set count         - select an item, change its StackCount (writes the slot directly)
 //   Discover          - scan UObjects, log a histogram of Pal/item classes
 //
 // Discovered Palworld API (UHTHeaderDump, Pal module):
@@ -53,6 +54,7 @@ struct InvEntry
 {
     std::string item_id; // narrow (ASCII) for ImGui
     int count;
+    int32_t slot_index;
 };
 
 // Get the player's main bag container (EPalPlayerInventoryType::Common == 0), or nullptr.
@@ -96,7 +98,40 @@ auto container_num(UObject* container) -> int32_t
     return n.Ret;
 }
 
-// Read the main bag into a list of {item id, count} (skips empty slots). Game thread only.
+// Get slot[i] from a container, or nullptr.
+auto container_get(UObject* container, int32_t index) -> UObject*
+{
+    UFunction* fn =
+        UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Get"));
+    if (fn == nullptr || container == nullptr)
+    {
+        return nullptr;
+    }
+    struct
+    {
+        int32_t Index;
+        UObject* Slot;
+    } gp{};
+    gp.Index = index;
+    container->ProcessEvent(fn, &gp);
+    return gp.Slot;
+}
+
+auto read_slot_stack_count(UObject* slot) -> int32_t
+{
+    if (slot == nullptr)
+    {
+        return 0;
+    }
+    FProperty* sc = slot->GetPropertyByNameInChain(STR("StackCount"));
+    if (auto* ip = CastField<FIntProperty>(sc))
+    {
+        return ip->GetPropertyValueInContainer(slot);
+    }
+    return 0;
+}
+
+// Read the main bag into a list of {item id, count, slot index}. Game thread only.
 auto read_inventory() -> std::vector<InvEntry>
 {
     std::vector<InvEntry> items;
@@ -108,41 +143,17 @@ auto read_inventory() -> std::vector<InvEntry>
         return items;
     }
     const int32_t num = container_num(container);
-    UFunction* fnGet =
-        UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Get"));
-    if (fnGet == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("read_inventory: Get UFunction not found\n"));
-        return items;
-    }
-
     int non_empty = 0;
     for (int32_t i = 0; i < num; ++i)
     {
-        struct
-        {
-            int32_t Index;
-            UObject* Slot;
-        } gp{};
-        gp.Index = i;
-        container->ProcessEvent(fnGet, &gp);
-        UObject* slot = gp.Slot;
+        UObject* slot = container_get(container, i);
         if (slot == nullptr)
         {
             continue;
         }
+        const int32_t count = read_slot_stack_count(slot);
 
-        // StackCount (int32)
-        int32_t count = 0;
-        if (FProperty* sc = slot->GetPropertyByNameInChain(STR("StackCount")))
-        {
-            if (auto* ip = CastField<FIntProperty>(sc))
-            {
-                count = ip->GetPropertyValueInContainer(slot);
-            }
-        }
-
-        // ItemId.StaticId (FName) — StaticId is the first field of FPalItemId (offset 0).
+        // ItemId.StaticId (FName) — first field of FPalItemId (offset 0).
         std::string name;
         if (FProperty* itemIdProp = slot->GetPropertyByNameInChain(STR("ItemId")))
         {
@@ -155,12 +166,39 @@ auto read_inventory() -> std::vector<InvEntry>
 
         if (count > 0 && !name.empty())
         {
-            items.push_back({name, static_cast<int>(count)});
+            items.push_back({name, static_cast<int>(count), i});
             ++non_empty;
         }
     }
     Output::send<LogLevel::Warning>(STR("read_inventory: {} slots, {} non-empty items\n"), num, non_empty);
     return items;
+}
+
+// Set slot[slot_index].StackCount = new_count (direct write). Game thread only.
+auto set_slot_count(int32_t slot_index, int32_t new_count) -> void
+{
+    UObject* container = get_main_container();
+    if (container == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("set_slot_count: container not found\n"));
+        return;
+    }
+    UObject* slot = container_get(container, slot_index);
+    if (slot == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("set_slot_count: slot {} not found\n"), slot_index);
+        return;
+    }
+    FProperty* sc = slot->GetPropertyByNameInChain(STR("StackCount"));
+    auto* ip = CastField<FIntProperty>(sc);
+    if (ip == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("set_slot_count: slot {} has no StackCount property\n"), slot_index);
+        return;
+    }
+    const int32_t old = ip->GetPropertyValueInContainer(slot);
+    ip->SetPropertyValueInContainer(slot, new_count);
+    Output::send<LogLevel::Warning>(STR("set_slot_count: slot {} StackCount {} -> {}\n"), slot_index, old, new_count);
 }
 
 // Add `count` of `item_id` to the player's inventory. Game thread only.
@@ -245,11 +283,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.8.0");
+        ModVersion = STR("0.9.0");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.8.0 inventory list)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.9.0 modify)\n"));
 
         register_tab(STR("MyPalMod"),
                      [](CppUserModBase* mod)
@@ -257,45 +295,61 @@ public:
                          UE4SS_ENABLE_IMGUI()
                          auto* self = static_cast<MyPalMod*>(mod);
                          ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-                         if (ImGui::Begin("MyPalMod v0.8", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                         if (ImGui::Begin("MyPalMod v0.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
                          {
-                             // Give items
+                             // --- Give items ---
                              ImGui::TextUnformatted("Give items");
                              ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
                              ImGui::InputInt("Count", &self->count_input_);
                              self->count_input_ = clamp(self->count_input_, 1, 9999);
                              if (ImGui::Button("Give"))
                              {
-                                 const std::lock_guard lock(self->give_mutex_);
+                                 const std::lock_guard lock(self->req_mutex_);
                                  self->give_item_ = self->item_buf_;
                                  self->give_count_ = self->count_input_;
                                  self->give_requested_ = true;
                              }
                              ImGui::Separator();
-                             // Inventory
+
+                             // --- Inventory (list + modify) ---
                              if (ImGui::Button("Refresh inventory"))
                              {
                                  self->want_read_.store(true);
                              }
                              ImGui::SameLine();
+                             ImGui::TextUnformatted("(click an item to select, then set count)");
                              {
                                  const std::lock_guard lock(self->inv_mutex_);
-                                 ImGui::TextDisabled("(%d items)", static_cast<int>(self->inv_cache_.size()));
-                             }
-                             {
-                                 const std::lock_guard lock(self->inv_mutex_);
-                                 if (self->inv_cache_.empty())
+                                 ImGui::BeginChild("invlist", ImVec2(380, 220), true);
+                                 for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i)
                                  {
-                                     ImGui::TextDisabled("  (empty - click Refresh)");
-                                 }
-                                 else
-                                 {
-                                     ImGui::BeginChild("invlist", ImVec2(360, 240), true);
-                                     for (const auto& e : self->inv_cache_)
+                                     const auto& e = self->inv_cache_[i];
+                                     const std::string label = e.item_id + "  x" + std::to_string(e.count);
+                                     if (ImGui::Selectable(label.c_str(), self->selected_ == i))
                                      {
-                                         ImGui::Text("%-28s x%d", e.item_id.c_str(), e.count);
+                                         self->selected_ = i;
+                                         self->set_count_input_ = e.count;
                                      }
-                                     ImGui::EndChild();
+                                 }
+                                 ImGui::EndChild();
+
+                                 if (self->selected_ >= 0 &&
+                                     self->selected_ < static_cast<int>(self->inv_cache_.size()))
+                                 {
+                                     const auto& e = self->inv_cache_[self->selected_];
+                                     ImGui::Text("Selected: %s (slot %d, x%d)",
+                                                 e.item_id.c_str(),
+                                                 static_cast<int>(e.slot_index),
+                                                 e.count);
+                                     ImGui::InputInt("New count", &self->set_count_input_);
+                                     self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
+                                     if (ImGui::Button("Set count"))
+                                     {
+                                         const std::lock_guard lock(self->req_mutex_);
+                                         self->modify_slot_ = e.slot_index;
+                                         self->modify_count_ = self->set_count_input_;
+                                         self->modify_requested_ = true;
+                                     }
                                  }
                              }
                              ImGui::Separator();
@@ -303,9 +357,6 @@ public:
                              {
                                  self->want_discover_.store(true);
                              }
-                             ImGui::TextWrapped("Item IDs: PalSphere, PalSphere_Tera, Stone, Wood, Money, ... "
-                                                "(github.com/KURAMAAA0/PalModding ItemIDs.txt). "
-                                                "Results -> UE4SS Console tab.");
                          }
                          ImGui::End();
                      });
@@ -324,12 +375,15 @@ public:
 
     auto on_update() -> void override
     {
-        // Give (params via mutex)
+        // Pull requests (give / modify) under the mutex, then execute outside it.
         std::string item;
         int count = 0;
         bool do_give = false;
+        int32_t mod_slot = 0;
+        int32_t mod_count = 0;
+        bool do_mod = false;
         {
-            const std::lock_guard lock(give_mutex_);
+            const std::lock_guard lock(req_mutex_);
             if (give_requested_)
             {
                 give_requested_ = false;
@@ -337,16 +391,33 @@ public:
                 count = give_count_;
                 do_give = true;
             }
+            if (modify_requested_)
+            {
+                modify_requested_ = false;
+                mod_slot = modify_slot_;
+                mod_count = modify_count_;
+                do_mod = true;
+            }
         }
         if (do_give)
         {
             give_items(item, static_cast<int32>(count));
+            want_read_.store(true); // refresh the list after giving
         }
-        // Read inventory -> cache (under mutex, for the UI to render)
+        if (do_mod)
+        {
+            set_slot_count(mod_slot, mod_count);
+            want_read_.store(true); // refresh the list after modifying
+        }
         if (want_read_.exchange(false))
         {
             auto fresh = read_inventory();
             const std::lock_guard lock(inv_mutex_);
+            // Invalidate selection if it's now out of range.
+            if (selected_ >= static_cast<int>(fresh.size()))
+            {
+                selected_ = -1;
+            }
             inv_cache_ = std::move(fresh);
         }
         if (want_discover_.exchange(false))
@@ -361,14 +432,22 @@ private:
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
+    // UI state (GUI thread)
     char item_buf_[64] = "PalSphere_Tera";
     int count_input_ = 10;
+    int set_count_input_ = 0;
+    int selected_ = -1;
 
-    std::mutex give_mutex_;
+    // Request handoff (GUI -> game thread)
+    std::mutex req_mutex_;
     std::string give_item_;
     int give_count_ = 0;
     bool give_requested_ = false;
+    int32_t modify_slot_ = 0;
+    int32_t modify_count_ = 0;
+    bool modify_requested_ = false;
 
+    // Inventory cache (game thread writes, GUI thread reads)
     std::mutex inv_mutex_;
     std::vector<InvEntry> inv_cache_;
 
