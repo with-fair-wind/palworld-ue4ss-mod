@@ -3,26 +3,25 @@
 //   Build:   cmake --preset ninja-msvc-x64 && cmake --build --preset ninja-msvc-x64
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
 //
-// UI is a floating ImGui window inside the UE4SS GUI (select the "MyPalMod" tab and a
-// movable window pops up). NOT the F10 in-game console (broken by Palworld's ambiguous
-// ConsoleManager signature). Button clicks stage a request (mutex/atomic); the actual
-// game-function calls run on the game thread in on_update (UE reflection isn't thread-safe).
+// UI is a floating ImGui window inside the UE4SS GUI (select the "MyPalMod" tab -> a
+// movable window pops up). NOT the F10 in-game console (broken on Palworld). Button
+// clicks stage a request (mutex/atomic); actual game calls run on the game thread in
+// on_update (UE reflection isn't thread-safe).
 //
-//   Give items       - type an item ID + count, click Give -> AddItem_ServerInternal
-//   Discover         - scan UObjects, log a histogram of Pal/item classes
-//   Probe inventory  - verify we can reach the player's item container (logs container + slot count)
+//   Give items        - item ID + count -> AddItem_ServerInternal
+//   Refresh inventory - read the main bag, list item x count in the window
+//   Discover          - scan UObjects, log a histogram of Pal/item classes
 //
-// Discovered Palworld API (from UHTHeaderDump, Pal module):
-//   Items : UPalPlayerInventoryData::AddItem_ServerInternal(FName,int32,bool,float,bool)->EPalItemOperationResult
-//           UPalPlayerInventoryData::TryGetContainerFromInventoryType(EPalPlayerInventoryType, UPalItemContainer*&)
-//           UPalItemContainer::Num() / Get(i) -> UPalItemSlot
-//           UPalItemSlot: StackCount (int32), ItemId.StaticId (FName)
+// Discovered Palworld API (UHTHeaderDump, Pal module):
+//   UPalPlayerInventoryData::AddItem_ServerInternal(FName,int32,bool,float,bool)->enum
+//   UPalPlayerInventoryData::TryGetContainerFromInventoryType(uint8 type, UPalItemContainer*&)
+//   UPalItemContainer::Num() / Get(i) -> UPalItemSlot{ StackCount:int32, ItemId.StaticId:FName }
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <UE4SSProgram.hpp>                          // UE4SS_ENABLE_IMGUI
-#include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FProperty, CastField
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp> // FProperty, FIntProperty, CastField
 #include <Unreal/NameTypes.hpp>                      // FName
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -33,6 +32,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <vector>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -49,30 +49,138 @@ constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"PalCharacterContainer",
 };
 
-// Add `count` of `item_id` to the player's inventory via AddItem_ServerInternal. Game thread only.
+struct InvEntry
+{
+    std::string item_id; // narrow (ASCII) for ImGui
+    int count;
+};
+
+// Get the player's main bag container (EPalPlayerInventoryType::Common == 0), or nullptr.
+auto get_main_container() -> UObject*
+{
+    UObject* inv = UObjectGlobals::FindFirstOf(kInventoryClassName);
+    if (inv == nullptr)
+    {
+        return nullptr;
+    }
+    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:TryGetContainerFromInventoryType"));
+    if (fn == nullptr)
+    {
+        return nullptr;
+    }
+    struct
+    {
+        uint8_t Type;
+        UObject* Out;
+        bool Ret;
+    } p{};
+    p.Type = 0; // EPalPlayerInventoryType::Common
+    inv->ProcessEvent(fn, &p);
+    return p.Out;
+}
+
+auto container_num(UObject* container) -> int32_t
+{
+    UFunction* fn =
+        UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Num"));
+    if (fn == nullptr || container == nullptr)
+    {
+        return 0;
+    }
+    struct
+    {
+        int32_t Ret;
+    } n{};
+    container->ProcessEvent(fn, &n);
+    return n.Ret;
+}
+
+// Read the main bag into a list of {item id, count} (skips empty slots). Game thread only.
+auto read_inventory() -> std::vector<InvEntry>
+{
+    std::vector<InvEntry> items;
+
+    UObject* container = get_main_container();
+    if (container == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("read_inventory: container not found (not in-game?)\n"));
+        return items;
+    }
+    const int32_t num = container_num(container);
+    UFunction* fnGet =
+        UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Get"));
+    if (fnGet == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("read_inventory: Get UFunction not found\n"));
+        return items;
+    }
+
+    int non_empty = 0;
+    for (int32_t i = 0; i < num; ++i)
+    {
+        struct
+        {
+            int32_t Index;
+            UObject* Slot;
+        } gp{};
+        gp.Index = i;
+        container->ProcessEvent(fnGet, &gp);
+        UObject* slot = gp.Slot;
+        if (slot == nullptr)
+        {
+            continue;
+        }
+
+        // StackCount (int32)
+        int32_t count = 0;
+        if (FProperty* sc = slot->GetPropertyByNameInChain(STR("StackCount")))
+        {
+            if (auto* ip = CastField<FIntProperty>(sc))
+            {
+                count = ip->GetPropertyValueInContainer(slot);
+            }
+        }
+
+        // ItemId.StaticId (FName) — StaticId is the first field of FPalItemId (offset 0).
+        std::string name;
+        if (FProperty* itemIdProp = slot->GetPropertyByNameInChain(STR("ItemId")))
+        {
+            if (FName* sid = itemIdProp->ContainerPtrToValuePtr<FName>(slot))
+            {
+                const std::wstring w = sid->ToString();
+                name = std::string(w.begin(), w.end());
+            }
+        }
+
+        if (count > 0 && !name.empty())
+        {
+            items.push_back({name, static_cast<int>(count)});
+            ++non_empty;
+        }
+    }
+    Output::send<LogLevel::Warning>(STR("read_inventory: {} slots, {} non-empty items\n"), num, non_empty);
+    return items;
+}
+
+// Add `count` of `item_id` to the player's inventory. Game thread only.
 auto give_items(const std::string& item_id, int32 count) -> void
 {
-    Output::send<LogLevel::Warning>(STR("=== MyPalMod give_items: start ===\n"));
-
     UObject* inventory = UObjectGlobals::FindFirstOf(kInventoryClassName);
     if (inventory == nullptr)
     {
-        Output::send<LogLevel::Warning>(STR("give_items: '{}' instance not found (not in-game?)\n"),
-                                        kInventoryClassName);
+        Output::send<LogLevel::Warning>(STR("give_items: inventory not found (not in-game?)\n"));
         return;
     }
-
     UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:AddItem_ServerInternal"));
     if (fn == nullptr)
     {
-        Output::send<LogLevel::Warning>(STR("give_items: AddItem_ServerInternal UFunction not found\n"));
+        Output::send<LogLevel::Warning>(STR("give_items: AddItem_ServerInternal not found\n"));
         return;
     }
-
     const std::wstring wide(item_id.begin(), item_id.end());
-
-    struct FAddItemServerInternalParams
+    struct
     {
         FName StaticItemId;
         int32_t Count;
@@ -80,74 +188,15 @@ auto give_items(const std::string& item_id, int32 count) -> void
         float LogDelay;
         bool bNotifyLog;
         int32_t Result;
-    };
-    FAddItemServerInternalParams params{};
+    } params{};
     params.StaticItemId = FName(wide.c_str());
     params.Count = count;
     params.IsAssignPassive = false;
     params.LogDelay = 0.0F;
     params.bNotifyLog = false;
-
     inventory->ProcessEvent(fn, &params);
     Output::send<LogLevel::Warning>(
         STR("give_items: AddItem_ServerInternal('{}', x{}) -> result={}\n"), wide, params.Count, params.Result);
-}
-
-// Verify we can reach the player's main inventory container and read its slot count.
-// Step 1 of the inventory-editor feature. Game thread only.
-auto probe_inventory() -> void
-{
-    Output::send<LogLevel::Warning>(STR("=== MyPalMod probe_inventory ===\n"));
-
-    UObject* inventory = UObjectGlobals::FindFirstOf(kInventoryClassName);
-    if (inventory == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("probe: inventory not found (not in-game?)\n"));
-        return;
-    }
-
-    // bool TryGetContainerFromInventoryType(EPalPlayerInventoryType inventoryType, UPalItemContainer*& OutContainer)
-    // EPalPlayerInventoryType is uint8; Common == 0 (the main bag). Layout: {uint8@0, ptr@8, bool ret@16}.
-    UFunction* fnGetContainer = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:TryGetContainerFromInventoryType"));
-    if (fnGetContainer == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("probe: TryGetContainerFromInventoryType UFunction not found\n"));
-        return;
-    }
-    struct FGetContainerParams
-    {
-        uint8_t InventoryType;
-        UObject* OutContainer;
-        bool Result;
-    };
-    FGetContainerParams gp{};
-    gp.InventoryType = 0; // EPalPlayerInventoryType::Common
-    gp.OutContainer = nullptr;
-    inventory->ProcessEvent(fnGetContainer, &gp);
-
-    if (gp.OutContainer == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("probe: container is null (ret={})\n"), gp.Result ? 1 : 0);
-        return;
-    }
-    Output::send<LogLevel::Warning>(STR("probe: container = {}\n"), gp.OutContainer->GetFullName());
-
-    // int32 UPalItemContainer::Num()
-    UFunction* fnNum =
-        UObjectGlobals::StaticFindObject<UFunction*>(nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Num"));
-    if (fnNum == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("probe: Num UFunction not found\n"));
-        return;
-    }
-    struct FNumParams
-    {
-        int32_t Result;
-    };
-    FNumParams np{};
-    gp.OutContainer->ProcessEvent(fnNum, &np);
-    Output::send<LogLevel::Warning>(STR("probe: slot count (Num) = {}\n"), np.Result);
 }
 
 auto discover_objects() -> void
@@ -196,22 +245,21 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.7.0");
+        ModVersion = STR("0.8.0");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.7.0 floating window)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.8.0 inventory list)\n"));
 
-        // Floating ImGui window inside the UE4SS GUI. Select the "MyPalMod" tab and the
-        // window pops up (movable). Render runs on the GUI thread -> only stages requests.
         register_tab(STR("MyPalMod"),
                      [](CppUserModBase* mod)
                      {
                          UE4SS_ENABLE_IMGUI()
                          auto* self = static_cast<MyPalMod*>(mod);
                          ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-                         if (ImGui::Begin("MyPalMod v0.7", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                         if (ImGui::Begin("MyPalMod v0.8", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
                          {
+                             // Give items
                              ImGui::TextUnformatted("Give items");
                              ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
                              ImGui::InputInt("Count", &self->count_input_);
@@ -224,19 +272,40 @@ public:
                                  self->give_requested_ = true;
                              }
                              ImGui::Separator();
-                             if (ImGui::Button("Probe inventory"))
+                             // Inventory
+                             if (ImGui::Button("Refresh inventory"))
                              {
-                                 self->want_probe_.store(true);
+                                 self->want_read_.store(true);
                              }
                              ImGui::SameLine();
+                             {
+                                 const std::lock_guard lock(self->inv_mutex_);
+                                 ImGui::TextDisabled("(%d items)", static_cast<int>(self->inv_cache_.size()));
+                             }
+                             {
+                                 const std::lock_guard lock(self->inv_mutex_);
+                                 if (self->inv_cache_.empty())
+                                 {
+                                     ImGui::TextDisabled("  (empty - click Refresh)");
+                                 }
+                                 else
+                                 {
+                                     ImGui::BeginChild("invlist", ImVec2(360, 240), true);
+                                     for (const auto& e : self->inv_cache_)
+                                     {
+                                         ImGui::Text("%-28s x%d", e.item_id.c_str(), e.count);
+                                     }
+                                     ImGui::EndChild();
+                                 }
+                             }
+                             ImGui::Separator();
                              if (ImGui::Button("Discover"))
                              {
                                  self->want_discover_.store(true);
                              }
-                             ImGui::Separator();
-                             ImGui::TextWrapped("Item IDs (bare): PalSphere, PalSphere_Tera, Stone, Wood, "
-                                                "Money, ... Full list: github.com/KURAMAAA0/PalModding "
-                                                "ItemIDs.txt. Results -> UE4SS Console tab.");
+                             ImGui::TextWrapped("Item IDs: PalSphere, PalSphere_Tera, Stone, Wood, Money, ... "
+                                                "(github.com/KURAMAAA0/PalModding ItemIDs.txt). "
+                                                "Results -> UE4SS Console tab.");
                          }
                          ImGui::End();
                      });
@@ -255,6 +324,7 @@ public:
 
     auto on_update() -> void override
     {
+        // Give (params via mutex)
         std::string item;
         int count = 0;
         bool do_give = false;
@@ -272,9 +342,12 @@ public:
         {
             give_items(item, static_cast<int32>(count));
         }
-        if (want_probe_.exchange(false))
+        // Read inventory -> cache (under mutex, for the UI to render)
+        if (want_read_.exchange(false))
         {
-            probe_inventory();
+            auto fresh = read_inventory();
+            const std::lock_guard lock(inv_mutex_);
+            inv_cache_ = std::move(fresh);
         }
         if (want_discover_.exchange(false))
         {
@@ -296,7 +369,10 @@ private:
     int give_count_ = 0;
     bool give_requested_ = false;
 
-    std::atomic<bool> want_probe_{false};
+    std::mutex inv_mutex_;
+    std::vector<InvEntry> inv_cache_;
+
+    std::atomic<bool> want_read_{false};
     std::atomic<bool> want_discover_{false};
 };
 
