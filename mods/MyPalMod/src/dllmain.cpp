@@ -45,24 +45,14 @@ constexpr const TCHAR* kItemId = STR("PalSphere_Tera");
 constexpr int32 kItemCount = 10;
 constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
 
+// Narrow filter — only the classes we actually need to see, so the output is short and
+// not truncated before the relevant "P" section. Surfaces live instance counts.
 constexpr std::wstring_view kDiscoveryKeywords[] = {
-    L"Pal",
-    L"Item",
-    L"Invent",
-    L"Character",
-    L"Player",
-    L"Container",
-    L"Slot",
-    L"Skill",
-    L"Passive",
-    L"Talent",
-    L"Rank",
-    L"Stat",
-    L"Status",
-    L"Otter",
-    L"Wallet",
-    L"Box",
-    L"Storage",
+    L"Inventory",
+    L"IndividualCharacter",
+    L"ItemContainer",
+    L"Otomo",
+    L"PalCharacterContainer",
 };
 
 // Give items by calling UPalPlayerInventoryData::RequestAddItem_ForDebug via ProcessEvent.
@@ -79,6 +69,9 @@ auto give_items() -> void
                                         kInventoryClassName);
         return;
     }
+    // Log the full name so we can tell whether FindFirstOf returned a real instance or
+    // just the CDO (class default object) — a CDO looks like "Default__PalPlayerInventoryData".
+    Output::send<LogLevel::Warning>(STR("give_items: inventory instance = {}\n"), inventory->GetFullName());
 
     UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalPlayerInventoryData:RequestAddItem_ForDebug"));
