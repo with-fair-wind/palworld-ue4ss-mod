@@ -330,6 +330,44 @@ auto read_pal_passives(UObject* pal) -> void
     }
 }
 
+// Scan all assignable passive skills via GetPalAssignablePassiveIDs. Game thread only.
+auto scan_all_passives() -> std::vector<std::string>
+{
+    std::vector<std::string> ids;
+    UObject* mgr = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
+    if (mgr == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("scan_all_passives: PalPassiveSkillManager not found\n"));
+        return ids;
+    }
+    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalPassiveSkillManager:GetPalAssignablePassiveIDs"));
+    if (fn == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("scan_all_passives: GetPalAssignablePassiveIDs not found\n"));
+        return ids;
+    }
+    // void GetPalAssignablePassiveIDs(TArray<FName>& List) — out param at offset 0.
+    struct
+    {
+        FName* Data;
+        int32_t Num;
+        int32_t Max;
+    } params{};
+    mgr->ProcessEvent(fn, &params);
+    for (int32_t i = 0; i < params.Num && params.Data != nullptr; ++i)
+    {
+        const std::wstring w = params.Data[i].ToString();
+        if (!w.empty())
+        {
+            ids.emplace_back(w.begin(), w.end());
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    Output::send<LogLevel::Warning>(STR("scan_all_passives: found {} passives\n"), static_cast<int32>(ids.size()));
+    return ids;
+}
+
 // Scan all UObjects for UPalStaticItemDataBase instances -> collect every item ID that
 // exists in the current game version. Replaces the hardcoded item_database.h list.
 // One-time full scan (~1s for 270k objects). Game thread only.
@@ -651,6 +689,45 @@ public:
                         }
                     }
 
+                    // --- Passive skill browser ---
+                    if (ImGui::Button("Scan Passives"))
+                    {
+                        self->want_scan_passives_.store(true);
+                    }
+                    ImGui::SameLine();
+                    ImGui::InputText("##psrch", self->passive_search_buf_, sizeof(self->passive_search_buf_));
+                    ImGui::BeginChild("passivelist", ImVec2(380, 120), true);
+                    {
+                        std::string filter(self->passive_search_buf_);
+                        for (auto& c : filter)
+                        {
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        }
+                        auto tryPassive = [&](const char* raw)
+                        {
+                            std::string lower(raw);
+                            for (auto& c : lower)
+                            {
+                                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                            }
+                            if (!filter.empty() && lower.find(filter) == std::string::npos)
+                            {
+                                return;
+                            }
+                            if (ImGui::Selectable(raw))
+                            {
+                                std::strncpy(self->passive_buf_, raw, sizeof(self->passive_buf_) - 1);
+                                self->passive_buf_[sizeof(self->passive_buf_) - 1] = '\0';
+                            }
+                        };
+                        const std::lock_guard lock(self->inv_mutex_);
+                        for (const auto& p : self->passive_db_cache_)
+                        {
+                            tryPassive(p.c_str());
+                        }
+                    }
+                    ImGui::EndChild();
+
                     ImGui::Separator();
                     if (ImGui::Button("Discover"))
                     {
@@ -782,6 +859,12 @@ public:
                 read_pal_passives(readPal);
             }
         }
+        if (want_scan_passives_.exchange(false))
+        {
+            auto fresh = scan_all_passives();
+            const std::lock_guard lock(inv_mutex_);
+            passive_db_cache_ = std::move(fresh);
+        }
     }
 
 private:
@@ -825,6 +908,11 @@ private:
     bool passive_add_{false};
     bool passive_requested_{false};
     bool passive_read_requested_{false};
+
+    // Passive skill browser (like item browser)
+    char passive_search_buf_[64]{};
+    std::vector<std::string> passive_db_cache_; // under inv_mutex_
+    std::atomic<bool> want_scan_passives_{false};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
