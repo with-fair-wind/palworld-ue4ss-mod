@@ -30,6 +30,7 @@
 
 #include "item_database.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -205,6 +206,53 @@ auto set_slot_count(int32_t slot_index, int32_t new_count) -> void
     Output::send<LogLevel::Warning>(STR("set_slot_count: slot {} StackCount {} -> {}\n"), slot_index, old, new_count);
 }
 
+// Scan all UObjects for UPalStaticItemDataBase instances -> collect every item ID that
+// exists in the current game version. Replaces the hardcoded item_database.h list.
+// One-time full scan (~1s for 270k objects). Game thread only.
+auto scan_all_items() -> std::vector<std::string>
+{
+    std::vector<std::string> ids;
+    UObjectGlobals::ForEachUObject(
+        [&](UObject* obj, int32_t, int32_t) -> LoopAction
+        {
+            UClass* cls = obj->GetClassPrivate();
+            if (cls == nullptr)
+            {
+                return LoopAction::Continue;
+            }
+            const std::wstring name = cls->GetName();
+            // Must start with "PalStaticItemData" but exclude container/manager types.
+            if (name.find(L"PalStaticItemData") != 0)
+            {
+                return LoopAction::Continue;
+            }
+            if (name.find(L"Table") != std::wstring::npos || name.find(L"Asset") != std::wstring::npos ||
+                name.find(L"Manager") != std::wstring::npos || name.find(L"Struct") != std::wstring::npos ||
+                name.find(L"AndNum") != std::wstring::npos || name.find(L"RowName") != std::wstring::npos)
+            {
+                return LoopAction::Continue;
+            }
+            // Must have an ID property (confirms it's an item-data instance, not a helper).
+            FProperty* idProp = obj->GetPropertyByNameInChain(STR("ID"));
+            if (idProp == nullptr)
+            {
+                return LoopAction::Continue;
+            }
+            if (FName* id = idProp->ContainerPtrToValuePtr<FName>(obj))
+            {
+                const std::wstring w = id->ToString();
+                if (!w.empty())
+                {
+                    ids.emplace_back(w.begin(), w.end());
+                }
+            }
+            return LoopAction::Continue;
+        });
+    std::sort(ids.begin(), ids.end());
+    Output::send<LogLevel::Warning>(STR("scan_all_items: found {} item definitions\n"), static_cast<int32>(ids.size()));
+    return ids;
+}
+
 // Add `count` of `item_id` to the player's inventory. Game thread only.
 auto give_items(const std::string& item_id, int32 count) -> void
 {
@@ -293,106 +341,133 @@ public:
 
         Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.9.0 modify)\n"));
 
-        register_tab(
-            STR("MyPalMod"),
-            [](CppUserModBase* mod)
-            {
-                UE4SS_ENABLE_IMGUI()
-                auto* self = static_cast<MyPalMod*>(mod);
-                ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-                if (ImGui::Begin("MyPalMod v0.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-                {
-                    // --- Give items ---
-                    ImGui::TextUnformatted("Give items");
-                    ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
-                    ImGui::InputInt("Count", &self->count_input_);
-                    self->count_input_ = clamp(self->count_input_, 1, 9999);
-                    if (ImGui::Button("Give"))
-                    {
-                        const std::lock_guard lock(self->req_mutex_);
-                        self->give_item_ = self->item_buf_;
-                        self->give_count_ = self->count_input_;
-                        self->give_requested_ = true;
-                    }
-                    ImGui::Separator();
+        register_tab(STR("MyPalMod"),
+                     [](CppUserModBase* mod)
+                     {
+                         UE4SS_ENABLE_IMGUI()
+                         auto* self = static_cast<MyPalMod*>(mod);
+                         ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
+                         if (ImGui::Begin("MyPalMod v0.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                         {
+                             // --- Give items ---
+                             ImGui::TextUnformatted("Give items");
+                             ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
+                             ImGui::InputInt("Count", &self->count_input_);
+                             self->count_input_ = clamp(self->count_input_, 1, 9999);
+                             if (ImGui::Button("Give"))
+                             {
+                                 const std::lock_guard lock(self->req_mutex_);
+                                 self->give_item_ = self->item_buf_;
+                                 self->give_count_ = self->count_input_;
+                                 self->give_requested_ = true;
+                             }
+                             ImGui::Separator();
 
-                    // --- Item browser ---
-                    ImGui::TextUnformatted("Item browser (click to fill Item ID)");
-                    ImGui::InputText("##search", self->search_buf_, sizeof(self->search_buf_));
-                    ImGui::BeginChild("browser", ImVec2(380, 160), true);
-                    {
-                        std::string filter(self->search_buf_);
-                        for (auto& c : filter)
-                        {
-                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        }
-                        for (int bi = 0; bi < kBrowseItemCount; ++bi)
-                        {
-                            std::string itemLower(kBrowseItems[bi]);
-                            for (auto& c : itemLower)
-                            {
-                                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            }
-                            if (filter.empty() || itemLower.find(filter) != std::string::npos)
-                            {
-                                if (ImGui::Selectable(kBrowseItems[bi]))
-                                {
-                                    std::strncpy(self->item_buf_, kBrowseItems[bi], sizeof(self->item_buf_) - 1);
-                                    self->item_buf_[sizeof(self->item_buf_) - 1] = '\0';
-                                }
-                            }
-                        }
-                    }
-                    ImGui::EndChild();
+                             // --- Item browser (dynamic scan or curated fallback) ---
+                             if (ImGui::Button("Scan game items"))
+                             {
+                                 self->want_scan_items_.store(true);
+                             }
+                             ImGui::SameLine();
+                             ImGui::InputText("##search", self->search_buf_, sizeof(self->search_buf_));
+                             {
+                                 const std::lock_guard lock(self->inv_mutex_);
+                                 ImGui::TextDisabled("(%d items)",
+                                                     self->item_db_cache_.empty()
+                                                         ? kBrowseItemCount
+                                                         : static_cast<int>(self->item_db_cache_.size()));
+                             }
+                             ImGui::BeginChild("browser", ImVec2(380, 160), true);
+                             {
+                                 std::string filter(self->search_buf_);
+                                 for (auto& c : filter)
+                                 {
+                                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                                 }
+                                 auto tryItem = [&](const char* raw)
+                                 {
+                                     std::string lower(raw);
+                                     for (auto& c : lower)
+                                     {
+                                         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                                     }
+                                     if (!filter.empty() && lower.find(filter) == std::string::npos)
+                                     {
+                                         return;
+                                     }
+                                     if (ImGui::Selectable(raw))
+                                     {
+                                         std::strncpy(self->item_buf_, raw, sizeof(self->item_buf_) - 1);
+                                         self->item_buf_[sizeof(self->item_buf_) - 1] = '\0';
+                                     }
+                                 };
+                                 const std::lock_guard lock(self->inv_mutex_);
+                                 if (!self->item_db_cache_.empty())
+                                 {
+                                     for (const auto& item : self->item_db_cache_)
+                                     {
+                                         tryItem(item.c_str());
+                                     }
+                                 }
+                                 else
+                                 {
+                                     for (int bi = 0; bi < kBrowseItemCount; ++bi)
+                                     {
+                                         tryItem(kBrowseItems[bi]);
+                                     }
+                                 }
+                             }
+                             ImGui::EndChild();
 
-                    // --- Inventory (list + modify) ---
-                    if (ImGui::Button("Refresh inventory"))
-                    {
-                        self->want_read_.store(true);
-                    }
-                    ImGui::SameLine();
-                    ImGui::TextUnformatted("(click an item to select, then set count)");
-                    {
-                        const std::lock_guard lock(self->inv_mutex_);
-                        ImGui::BeginChild("invlist", ImVec2(380, 220), true);
-                        for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i)
-                        {
-                            const auto& e = self->inv_cache_[i];
-                            const std::string label = e.item_id + "  x" + std::to_string(e.count);
-                            if (ImGui::Selectable(label.c_str(), self->selected_ == i))
-                            {
-                                self->selected_ = i;
-                                self->set_count_input_ = e.count;
-                            }
-                        }
-                        ImGui::EndChild();
+                             // --- Inventory (list + modify) ---
+                             if (ImGui::Button("Refresh inventory"))
+                             {
+                                 self->want_read_.store(true);
+                             }
+                             ImGui::SameLine();
+                             ImGui::TextUnformatted("(click an item to select, then set count)");
+                             {
+                                 const std::lock_guard lock(self->inv_mutex_);
+                                 ImGui::BeginChild("invlist", ImVec2(380, 220), true);
+                                 for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i)
+                                 {
+                                     const auto& e = self->inv_cache_[i];
+                                     const std::string label = e.item_id + "  x" + std::to_string(e.count);
+                                     if (ImGui::Selectable(label.c_str(), self->selected_ == i))
+                                     {
+                                         self->selected_ = i;
+                                         self->set_count_input_ = e.count;
+                                     }
+                                 }
+                                 ImGui::EndChild();
 
-                        if (self->selected_ >= 0 && self->selected_ < static_cast<int>(self->inv_cache_.size()))
-                        {
-                            const auto& e = self->inv_cache_[self->selected_];
-                            ImGui::Text("Selected: %s (slot %d, x%d)",
-                                        e.item_id.c_str(),
-                                        static_cast<int>(e.slot_index),
-                                        e.count);
-                            ImGui::InputInt("New count", &self->set_count_input_);
-                            self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
-                            if (ImGui::Button("Set count"))
-                            {
-                                const std::lock_guard lock(self->req_mutex_);
-                                self->modify_slot_ = e.slot_index;
-                                self->modify_count_ = self->set_count_input_;
-                                self->modify_requested_ = true;
-                            }
-                        }
-                    }
-                    ImGui::Separator();
-                    if (ImGui::Button("Discover"))
-                    {
-                        self->want_discover_.store(true);
-                    }
-                }
-                ImGui::End();
-            });
+                                 if (self->selected_ >= 0 &&
+                                     self->selected_ < static_cast<int>(self->inv_cache_.size()))
+                                 {
+                                     const auto& e = self->inv_cache_[self->selected_];
+                                     ImGui::Text("Selected: %s (slot %d, x%d)",
+                                                 e.item_id.c_str(),
+                                                 static_cast<int>(e.slot_index),
+                                                 e.count);
+                                     ImGui::InputInt("New count", &self->set_count_input_);
+                                     self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
+                                     if (ImGui::Button("Set count"))
+                                     {
+                                         const std::lock_guard lock(self->req_mutex_);
+                                         self->modify_slot_ = e.slot_index;
+                                         self->modify_count_ = self->set_count_input_;
+                                         self->modify_requested_ = true;
+                                     }
+                                 }
+                             }
+                             ImGui::Separator();
+                             if (ImGui::Button("Discover"))
+                             {
+                                 self->want_discover_.store(true);
+                             }
+                         }
+                         ImGui::End();
+                     });
     }
 
     ~MyPalMod() override = default;
@@ -457,6 +532,12 @@ public:
         {
             discover_objects();
         }
+        if (want_scan_items_.exchange(false))
+        {
+            auto fresh = scan_all_items();
+            const std::lock_guard lock(inv_mutex_);
+            item_db_cache_ = std::move(fresh);
+        }
     }
 
 private:
@@ -487,6 +568,8 @@ private:
 
     std::atomic<bool> want_read_{false};
     std::atomic<bool> want_discover_{false};
+    std::atomic<bool> want_scan_items_{false};
+    std::vector<std::string> item_db_cache_; // populated by scan_all_items, under inv_mutex_
 };
 
 #define MYPALMOD_API __declspec(dllexport)
