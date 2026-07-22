@@ -689,44 +689,9 @@ public:
                         }
                     }
 
-                    // --- Passive skill browser ---
-                    if (ImGui::Button("Scan Passives"))
-                    {
-                        self->want_scan_passives_.store(true);
-                    }
-                    ImGui::SameLine();
-                    ImGui::InputText("##psrch", self->passive_search_buf_, sizeof(self->passive_search_buf_));
-                    ImGui::BeginChild("passivelist", ImVec2(380, 120), true);
-                    {
-                        std::string filter(self->passive_search_buf_);
-                        for (auto& c : filter)
-                        {
-                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                        }
-                        auto tryPassive = [&](const char* raw)
-                        {
-                            std::string lower(raw);
-                            for (auto& c : lower)
-                            {
-                                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            }
-                            if (!filter.empty() && lower.find(filter) == std::string::npos)
-                            {
-                                return;
-                            }
-                            if (ImGui::Selectable(raw))
-                            {
-                                std::strncpy(self->passive_buf_, raw, sizeof(self->passive_buf_) - 1);
-                                self->passive_buf_[sizeof(self->passive_buf_) - 1] = '\0';
-                            }
-                        };
-                        const std::lock_guard lock(self->inv_mutex_);
-                        for (const auto& p : self->passive_db_cache_)
-                        {
-                            tryPassive(p.c_str());
-                        }
-                    }
-                    ImGui::EndChild();
+                    // --- Passive skill browser (disabled: GetPalAssignablePassiveIDs causes
+                    // memory corruption via improperly constructed TArray out-param) ---
+                    // Use "Read Passives" on individual Pals to discover valid SkillIds.
 
                     ImGui::Separator();
                     if (ImGui::Button("Discover"))
@@ -858,12 +823,6 @@ public:
             {
                 read_pal_passives(readPal);
             }
-        }
-        if (want_scan_passives_.exchange(false))
-        {
-            auto fresh = scan_all_passives();
-            const std::lock_guard lock(inv_mutex_);
-            passive_db_cache_ = std::move(fresh);
         }
     }
 
