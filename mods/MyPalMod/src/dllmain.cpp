@@ -299,6 +299,37 @@ auto remove_passive(UObject* pal, const std::string& skill_id) -> void
     Output::send<LogLevel::Warning>(STR("remove_passive: RemovePassiveSkill('{}')\n"), wide);
 }
 
+// Read a Pal's current passive skills via GetPassiveSkillList() and log them.
+// Shows the real FName format so the user knows what to type for Add/Remove. Game thread only.
+auto read_pal_passives(UObject* pal) -> void
+{
+    if (pal == nullptr)
+    {
+        return;
+    }
+    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetPassiveSkillList"));
+    if (fn == nullptr)
+    {
+        Output::send<LogLevel::Warning>(STR("read_pal_passives: GetPassiveSkillList not found\n"));
+        return;
+    }
+    // TArray<FName> return layout: {FName* Data; int32 Num; int32 Max}
+    struct
+    {
+        FName* Data;
+        int32_t Num;
+        int32_t Max;
+    } ret{};
+    pal->ProcessEvent(fn, &ret);
+    Output::send<LogLevel::Warning>(STR("read_pal_passives: {} passive(s):\n"), ret.Num);
+    for (int32_t i = 0; i < ret.Num && i < 10 && ret.Data != nullptr; ++i)
+    {
+        const std::wstring w = ret.Data[i].ToString();
+        Output::send<LogLevel::Warning>(STR("  [{}] {}\n"), i, w);
+    }
+}
+
 // Scan all UObjects for UPalStaticItemDataBase instances -> collect every item ID that
 // exists in the current game version. Replaces the hardcoded item_database.h list.
 // One-time full scan (~1s for 270k objects). Game thread only.
@@ -608,6 +639,13 @@ public:
                                 self->passive_add_ = false;
                                 self->passive_requested_ = true;
                             }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Read Passives"))
+                            {
+                                const std::lock_guard lock(self->req_mutex_);
+                                self->passive_pal_ = selPal;
+                                self->passive_read_requested_ = true;
+                            }
                         }
                     }
 
@@ -726,6 +764,22 @@ public:
                 }
             }
         }
+        if (passive_read_requested_)
+        {
+            UObject* readPal = nullptr;
+            {
+                const std::lock_guard lock(req_mutex_);
+                if (passive_read_requested_)
+                {
+                    passive_read_requested_ = false;
+                    readPal = passive_pal_;
+                }
+            }
+            if (readPal != nullptr)
+            {
+                read_pal_passives(readPal);
+            }
+        }
     }
 
 private:
@@ -768,6 +822,7 @@ private:
     std::string passive_skill_;
     bool passive_add_{false};
     bool passive_requested_{false};
+    bool passive_read_requested_{false};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
