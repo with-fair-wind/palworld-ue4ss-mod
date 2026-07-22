@@ -557,7 +557,8 @@ public:
                         for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i)
                         {
                             const auto& e = self->inv_cache_[i];
-                            const std::string label = e.item_id + "  x" + std::to_string(e.count);
+                            const std::string label =
+                                e.item_id + "  x" + std::to_string(e.count) + " ##inv" + std::to_string(i);
                             if (ImGui::Selectable(label.c_str(), self->selected_ == i))
                             {
                                 self->selected_ = i;
@@ -603,7 +604,8 @@ public:
                             const std::lock_guard lock(self->inv_mutex_);
                             for (int i = 0; i < static_cast<int>(self->pal_cache_.size()); ++i)
                             {
-                                if (ImGui::Selectable(self->pal_cache_[i].name.c_str(), self->pal_selected_ == i))
+                                const std::string palLabel = self->pal_cache_[i].name + " ##pal" + std::to_string(i);
+                                if (ImGui::Selectable(palLabel.c_str(), self->pal_selected_ == i))
                                 {
                                     self->pal_selected_ = i;
                                 }
