@@ -28,7 +28,11 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <imgui.h>
 
+#include "item_database.h"
+
 #include <atomic>
+#include <cctype>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <string>
@@ -289,77 +293,106 @@ public:
 
         Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.9.0 modify)\n"));
 
-        register_tab(STR("MyPalMod"),
-                     [](CppUserModBase* mod)
-                     {
-                         UE4SS_ENABLE_IMGUI()
-                         auto* self = static_cast<MyPalMod*>(mod);
-                         ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-                         if (ImGui::Begin("MyPalMod v0.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-                         {
-                             // --- Give items ---
-                             ImGui::TextUnformatted("Give items");
-                             ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
-                             ImGui::InputInt("Count", &self->count_input_);
-                             self->count_input_ = clamp(self->count_input_, 1, 9999);
-                             if (ImGui::Button("Give"))
-                             {
-                                 const std::lock_guard lock(self->req_mutex_);
-                                 self->give_item_ = self->item_buf_;
-                                 self->give_count_ = self->count_input_;
-                                 self->give_requested_ = true;
-                             }
-                             ImGui::Separator();
+        register_tab(
+            STR("MyPalMod"),
+            [](CppUserModBase* mod)
+            {
+                UE4SS_ENABLE_IMGUI()
+                auto* self = static_cast<MyPalMod*>(mod);
+                ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
+                if (ImGui::Begin("MyPalMod v0.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    // --- Give items ---
+                    ImGui::TextUnformatted("Give items");
+                    ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
+                    ImGui::InputInt("Count", &self->count_input_);
+                    self->count_input_ = clamp(self->count_input_, 1, 9999);
+                    if (ImGui::Button("Give"))
+                    {
+                        const std::lock_guard lock(self->req_mutex_);
+                        self->give_item_ = self->item_buf_;
+                        self->give_count_ = self->count_input_;
+                        self->give_requested_ = true;
+                    }
+                    ImGui::Separator();
 
-                             // --- Inventory (list + modify) ---
-                             if (ImGui::Button("Refresh inventory"))
-                             {
-                                 self->want_read_.store(true);
-                             }
-                             ImGui::SameLine();
-                             ImGui::TextUnformatted("(click an item to select, then set count)");
-                             {
-                                 const std::lock_guard lock(self->inv_mutex_);
-                                 ImGui::BeginChild("invlist", ImVec2(380, 220), true);
-                                 for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i)
-                                 {
-                                     const auto& e = self->inv_cache_[i];
-                                     const std::string label = e.item_id + "  x" + std::to_string(e.count);
-                                     if (ImGui::Selectable(label.c_str(), self->selected_ == i))
-                                     {
-                                         self->selected_ = i;
-                                         self->set_count_input_ = e.count;
-                                     }
-                                 }
-                                 ImGui::EndChild();
+                    // --- Item browser ---
+                    ImGui::TextUnformatted("Item browser (click to fill Item ID)");
+                    ImGui::InputText("##search", self->search_buf_, sizeof(self->search_buf_));
+                    ImGui::BeginChild("browser", ImVec2(380, 160), true);
+                    {
+                        std::string filter(self->search_buf_);
+                        for (auto& c : filter)
+                        {
+                            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        }
+                        for (int bi = 0; bi < kBrowseItemCount; ++bi)
+                        {
+                            std::string itemLower(kBrowseItems[bi]);
+                            for (auto& c : itemLower)
+                            {
+                                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                            }
+                            if (filter.empty() || itemLower.find(filter) != std::string::npos)
+                            {
+                                if (ImGui::Selectable(kBrowseItems[bi]))
+                                {
+                                    std::strncpy(self->item_buf_, kBrowseItems[bi], sizeof(self->item_buf_) - 1);
+                                    self->item_buf_[sizeof(self->item_buf_) - 1] = '\0';
+                                }
+                            }
+                        }
+                    }
+                    ImGui::EndChild();
 
-                                 if (self->selected_ >= 0 &&
-                                     self->selected_ < static_cast<int>(self->inv_cache_.size()))
-                                 {
-                                     const auto& e = self->inv_cache_[self->selected_];
-                                     ImGui::Text("Selected: %s (slot %d, x%d)",
-                                                 e.item_id.c_str(),
-                                                 static_cast<int>(e.slot_index),
-                                                 e.count);
-                                     ImGui::InputInt("New count", &self->set_count_input_);
-                                     self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
-                                     if (ImGui::Button("Set count"))
-                                     {
-                                         const std::lock_guard lock(self->req_mutex_);
-                                         self->modify_slot_ = e.slot_index;
-                                         self->modify_count_ = self->set_count_input_;
-                                         self->modify_requested_ = true;
-                                     }
-                                 }
-                             }
-                             ImGui::Separator();
-                             if (ImGui::Button("Discover"))
-                             {
-                                 self->want_discover_.store(true);
-                             }
-                         }
-                         ImGui::End();
-                     });
+                    // --- Inventory (list + modify) ---
+                    if (ImGui::Button("Refresh inventory"))
+                    {
+                        self->want_read_.store(true);
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextUnformatted("(click an item to select, then set count)");
+                    {
+                        const std::lock_guard lock(self->inv_mutex_);
+                        ImGui::BeginChild("invlist", ImVec2(380, 220), true);
+                        for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i)
+                        {
+                            const auto& e = self->inv_cache_[i];
+                            const std::string label = e.item_id + "  x" + std::to_string(e.count);
+                            if (ImGui::Selectable(label.c_str(), self->selected_ == i))
+                            {
+                                self->selected_ = i;
+                                self->set_count_input_ = e.count;
+                            }
+                        }
+                        ImGui::EndChild();
+
+                        if (self->selected_ >= 0 && self->selected_ < static_cast<int>(self->inv_cache_.size()))
+                        {
+                            const auto& e = self->inv_cache_[self->selected_];
+                            ImGui::Text("Selected: %s (slot %d, x%d)",
+                                        e.item_id.c_str(),
+                                        static_cast<int>(e.slot_index),
+                                        e.count);
+                            ImGui::InputInt("New count", &self->set_count_input_);
+                            self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
+                            if (ImGui::Button("Set count"))
+                            {
+                                const std::lock_guard lock(self->req_mutex_);
+                                self->modify_slot_ = e.slot_index;
+                                self->modify_count_ = self->set_count_input_;
+                                self->modify_requested_ = true;
+                            }
+                        }
+                    }
+                    ImGui::Separator();
+                    if (ImGui::Button("Discover"))
+                    {
+                        self->want_discover_.store(true);
+                    }
+                }
+                ImGui::End();
+            });
     }
 
     ~MyPalMod() override = default;
@@ -434,6 +467,7 @@ private:
 
     // UI state (GUI thread)
     char item_buf_[64] = "PalSphere_Tera";
+    char search_buf_[64]{};
     int count_input_ = 10;
     int set_count_input_ = 0;
     int selected_ = -1;
