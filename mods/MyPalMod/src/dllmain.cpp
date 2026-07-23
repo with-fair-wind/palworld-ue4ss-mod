@@ -642,6 +642,51 @@ public:
                     // --- Pal editor ---
                     if (ImGui::CollapsingHeader("Pal editor"))
                     {
+                        // --- Currently Viewed Pal (auto-detected via hook) ---
+                        const uintptr_t vPtr = self->lastViewedPal_.load();
+                        if (vPtr != 0)
+                        {
+                            std::string vName;
+                            {
+                                const std::lock_guard lock(self->inv_mutex_);
+                                vName = self->viewedPalName_;
+                            }
+                            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F),
+                                               "Currently Viewed: %s",
+                                               vName.empty() ? "(reading...)" : vName.c_str());
+                            auto* viewedPal = reinterpret_cast<UObject*>(vPtr);
+                            ImGui::InputText("Passive SkillId##viewed", self->passive_buf_, sizeof(self->passive_buf_));
+                            if (ImGui::Button("Add##v"))
+                            {
+                                const std::lock_guard lock(self->req_mutex_);
+                                self->passive_pal_ = viewedPal;
+                                self->passive_skill_ = self->passive_buf_;
+                                self->passive_add_ = true;
+                                self->passive_requested_ = true;
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Remove##v"))
+                            {
+                                const std::lock_guard lock(self->req_mutex_);
+                                self->passive_pal_ = viewedPal;
+                                self->passive_skill_ = self->passive_buf_;
+                                self->passive_add_ = false;
+                                self->passive_requested_ = true;
+                            }
+                            ImGui::SameLine();
+                            if (ImGui::Button("Read##v"))
+                            {
+                                const std::lock_guard lock(self->req_mutex_);
+                                self->passive_pal_ = viewedPal;
+                                self->passive_read_requested_ = true;
+                            }
+                        }
+                        else
+                        {
+                            ImGui::TextDisabled("View a Pal in-game (open Palbox/party) to auto-detect.");
+                        }
+                        ImGui::Separator();
+
                         if (ImGui::Button("Scan Pals"))
                         {
                             self->want_scan_pals_.store(true);
@@ -726,10 +771,55 @@ public:
         {
             Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
         }
+
+        // Track which Pal the player is currently viewing. When the game displays
+        // a Pal's details (Palbox/party), it calls GetPassiveSkillList on that
+        // PalIndividualCharacterParameter. We hook ProcessEvent globally and compare
+        // the function pointer (O(1), fires on every ProcessEvent but only acts
+        // on the target). The captured pointer lets the user edit the "currently
+        // viewed" Pal without selecting from a list.
+        fnGetPSL_ = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetPassiveSkillList"));
+        if (fnGetPSL_ != nullptr)
+        {
+            Hook::RegisterProcessEventPreCallback(
+                [this](auto& /*info*/, UObject* Context, UFunction* Function, void* /*Params*/)
+                {
+                    if (Function == fnGetPSL_ && Context != nullptr)
+                    {
+                        lastViewedPal_.store(reinterpret_cast<uintptr_t>(Context));
+                    }
+                },
+                Hook::FCallbackOptions{.OwnerModName = STR("MyPalMod"), .HookName = STR("PalViewTracker")});
+            Output::send<LogLevel::Verbose>(STR("MyPalMod: PalViewTracker hook registered\n"));
+        }
     }
 
     auto on_update() -> void override
     {
+        // Cache the viewed Pal's species name (read on game thread when pointer changes).
+        const uintptr_t viewed = lastViewedPal_.load();
+        if (viewed != lastCachedPal_)
+        {
+            lastCachedPal_ = viewed;
+            std::string name;
+            if (viewed != 0)
+            {
+                UObject* pal = reinterpret_cast<UObject*>(viewed);
+                if (FProperty* spProp = pal->GetPropertyByNameInChain(STR("SaveParameter")))
+                {
+                    if (FName* charId = spProp->ContainerPtrToValuePtr<FName>(pal))
+                    {
+                        const std::wstring w = charId->ToString();
+                        name = std::string(w.begin(), w.end());
+                    }
+                }
+            }
+            {
+                const std::lock_guard lock(inv_mutex_);
+                viewedPalName_ = std::move(name);
+            }
+        }
         // Pull requests (give / modify) under the mutex, then execute outside it.
         std::string item;
         int count = 0;
@@ -882,10 +972,11 @@ private:
     bool passive_requested_{false};
     bool passive_read_requested_{false};
 
-    // Passive skill browser (like item browser)
-    char passive_search_buf_[64]{};
-    std::vector<std::string> passive_db_cache_; // under inv_mutex_
-    std::atomic<bool> want_scan_passives_{false};
+    // "Currently Viewed Pal" auto-detection (via GetPassiveSkillList hook)
+    std::atomic<uintptr_t> lastViewedPal_{0};
+    UFunction* fnGetPSL_{};
+    std::string viewedPalName_; // cached name, under inv_mutex_
+    uintptr_t lastCachedPal_{0};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
