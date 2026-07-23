@@ -238,6 +238,20 @@ auto scan_pals() -> std::vector<PalEntry>
                     name = std::string(w.begin(), w.end());
                 }
             }
+            // Read IndividualActor (APalCharacter*) — null = in container (owned/boxed),
+            // non-null = spawned (wild, Otomo, or base worker).
+            if (!name.empty())
+            {
+                bool isBoxed = true;
+                if (FProperty* iaProp = obj->GetPropertyByNameInChain(STR("IndividualActor")))
+                {
+                    if (void** actorPtr = iaProp->ContainerPtrToValuePtr<void*>(obj))
+                    {
+                        isBoxed = (*actorPtr == nullptr);
+                    }
+                }
+                name += isBoxed ? " [boxed]" : " [active]";
+            }
             if (!name.empty())
             {
                 pals.push_back({name, obj});
