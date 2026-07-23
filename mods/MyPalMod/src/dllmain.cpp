@@ -47,6 +47,14 @@ namespace
 {
 constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
 
+// Basic UObject validity check — verifies the object and its class pointer are non-null.
+// Not a full GC-safety guarantee, but catches the common case of a stale pointer after
+// the object was destroyed (class pointer becomes garbage/null).
+auto is_valid_pal(UObject* obj) -> bool
+{
+    return obj != nullptr && obj->GetClassPrivate() != nullptr;
+}
+
 constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Inventory",
     L"IndividualCharacter",
@@ -344,44 +352,6 @@ auto read_pal_passives(UObject* pal) -> void
     }
 }
 
-// Scan all assignable passive skills via GetPalAssignablePassiveIDs. Game thread only.
-auto scan_all_passives() -> std::vector<std::string>
-{
-    std::vector<std::string> ids;
-    UObject* mgr = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
-    if (mgr == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("scan_all_passives: PalPassiveSkillManager not found\n"));
-        return ids;
-    }
-    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalPassiveSkillManager:GetPalAssignablePassiveIDs"));
-    if (fn == nullptr)
-    {
-        Output::send<LogLevel::Warning>(STR("scan_all_passives: GetPalAssignablePassiveIDs not found\n"));
-        return ids;
-    }
-    // void GetPalAssignablePassiveIDs(TArray<FName>& List) — out param at offset 0.
-    struct
-    {
-        FName* Data;
-        int32_t Num;
-        int32_t Max;
-    } params{};
-    mgr->ProcessEvent(fn, &params);
-    for (int32_t i = 0; i < params.Num && params.Data != nullptr; ++i)
-    {
-        const std::wstring w = params.Data[i].ToString();
-        if (!w.empty())
-        {
-            ids.emplace_back(w.begin(), w.end());
-        }
-    }
-    std::sort(ids.begin(), ids.end());
-    Output::send<LogLevel::Warning>(STR("scan_all_passives: found {} passives\n"), static_cast<int32>(ids.size()));
-    return ids;
-}
-
 // Scan all UObjects for UPalStaticItemDataBase instances -> collect every item ID that
 // exists in the current game version. Replaces the hardcoded item_database.h list.
 // One-time full scan (~1s for 270k objects). Game thread only.
@@ -511,11 +481,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("0.9.0");
+        ModVersion = STR("1.3.0");
         ModDescription = STR("UE4SS C++ mod for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v0.9.0 modify)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v1.3.0)\n"));
 
         register_tab(
             STR("MyPalMod"),
@@ -524,7 +494,7 @@ public:
                 UE4SS_ENABLE_IMGUI()
                 auto* self = static_cast<MyPalMod*>(mod);
                 ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-                if (ImGui::Begin("MyPalMod v0.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                if (ImGui::Begin("MyPalMod v1.3", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
                 {
                     // --- Give items ---
                     ImGui::TextUnformatted("Give items");
@@ -574,8 +544,10 @@ public:
                             }
                             if (ImGui::Selectable(raw))
                             {
-                                std::strncpy(self->item_buf_, raw, sizeof(self->item_buf_) - 1);
-                                self->item_buf_[sizeof(self->item_buf_) - 1] = '\0';
+                                const auto copyLen =
+                                    std::min<std::size_t>(std::strlen(raw), sizeof(self->item_buf_) - 1);
+                                std::memcpy(self->item_buf_, raw, copyLen);
+                                self->item_buf_[copyLen] = '\0';
                             }
                         };
                         const std::lock_guard lock(self->inv_mutex_);
@@ -829,16 +801,16 @@ public:
         bool do_mod = false;
         {
             const std::lock_guard lock(req_mutex_);
-            if (give_requested_)
+            if (give_requested_.load())
             {
-                give_requested_ = false;
+                give_requested_.store(false);
                 item = give_item_;
                 count = give_count_;
                 do_give = true;
             }
-            if (modify_requested_)
+            if (modify_requested_.load())
             {
-                modify_requested_ = false;
+                modify_requested_.store(false);
                 mod_slot = modify_slot_;
                 mod_count = modify_count_;
                 do_mod = true;
@@ -885,22 +857,22 @@ public:
             }
             pal_cache_ = std::move(fresh);
         }
-        if (passive_requested_)
+        if (passive_requested_.load())
         {
             UObject* pal = nullptr;
             std::string skill;
             bool doAdd = false;
             {
                 const std::lock_guard lock(req_mutex_);
-                if (passive_requested_)
+                if (passive_requested_.load())
                 {
-                    passive_requested_ = false;
+                    passive_requested_.store(false);
                     pal = passive_pal_;
                     skill = passive_skill_;
                     doAdd = passive_add_;
                 }
             }
-            if (pal != nullptr && !skill.empty())
+            if (is_valid_pal(pal) && !skill.empty())
             {
                 if (doAdd)
                 {
@@ -912,18 +884,18 @@ public:
                 }
             }
         }
-        if (passive_read_requested_)
+        if (passive_read_requested_.load())
         {
             UObject* readPal = nullptr;
             {
                 const std::lock_guard lock(req_mutex_);
-                if (passive_read_requested_)
+                if (passive_read_requested_.load())
                 {
-                    passive_read_requested_ = false;
+                    passive_read_requested_.store(false);
                     readPal = passive_pal_;
                 }
             }
-            if (readPal != nullptr)
+            if (is_valid_pal(readPal))
             {
                 read_pal_passives(readPal);
             }
@@ -947,10 +919,10 @@ private:
     std::mutex req_mutex_;
     std::string give_item_;
     int give_count_ = 0;
-    bool give_requested_ = false;
+    std::atomic<bool> give_requested_{false};
     int32_t modify_slot_ = 0;
     int32_t modify_count_ = 0;
-    bool modify_requested_ = false;
+    std::atomic<bool> modify_requested_{false};
 
     // Inventory cache (game thread writes, GUI thread reads)
     std::mutex inv_mutex_;
@@ -969,8 +941,8 @@ private:
     UObject* passive_pal_{nullptr};
     std::string passive_skill_;
     bool passive_add_{false};
-    bool passive_requested_{false};
-    bool passive_read_requested_{false};
+    std::atomic<bool> passive_requested_{false};
+    std::atomic<bool> passive_read_requested_{false};
 
     // "Currently Viewed Pal" auto-detection (via GetPassiveSkillList hook)
     std::atomic<uintptr_t> lastViewedPal_{0};
