@@ -31,7 +31,9 @@
 #include <atomic>
 #include <cstring>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 using namespace RC;
@@ -94,7 +96,7 @@ public:
             Hook::RegisterProcessEventPreCallback(
                 [this](auto& /*info*/, UObject* Context, UFunction* Function, void* /*Params*/)
                 {
-                    if (Function == fnGetPSL_ && Context != nullptr)
+                    if (Function == fnGetPSL_ && Context != nullptr && !suppressViewTracking_.load())
                     {
                         lastViewedPal_.store(reinterpret_cast<uintptr_t>(Context));
                     }
@@ -112,7 +114,7 @@ public:
         {
             lastCachedPal_ = viewed;
             std::string name;
-            if (viewed != 0)
+            if (skillGateway_.is_valid(viewed))
             {
                 UObject* pal = reinterpret_cast<UObject*>(viewed);
                 if (FProperty* spProp = pal->GetPropertyByNameInChain(STR("SaveParameter")))
@@ -202,6 +204,65 @@ public:
             pal_cache_ = std::move(fresh);
         }
 
+        std::optional<skill_editor::SkillEditResult> editResult;
+        if (auto request = skillQueue_.try_pop())
+        {
+            {
+                const std::lock_guard lock(skillSnapshotMutex_);
+                skillSnapshot_.pending = true;
+            }
+            ViewTrackingGuard guard(suppressViewTracking_);
+            editResult = skill_editor::execute_skill_edit(skillGateway_, *request);
+        }
+
+        const auto resolved = resolve_skill_target();
+        const bool targetChanged = resolved.target != lastSkillTarget_;
+        lastSkillTarget_ = resolved.target;
+
+        std::optional<skill_editor::SkillCatalogSnapshot> refreshedCatalog;
+        if (resolved.target != 0 && wantRefreshSkillCatalog_.exchange(false))
+        {
+            skill_editor::SkillCatalogSnapshot previous;
+            {
+                const std::lock_guard lock(skillSnapshotMutex_);
+                previous = skillSnapshot_.catalog;
+            }
+            ViewTrackingGuard guard(suppressViewTracking_);
+            refreshedCatalog =
+                skill_editor::with_catalog_fallback(previous, skillGateway_.load_catalog(resolved.target));
+        }
+
+        std::optional<skill_editor::SkillState> refreshedState;
+        if (resolved.target != 0 && (targetChanged || editResult.has_value()))
+        {
+            ViewTrackingGuard guard(suppressViewTracking_);
+            refreshedState = skillGateway_.read_state(resolved.target);
+        }
+
+        {
+            const std::lock_guard lock(skillSnapshotMutex_);
+            skillSnapshot_.target = resolved.target;
+            skillSnapshot_.source = resolved.source;
+            skillSnapshot_.palName = resolved.name;
+            skillSnapshot_.pending = skillQueue_.size() != 0;
+            if (refreshedCatalog.has_value())
+            {
+                skillSnapshot_.catalog = std::move(*refreshedCatalog);
+            }
+            if (refreshedState.has_value())
+            {
+                skillSnapshot_.state = std::move(*refreshedState);
+            }
+            else if (resolved.target == 0)
+            {
+                skillSnapshot_.state = {};
+            }
+            if (editResult.has_value())
+            {
+                skillSnapshot_.lastResult = editResult->message;
+            }
+        }
+
         // Discover
         if (want_discover_.exchange(false))
         {
@@ -210,9 +271,134 @@ public:
     }
 
 private:
+    enum class SkillTargetSource
+    {
+        none,
+        viewed,
+        selected,
+    };
+
+    struct ResolvedSkillTarget
+    {
+        skill_editor::SkillTarget target{};
+        SkillTargetSource source{SkillTargetSource::none};
+        std::string name;
+    };
+
+    struct SkillEditorSnapshot
+    {
+        skill_editor::SkillTarget target{};
+        SkillTargetSource source{SkillTargetSource::none};
+        std::string palName;
+        skill_editor::SkillState state;
+        skill_editor::SkillCatalogSnapshot catalog;
+        std::string lastResult;
+        bool pending{};
+    };
+
+    class ViewTrackingGuard
+    {
+    public:
+        explicit ViewTrackingGuard(std::atomic<bool>& flag) : flag_(flag)
+        {
+            flag_.store(true);
+        }
+
+        ~ViewTrackingGuard()
+        {
+            flag_.store(false);
+        }
+
+        ViewTrackingGuard(const ViewTrackingGuard&) = delete;
+        auto operator=(const ViewTrackingGuard&) -> ViewTrackingGuard& = delete;
+
+    private:
+        std::atomic<bool>& flag_;
+    };
+
     static auto clamp(int v, int lo, int hi) -> int
     {
         return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    auto resolve_skill_target() -> ResolvedSkillTarget
+    {
+        const auto viewed = lastViewedPal_.load();
+        if (skillGateway_.is_valid(viewed))
+        {
+            std::string name;
+            {
+                const std::lock_guard lock(inv_mutex_);
+                name = viewedPalName_;
+            }
+            return {.target = viewed, .source = SkillTargetSource::viewed, .name = std::move(name)};
+        }
+
+        UObject* selected = nullptr;
+        std::string name;
+        {
+            const std::lock_guard lock(inv_mutex_);
+            if (pal_selected_ >= 0 && pal_selected_ < static_cast<int>(pal_cache_.size()))
+            {
+                selected = pal_cache_[pal_selected_].ptr;
+                name = pal_cache_[pal_selected_].name;
+            }
+        }
+        const auto selectedTarget = reinterpret_cast<skill_editor::SkillTarget>(selected);
+        if (skillGateway_.is_valid(selectedTarget))
+        {
+            return {.target = selectedTarget, .source = SkillTargetSource::selected, .name = std::move(name)};
+        }
+        return {};
+    }
+
+    static auto find_skill_label(
+        const std::vector<skill_editor::SkillOption>& options,
+        const std::string_view id) -> std::string
+    {
+        const auto found =
+            std::ranges::find(options, id, &skill_editor::SkillOption::id);
+        return found == options.end() ? std::string(id) : skill_editor::skill_label(*found);
+    }
+
+    static void reset_skill_editor_ui(MyPalMod* self)
+    {
+        self->passiveEditIndex_ = -1;
+        self->activeEditSlot_ = -1;
+        self->passiveChoice_.reset();
+        self->activeChoice_.reset();
+        self->passiveSearch_[0] = '\0';
+        self->activeSearch_[0] = '\0';
+    }
+
+    static auto render_skill_picker(
+        const char* id,
+        const std::vector<skill_editor::SkillOption>& options,
+        const std::unordered_set<std::string>& excludedIds,
+        char* search,
+        const std::size_t searchSize,
+        std::optional<skill_editor::SkillOption>& selected) -> bool
+    {
+        const std::string preview = selected.has_value() ? skill_editor::skill_label(*selected) : "请选择技能";
+        bool changed = false;
+        if (ImGui::BeginCombo(id, preview.c_str()))
+        {
+            ImGui::SetNextItemWidth(340.0F);
+            ImGui::InputText("搜索##skill-search", search, searchSize);
+            const auto visible = skill_editor::filter_skills(options, search, excludedIds);
+            for (const auto& option : visible)
+            {
+                const auto label = skill_editor::skill_label(option);
+                const bool isSelected = selected.has_value() && selected->id == option.id;
+                if (ImGui::Selectable(label.c_str(), isSelected))
+                {
+                    selected = option;
+                    changed = true;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        return changed;
     }
 
     // --- GUI render helpers (static, called from the register_tab lambda) ---
@@ -330,6 +516,203 @@ private:
         }
     }
 
+    static void render_passive_skills(
+        MyPalMod* self,
+        const SkillEditorSnapshot& snapshot,
+        const bool pending)
+    {
+        ImGui::Text("被动技能 (%d/4)", static_cast<int>(snapshot.state.passiveIds.size()));
+        std::unordered_set<std::string> excluded(
+            snapshot.state.passiveIds.begin(), snapshot.state.passiveIds.end());
+
+        ImGui::BeginDisabled(pending);
+        for (std::size_t index = 0; index < snapshot.state.passiveIds.size(); ++index)
+        {
+            const auto& id = snapshot.state.passiveIds[index];
+            const auto label = find_skill_label(snapshot.catalog.passiveSkills, id);
+            ImGui::Text("%d. %s", static_cast<int>(index + 1), label.c_str());
+            ImGui::SameLine();
+            const auto replaceId = "替换##passive-" + std::to_string(index);
+            if (ImGui::Button(replaceId.c_str()))
+            {
+                self->passiveEditIndex_ = static_cast<int>(index);
+                self->passiveChoice_.reset();
+                self->passiveSearch_[0] = '\0';
+            }
+            ImGui::SameLine();
+            const auto removeId = "删除##passive-" + std::to_string(index);
+            if (ImGui::Button(removeId.c_str()))
+            {
+                self->skillQueue_.push(
+                    {.target = snapshot.target,
+                     .kind = skill_editor::SkillKind::passive,
+                     .operation = skill_editor::SkillEditOperation::remove,
+                     .oldPassiveId = id});
+                self->passiveEditIndex_ = -1;
+                self->passiveChoice_.reset();
+            }
+        }
+
+        if (snapshot.state.passiveIds.empty())
+        {
+            ImGui::TextDisabled("暂无被动技能");
+        }
+        if (snapshot.state.passiveIds.size() < 4 && ImGui::Button("新增被动技能"))
+        {
+            self->passiveEditIndex_ = -2;
+            self->passiveChoice_.reset();
+            self->passiveSearch_[0] = '\0';
+        }
+        ImGui::EndDisabled();
+
+        if (self->passiveEditIndex_ == -1)
+        {
+            return;
+        }
+
+        const bool replacing = self->passiveEditIndex_ >= 0;
+        ImGui::TextUnformatted(replacing ? "选择替换后的被动技能：" : "选择要新增的被动技能：");
+        ImGui::BeginDisabled(pending || !snapshot.catalog.ready);
+        render_skill_picker(
+            "##passive-picker",
+            snapshot.catalog.passiveSkills,
+            excluded,
+            self->passiveSearch_,
+            sizeof(self->passiveSearch_),
+            self->passiveChoice_);
+        const bool canConfirm =
+            self->passiveChoice_.has_value() &&
+            (!replacing || self->passiveEditIndex_ < static_cast<int>(snapshot.state.passiveIds.size()));
+        ImGui::BeginDisabled(!canConfirm);
+        if (ImGui::Button("确认被动技能修改"))
+        {
+            skill_editor::SkillEditRequest request{
+                .target = snapshot.target,
+                .kind = skill_editor::SkillKind::passive,
+                .operation = replacing ? skill_editor::SkillEditOperation::replace
+                                       : skill_editor::SkillEditOperation::add,
+                .newPassiveId = self->passiveChoice_->id,
+            };
+            if (replacing)
+            {
+                request.oldPassiveId =
+                    snapshot.state.passiveIds[static_cast<std::size_t>(self->passiveEditIndex_)];
+            }
+            self->skillQueue_.push(std::move(request));
+            self->passiveEditIndex_ = -1;
+            self->passiveChoice_.reset();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("取消##passive"))
+        {
+            self->passiveEditIndex_ = -1;
+            self->passiveChoice_.reset();
+        }
+    }
+
+    static void render_active_skills(
+        MyPalMod* self,
+        const SkillEditorSnapshot& snapshot,
+        const bool pending)
+    {
+        ImGui::TextUnformatted("主动技能（EquipWaza）");
+        std::unordered_set<std::string> excluded;
+        for (const auto& skill : snapshot.state.activeSkills)
+        {
+            excluded.insert(skill.id);
+        }
+
+        ImGui::BeginDisabled(pending);
+        for (std::size_t slot = 0; slot < 3; ++slot)
+        {
+            if (slot < snapshot.state.activeSkills.size())
+            {
+                const auto& skill = snapshot.state.activeSkills[slot];
+                const auto label = find_skill_label(snapshot.catalog.activeSkills, skill.id);
+                ImGui::Text("槽位 %d：%s", static_cast<int>(slot + 1), label.c_str());
+                ImGui::SameLine();
+                const auto replaceId = "替换##active-" + std::to_string(slot);
+                if (ImGui::Button(replaceId.c_str()))
+                {
+                    self->activeEditSlot_ = static_cast<int>(slot);
+                    self->activeChoice_.reset();
+                    self->activeSearch_[0] = '\0';
+                }
+                ImGui::SameLine();
+                const auto clearId = "清空##active-" + std::to_string(slot);
+                if (ImGui::Button(clearId.c_str()))
+                {
+                    self->skillQueue_.push(
+                        {.target = snapshot.target,
+                         .kind = skill_editor::SkillKind::active,
+                         .operation = skill_editor::SkillEditOperation::remove,
+                         .activeSlot = slot});
+                    self->activeEditSlot_ = -1;
+                    self->activeChoice_.reset();
+                }
+            }
+            else
+            {
+                ImGui::Text("槽位 %d：空", static_cast<int>(slot + 1));
+                if (slot == snapshot.state.activeSkills.size())
+                {
+                    ImGui::SameLine();
+                    const auto equipId = "选择/装备##active-" + std::to_string(slot);
+                    if (ImGui::Button(equipId.c_str()))
+                    {
+                        self->activeEditSlot_ = static_cast<int>(slot);
+                        self->activeChoice_.reset();
+                        self->activeSearch_[0] = '\0';
+                    }
+                }
+            }
+        }
+        ImGui::EndDisabled();
+
+        if (self->activeEditSlot_ < 0)
+        {
+            return;
+        }
+
+        const auto slot = static_cast<std::size_t>(self->activeEditSlot_);
+        const bool replacing = slot < snapshot.state.activeSkills.size();
+        ImGui::Text("为槽位 %d 选择主动技能：", self->activeEditSlot_ + 1);
+        ImGui::BeginDisabled(pending || !snapshot.catalog.ready);
+        render_skill_picker(
+            "##active-picker",
+            snapshot.catalog.activeSkills,
+            excluded,
+            self->activeSearch_,
+            sizeof(self->activeSearch_),
+            self->activeChoice_);
+        const bool canConfirm = self->activeChoice_.has_value() && self->activeChoice_->activeValue.has_value();
+        ImGui::BeginDisabled(!canConfirm);
+        if (ImGui::Button("确认主动技能修改"))
+        {
+            self->skillQueue_.push(
+                {.target = snapshot.target,
+                 .kind = skill_editor::SkillKind::active,
+                 .operation = replacing ? skill_editor::SkillEditOperation::replace
+                                        : skill_editor::SkillEditOperation::add,
+                 .activeSlot = slot,
+                 .newActiveSkill = skill_editor::ActiveSkill{
+                     .value = *self->activeChoice_->activeValue,
+                     .id = self->activeChoice_->id}});
+            self->activeEditSlot_ = -1;
+            self->activeChoice_.reset();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("取消##active"))
+        {
+            self->activeEditSlot_ = -1;
+            self->activeChoice_.reset();
+        }
+    }
+
     static void render_pal_editor(MyPalMod* self)
     {
         if (!ImGui::CollapsingHeader("Pal editor"))
@@ -337,21 +720,51 @@ private:
             return;
         }
 
-        // Currently Viewed Pal (auto-detected via hook)
-        const uintptr_t vPtr = self->lastViewedPal_.load();
-        if (vPtr != 0)
+        SkillEditorSnapshot snapshot;
         {
-            std::string vName;
-            {
-                const std::lock_guard lock(self->inv_mutex_);
-                vName = self->viewedPalName_;
-            }
+            const std::lock_guard lock(self->skillSnapshotMutex_);
+            snapshot = self->skillSnapshot_;
+        }
+        if (self->skillUiTarget_ != snapshot.target)
+        {
+            self->skillUiTarget_ = snapshot.target;
+            reset_skill_editor_ui(self);
+        }
+
+        if (snapshot.target != 0)
+        {
+            const char* source =
+                snapshot.source == SkillTargetSource::viewed ? "当前查看" : "手动选择";
             ImGui::TextColored(
-                ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "Currently Viewed: %s", vName.empty() ? "(reading...)" : vName.c_str());
+                ImVec4(0.4F, 1.0F, 0.4F, 1.0F),
+                "目标：%s（%s）",
+                snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str(),
+                source);
         }
         else
         {
-            ImGui::TextDisabled("View a Pal in-game (open Palbox/party) to auto-detect.");
+            ImGui::TextDisabled("请在游戏中查看一只帕鲁，或从下方扫描列表中手动选择。");
+        }
+        const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
+        ImGui::SameLine();
+        ImGui::BeginDisabled(pending || snapshot.target == 0);
+        if (ImGui::Button("刷新技能列表"))
+        {
+            self->wantRefreshSkillCatalog_.store(true);
+        }
+        ImGui::EndDisabled();
+        if (pending)
+        {
+            ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "技能修改处理中...");
+        }
+        if (!snapshot.lastResult.empty())
+        {
+            ImGui::TextWrapped("结果：%s", snapshot.lastResult.c_str());
+        }
+        if (!snapshot.catalog.error.empty())
+        {
+            ImGui::TextColored(
+                ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "技能目录：%s", snapshot.catalog.error.c_str());
         }
         ImGui::Separator();
 
@@ -379,7 +792,15 @@ private:
         }
         ImGui::EndChild();
 
-        ImGui::TextDisabled("Active/passive skill controls are loading...");
+        if (snapshot.target == 0)
+        {
+            return;
+        }
+
+        ImGui::Separator();
+        render_passive_skills(self, snapshot, pending);
+        ImGui::Separator();
+        render_active_skills(self, snapshot, pending);
     }
 
     // --- Members ---
@@ -416,11 +837,26 @@ private:
 
     // Viewed-Pal auto-detection (via GetPassiveSkillList hook)
     std::atomic<uintptr_t> lastViewedPal_{0};
+    std::atomic<bool> suppressViewTracking_{false};
     UFunction* fnGetPSL_{};
     std::string viewedPalName_;
     uintptr_t lastCachedPal_{0};
 
     pal_skills::PalSkillGateway skillGateway_;
+    skill_editor::SkillEditQueue skillQueue_;
+    std::mutex skillSnapshotMutex_;
+    SkillEditorSnapshot skillSnapshot_;
+    std::atomic<bool> wantRefreshSkillCatalog_{true};
+    skill_editor::SkillTarget lastSkillTarget_{};
+
+    // Skill editor UI state (GUI thread only)
+    char passiveSearch_[96]{};
+    char activeSearch_[96]{};
+    int passiveEditIndex_ = -1; // -2 = add, >= 0 = replace index
+    int activeEditSlot_ = -1;
+    std::optional<skill_editor::SkillOption> passiveChoice_;
+    std::optional<skill_editor::SkillOption> activeChoice_;
+    skill_editor::SkillTarget skillUiTarget_{};
 };
 
 #define MYPALMOD_API __declspec(dllexport)
