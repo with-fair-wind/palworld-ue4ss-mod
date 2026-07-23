@@ -26,8 +26,8 @@ if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/RE-UE4SS/CMakeLists.txt")
 endif()
 
 # Pull in the UE4SS framework. This defines the `UE4SS` target we link against,
-# plus its `deps/`. We only ever build our own mod target, so the separate UVTD
-# program (and its Rust toolchain) is never compiled.
+# plus its dependencies. The standalone UVTD program is not built, but the
+# current UE4SS target still builds its Rust-backed PatternSleuth dependency.
 add_subdirectory(RE-UE4SS)
 
 # The actual mods. Add more subdirectories here as the project grows.

@@ -25,6 +25,7 @@
 
 - **Visual Studio 2022**（最新）+ *"使用 C++ 的桌面开发"*（MSVC + Ninja）
 - **CMake ≥ 3.22**，**Git**
+- **Rust stable**（`cargo` + `rustc`；当前 RE-UE4SS 会构建 Rust 实现的 PatternSleuth 依赖）
 - 游戏内装好 **UE4SS Experimental (Palworld)**（Steam Workshop，含 `MemberVariableLayout.ini`）
 
 ## 快速开始
@@ -35,20 +36,25 @@
 # 1. 克隆 RE-UE4SS + 子模块
 pwsh scripts/setup.ps1
 
-# 2. 配置 + 构建
+# 2. 在首次配置前设置部署目标（不需要部署时可省略）
+$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"  # 游戏安装目录
+
+# 3. 配置 + 构建
 cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 #    -> build/Game__Shipping__Win64/bin/PalworldEditor.dll
 
-# 3. 运行纯 C++ 技能编辑测试
+# 4. 运行纯 C++ 技能编辑测试
 cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests
 ctest --test-dir build --output-on-failure
 
-# 4. 部署到游戏
-$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"  # 游戏安装目录
+# 5. 部署到游戏
 cmake --build --preset ninja-msvc-x64 --target deploy
 #    -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll + enabled.txt
 ```
+
+如果在配置完成后才设置或修改 `PALWORLD_INSTALL_DIR`，请重新运行
+`cmake --preset ninja-msvc-x64`，让部署 target 刷新缓存路径。
 
 ## 代码质量工具
 
