@@ -22,7 +22,7 @@
 
 ---
 
-### Task 1: Rename the Mod and establish module include directories
+### Task 1: Rename the Mod, organize headers, and switch item discovery
 
 **Files:**
 - Move: `mods/MyPalMod/CMakeLists.txt` → `mods/PalworldEditor/CMakeLists.txt`
@@ -39,19 +39,35 @@
 
 **Interfaces:**
 - Consumes: root `UE4SS` target and `palworld_add_deploy_target(<target>)`.
-- Produces: CMake targets `PalworldEditor` and `PalworldEditorTests`, plus module includes rooted at `inc/`.
+- Consumes: `pal_game::scan_all_items() -> std::vector<std::string>`.
+- Produces: CMake targets `PalworldEditor` and `PalworldEditorTests`, module includes rooted at `inc/`, one automatic
+  runtime item scan, and an explicit empty catalog UI state.
 
-- [ ] **Step 1: Move the tracked Mod files and delete the static item header**
+- [ ] **Step 1: Run a failing source assertion for static fallback removal**
+
+Run:
+
+```powershell
+$matches = rg -n "kBrowseItems|kBrowseItemCount|item_database" mods/MyPalMod
+if ($matches) {
+    $matches
+    exit 1
+}
+```
+
+Expected: exit code 1 with matches in `item_database.h` and `dllmain.cpp`, proving the desired fallback-free state is absent.
+
+- [ ] **Step 2: Move the tracked Mod files and delete the static item header**
 
 Use `apply_patch` move hunks for every retained file and a delete hunk for
 `mods/MyPalMod/src/item_database.h`. Do not use a broad filesystem move because unrelated files must remain protected.
 
-- [ ] **Step 2: Update CMake target names and include roots**
+- [ ] **Step 3: Update CMake target names and include roots**
 
 Set the Mod target to `PalworldEditor`, the test target to `PalworldEditorTests`, and both private include directories to
 `${CMAKE_CURRENT_SOURCE_DIR}/inc`. Register `add_subdirectory(PalworldEditor)` from `mods/CMakeLists.txt`.
 
-- [ ] **Step 3: Update module include paths**
+- [ ] **Step 4: Update module includes and runtime item behavior**
 
 Use these exact project include forms:
 
@@ -65,7 +81,33 @@ Use these exact project include forms:
 
 Remove `#include "item_database.h"`.
 
-- [ ] **Step 4: Reconfigure and verify the renamed targets**
+At the end of `PalworldEditorMod::on_unreal_init()`, add:
+
+```cpp
+want_scan_items_.store(true);
+```
+
+Display `item_db_cache_.size()` directly, iterate only over `item_db_cache_`, and render the following text when it is empty:
+
+```cpp
+ImGui::TextDisabled("尚未发现物品，请重新扫描。");
+```
+
+- [ ] **Step 5: Verify the source assertion turns green**
+
+Run:
+
+```powershell
+$matches = rg -n "kBrowseItems|kBrowseItemCount|item_database" mods/PalworldEditor
+if ($matches) {
+    $matches
+    exit 1
+}
+```
+
+Expected: exit code 0 with no matches.
+
+- [ ] **Step 6: Reconfigure and verify the renamed targets**
 
 Run in the VS x64 developer environment:
 
@@ -76,7 +118,7 @@ ninja -C build -t targets | rg "PalworldEditor|MyPalMod"
 
 Expected: `PalworldEditor` and `PalworldEditorTests` exist; no `MyPalMod` build target exists.
 
-- [ ] **Step 5: Build the renamed targets and run tests**
+- [ ] **Step 7: Build the renamed targets and run tests**
 
 ```powershell
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor PalworldEditorTests
@@ -85,73 +127,16 @@ ctest --test-dir build --output-on-failure
 
 Expected: both targets build; `PalworldEditor.SkillEditor` passes.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 8: Commit**
 
 ```powershell
 git add mods
-git commit -m "refactor: rename mod and organize public headers"
+git commit -m "refactor: reorganize PalworldEditor mod"
 ```
 
 Stage only the renamed Mod tree and `mods/CMakeLists.txt`.
 
-### Task 2: Remove the static item fallback and auto-scan runtime items
-
-**Files:**
-- Modify: `mods/PalworldEditor/src/dllmain.cpp`
-
-**Interfaces:**
-- Consumes: `pal_game::scan_all_items() -> std::vector<std::string>`.
-- Produces: one automatic scan request after Unreal initialization and an explicit empty catalog UI state.
-
-- [ ] **Step 1: Confirm the old fallback references are absent**
-
-Run:
-
-```powershell
-rg -n "kBrowseItems|kBrowseItemCount|item_database" mods/PalworldEditor
-```
-
-Expected before the implementation edit: references remain only in `src/dllmain.cpp`; the deleted header is absent.
-
-- [ ] **Step 2: Schedule the initial runtime scan**
-
-At the end of `PalworldEditorMod::on_unreal_init()`, add:
-
-```cpp
-want_scan_items_.store(true);
-```
-
-This schedules the existing scan path for the game-thread `on_update()` callback.
-
-- [ ] **Step 3: Render only runtime scan results**
-
-Display `item_db_cache_.size()` directly. Iterate only over `item_db_cache_`; when it is empty, render:
-
-```cpp
-ImGui::TextDisabled("尚未发现物品，请重新扫描。");
-```
-
-Do not add another hard-coded fallback.
-
-- [ ] **Step 4: Verify fallback removal and compile behavior**
-
-Run:
-
-```powershell
-rg -n "kBrowseItems|kBrowseItemCount|item_database" mods/PalworldEditor
-cmake --build --preset ninja-msvc-x64 --target PalworldEditor
-```
-
-Expected: ripgrep has no matches; the Mod target builds successfully.
-
-- [ ] **Step 5: Commit**
-
-```powershell
-git add mods/PalworldEditor/src/dllmain.cpp
-git commit -m "refactor: rely on runtime item discovery"
-```
-
-### Task 3: Complete naming and documentation migration
+### Task 2: Complete naming and documentation migration
 
 **Files:**
 - Modify: `mods/PalworldEditor/src/dllmain.cpp`
@@ -206,7 +191,7 @@ git add README.md cmake/Deploy.cmake mods/PalworldEditor
 git commit -m "refactor: complete PalworldEditor naming migration"
 ```
 
-### Task 4: Run full project verification
+### Task 3: Run full project verification
 
 **Files:**
 - Verify: all task-owned files
