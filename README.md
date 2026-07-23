@@ -1,82 +1,88 @@
-# MyPalMod — 面向 Palworld 1.0 的 UE4SS C++ mod
+# MyPalMod — Palworld 物品/帕鲁/词条编辑器
 
-一套最小、可用的脚手架，用于以 **C++23**、**CMake** 和 **Ninja** 构建
-[UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) C++ mod。
+一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 **C++23** mod，为 Palworld 1.0 提供**游戏内物品编辑、帕鲁被动词条修改**功能。通过 UE4SS GUI 的浮动 ImGui 窗口操作，不依赖游戏 F10 控制台（Palworld 上已损坏）。
 
-mod DLL 在构建期与具体游戏无关；Palworld 相关的行为由你装到游戏里的 UE4SS 运行时（Palworld 1.0 需要用
-**experimental / 实验版**）提供。架构细节见 [CLAUDE.md](./CLAUDE.md)。
+## 功能
+
+| 功能 | 说明 |
+|---|---|
+| **给予物品** | 输入物品 ID + 数量 → 调 `AddItem_ServerInternal` |
+| **物品浏览器** | 扫描全部游戏物品定义（`UPalStaticItemDataBase`）→ 搜索 → 点击填充 |
+| **背包列表** | 读取主背包 → 显示物品 × 数量 |
+| **修改数量** | 选中物品 → 设置新数量（写 `StackCount`） |
+| **帕鲁列表** | 扫描全部 `PalIndividualCharacterParameter` → 标记 `[boxed]`/`[active]` |
+| **当前查看帕鲁** | 游戏内查看帕鲁详情时自动识别（hook `GetPassiveSkillList`）|
+| **词条编辑** | AddPassiveSkill / RemovePassiveSkill / Read Passives |
+| **类名发现** | 扫描 UObject 直方图（调试用） |
 
 ## 前置依赖
 
-- **Visual Studio 2022**（最新版）—— *"使用 C++ 的桌面开发"*（Desktop development with C++）工作负载（提供 MSVC + Ninja）。
-- **CMake ≥ 3.22**、**Git**。
-- 已在 Palworld 中安装 **UE4SS experimental**（Steam 创意工坊："UE4SS Experimental" + PalSchema，或
-  [GitHub release](https://github.com/UE4SS-RE/RE-UE4SS/releases)）。
-- **不需要** Rust。
+- **Visual Studio 2022**（最新）+ *"使用 C++ 的桌面开发"*（MSVC + Ninja）
+- **CMake ≥ 3.22**，**Git**
+- 游戏内装好 **UE4SS Experimental (Palworld)**（Steam Workshop，含 `MemberVariableLayout.ini`）
 
 ## 快速开始
 
-所有命令都请在 **"x64 Native Tools Command Prompt for VS 2022"**（或 VS Developer PowerShell）中运行，
-以保证 `cl.exe`/`ninja` 在 PATH 中。
+所有命令在 **"x64 Native Tools Command Prompt for VS 2022"**（或 VS Developer PowerShell）中运行。
 
 ```powershell
-# 1. 克隆 RE-UE4SS 并初始化子模块
+# 1. 克隆 RE-UE4SS + 子模块
 pwsh scripts/setup.ps1
 
-# 2. 把部署目标指向你的游戏安装目录（包含 Pal/Binaries/Win64 的那个文件夹）
-$env:PALWORLD_INSTALL_DIR = "C:\Program Files (x86)\Steam\steamapps\common\Palworld"
-
-# 3. 配置 + 构建
+# 2. 配置 + 构建
 cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64
 #    -> build/Game__Shipping__Win64/bin/MyPalMod.dll
 
-# 4. 部署到游戏并启用
+# 3. 部署到游戏
+$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"  # 游戏安装目录
 cmake --build --preset ninja-msvc-x64 --target deploy
-#    -> Pal/Binaries/Win64/ue4ss/Mods/MyPalMod/dlls/main.dll（+ enabled.txt）
+#    -> Pal/Binaries/Win64/ue4ss/Mods/MyPalMod/dlls/main.dll + enabled.txt
 ```
 
-启动 Palworld。UE4SS 控制台应打印 `MyPalMod loaded`，扫描结束后打印
-`Object Name: /Script/CoreUObject.Object`。
+## 使用方法
+
+1. 启动 Palworld，读档进入游戏。
+2. 打开 **UE4SS GUI**（与游戏同时出现的独立窗口）。
+3. 点击 **MyPalMod** 标签 → 弹出浮动窗口。
+
+### 物品编辑
+- **Give items**：输入物品 ID（如 `PalSphere_Tera`）+ 数量 → Give。
+- **Item browser**：点 "Scan game items" 扫描全部物品 → 搜索 → 点击自动填入。
+- **Refresh inventory** → 列出当前背包 → 选中 → Set count 修改数量。
+
+### 帕鲁词条
+- **方式一（推荐）**：在游戏内打开帕鲁盒子 → 查看一只帕鲁 → 浮动窗口自动显示 "Currently Viewed: [物种名]" → 输入词条 SkillId → Add/Remove。
+- **方式二**：Scan Pals → 从列表选 → Add/Remove。
+- **获取词条 SkillId**：选中帕鲁后点 Read → Console 打印该帕鲁现有的词条 FName（如 `ElementResist_Leaf_1_PAL`）。
+
+## 物品 ID 参考
+
+Bare ID（无前缀），完整列表见 [ItemIDs.txt](https://github.com/KURAMAAA0/PalModding/blob/main/ItemIDs.txt)。常用：`PalSphere`、`PalSphere_Tera`、`PalSphere_Legend`、`Stone`、`Wood`、`Money`、`AncientParts2`。
 
 ## 目录结构
 
 ```
-Palworld/
-├── CMakeLists.txt        super-build：add_subdirectory(RE-UE4SS)；add_subdirectory(mods)
-├── CMakePresets.json     Ninja + MSVC x64 preset（UE4SS_VERSION_CHECK=OFF）
-├── cmake/Deploy.cmake    `deploy` 自定义 target -> 游戏 ue4ss/Mods/<ModName>/dlls/main.dll
-├── scripts/              setup.ps1（克隆 RE-UE4SS）、build.ps1、deploy.ps1
-├── RE-UE4SS/             由 setup.ps1 克隆（已 gitignore）——提供 UE4SS target
-└── mods/MyPalMod/        mod 本体：CMakeLists.txt + src/dllmain.cpp
+mods/MyPalMod/
+├── src/
+│   ├── dllmain.cpp      Mod 类 + GUI + 请求分发 + 钩子
+│   ├── pal_game.hpp     游戏交互函数（物品/背包/帕鲁/词条）
+│   ├── item_database.h  精选物品 ID 列表
+│   └── CMakeLists.txt
+├── CMakeLists.txt       Super-build：add_subdirectory(RE-UE4SS) + add_subdirectory(mods)
+├── CMakePresets.json    Ninja + MSVC x64 preset
+├── cmake/Deploy.cmake   deploy target -> 游戏 Mods 目录
+└── scripts/             setup.ps1 / build.ps1 / deploy.ps1
 ```
 
-## 新增一个 mod
+## 已知限制
 
-把 `mods/MyPalMod/` 复制为 `mods/<新名字>/`，修改其 `CMakeLists.txt` 里的 `TARGET` 和 `dllmain.cpp` 里的
-类名，然后在父级 `add_subdirectory(<新名字>)`。如果你复用 `cmake/Deploy.cmake`，每个 mod 都会有自己的
-`deploy` 形式 target。
+- F10 游戏控制台不可用（Palworld ConsoleManager 签名歧义）；所有操作通过 UE4SS GUI。
+- 直接写 `StackCount` 绕过游戏复制/通知逻辑；单机可用，多人不可靠。
+- `ProcessEvent` 参数布局基于手动声明的结构体；游戏更新后可能需要修正。
+- `GetPalAssignablePassiveIDs`（批量获取词条）会导致内存损坏/崩溃，已禁用；用 Read Passives 替代。
 
-## 注意事项
+## 参考
 
-- Ninja 是单配置生成器；preset **显式设置** `CMAKE_BUILD_TYPE=Game__Shipping__Win64`（UE4SS 的默认 triplet）。
-  必须显式设置——否则 imgui 依赖（经其 examples 的 `if(NOT CMAKE_BUILD_TYPE) set(Debug FORCE)`）会把默认改成
-  `Debug`，导致 UE4SS 的 triplet 宏不生效、编译失败。
-- 如果你想用加载顺序控制来启用 mod（而不是用 `enabled.txt`），可在
-  `Pal/Binaries/Win64/ue4ss/Mods/mods.txt` 中 `Keybinds` 行的**上方**加一行 `MyPalMod : 1`。
-
-## 编辑器（clangd / clang-format / clang-tidy）
-
-`.clangd`、`.clang-format` 和 `.clang-tidy` 启用了基于 clangd 的静态分析。clangd 读取
-`build/compile_commands.json`（结构变动后请重新运行 `cmake --preset ninja-msvc-x64` 来重新生成）。本工程用
-MSVC 构建，所以 clangd 会自动把 `cl.exe` 的选项翻译成它的 clang-cl 前端。clang-tidy 的作用范围限定在
-`mods/`，从不分析第三方 `RE-UE4SS/` 头文件。如果 clangd 找不到 Windows SDK，请给它 MSVC 驱动，例如
-VS Code：`"clangd.arguments": ["--query-driver=C:/Program Files/Microsoft Visual Studio/**/Hostx64/x64/cl.exe"]`。
-行尾通过 `.gitattributes`/`.editorconfig` 统一为 LF。
-
-## 参考资料
-
-- [UE4SS C++ mod 模板](https://github.com/UE4SS-RE/UE4SSCPPTemplate)
-- [创建 C++ mod](https://docs.ue4ss.com/guides/creating-a-c++-mod.html)
-- [安装 C++ mod](https://docs.ue4ss.com/dev/guides/installing-a-c++-mod.html)
-- [RE-UE4SS](https://github.com/UE4SS-RE/RE-UE4SS)
+- [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) · [创建 C++ mod](https://docs.ue4ss.com/guides/creating-a-c++-mod.html)
+- [pwmodding.wiki](https://pwmodding.wiki) · [ItemIDs](https://github.com/KURAMAAA0/PalModding/blob/main/ItemIDs.txt)
