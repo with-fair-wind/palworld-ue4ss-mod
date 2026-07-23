@@ -1,6 +1,3 @@
-#include "skill_catalog.hpp"
-#include "skill_editor_service.hpp"
-
 #include <algorithm>
 #include <deque>
 #include <iostream>
@@ -9,24 +6,23 @@
 #include <unordered_set>
 #include <vector>
 
-namespace
-{
+#include "skill_catalog.hpp"
+#include "skill_editor_service.hpp"
+
+namespace {
 auto failures = 0;
 
-void check(const bool condition, const char* expression, const int line)
-{
-    if (!condition)
-    {
+void check(const bool condition, const char* expression, const int line) {
+    if (!condition) {
         std::cerr << "FAIL line " << line << ": " << expression << '\n';
         ++failures;
     }
 }
-}
+}  // namespace
 
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
-void test_skill_catalog_search_and_labels()
-{
+void test_skill_catalog_search_and_labels() {
     const std::vector<skill_editor::SkillOption> options{
         {.id = "Passive_Swift", .localizedName = "神速"},
         {.id = "Passive_Workaholic", .localizedName = "工作狂"},
@@ -41,8 +37,7 @@ void test_skill_catalog_search_and_labels()
     CHECK(skill_editor::skill_label(options[2]) == "Passive_Unknown");
 }
 
-void test_skill_catalog_filter_and_deduplicate()
-{
+void test_skill_catalog_filter_and_deduplicate() {
     const std::vector<skill_editor::SkillOption> options{
         {.id = "Passive_Swift", .localizedName = "神速"},
         {.id = "Passive_Workaholic", .localizedName = "工作狂"},
@@ -59,12 +54,12 @@ void test_skill_catalog_filter_and_deduplicate()
     CHECK(visible[0].id == "Passive_Workaholic");
 }
 
-void test_skill_catalog_refresh_keeps_last_success()
-{
+void test_skill_catalog_refresh_keeps_last_success() {
     skill_editor::SkillCatalogSnapshot previous{
         .passiveSkills = {{.id = "Passive_Swift", .localizedName = "神速"}},
-        .activeSkills = {
-            {.id = "FireBall", .localizedName = "火球", .activeValue = std::uint16_t{1}}},
+        .activeSkills = {{.id = "FireBall",
+                          .localizedName = "火球",
+                          .activeValue = std::uint16_t{1}}},
         .ready = true,
     };
     skill_editor::SkillCatalogSnapshot failed{.error = "runtime lookup failed"};
@@ -81,8 +76,7 @@ void test_skill_catalog_refresh_keeps_last_success()
     CHECK(unavailable.error == "runtime lookup failed");
 }
 
-class FakeSkillGateway final : public skill_editor::ISkillGateway
-{
+class FakeSkillGateway final : public skill_editor::ISkillGateway {
 public:
     bool valid{true};
     skill_editor::SkillState state;
@@ -92,66 +86,53 @@ public:
     std::deque<std::optional<std::vector<skill_editor::ActiveSkill>>> rewriteStates;
     std::vector<std::string> calls;
 
-    auto is_valid(const skill_editor::SkillTarget) const -> bool override
-    {
+    auto is_valid(const skill_editor::SkillTarget) const -> bool override {
         return valid;
     }
 
-    auto read_state(const skill_editor::SkillTarget) -> skill_editor::SkillState override
-    {
+    auto read_state(const skill_editor::SkillTarget) -> skill_editor::SkillState override {
         calls.emplace_back("read");
         return state;
     }
 
-    auto add_passive(const skill_editor::SkillTarget, const std::string_view id) -> bool override
-    {
+    auto add_passive(const skill_editor::SkillTarget, const std::string_view id) -> bool override {
         calls.emplace_back("add:" + std::string(id));
         const bool succeeds = pop_or_default(addOutcomes, true);
-        if (succeeds)
-        {
+        if (succeeds) {
             state.passiveIds.emplace_back(id);
         }
         return succeeds;
     }
 
-    auto remove_passive(const skill_editor::SkillTarget, const std::string_view id) -> bool override
-    {
+    auto remove_passive(const skill_editor::SkillTarget, const std::string_view id)
+        -> bool override {
         calls.emplace_back("remove:" + std::string(id));
         const bool succeeds = pop_or_default(removeOutcomes, true);
-        if (succeeds)
-        {
+        if (succeeds) {
             std::erase(state.passiveIds, id);
         }
         return succeeds;
     }
 
-    auto rewrite_active(
-        const skill_editor::SkillTarget,
-        const std::span<const skill_editor::ActiveSkill> skills) -> bool override
-    {
+    auto rewrite_active(const skill_editor::SkillTarget,
+                        const std::span<const skill_editor::ActiveSkill> skills) -> bool override {
         calls.emplace_back("rewrite");
         const bool succeeds = pop_or_default(rewriteOutcomes, true);
-        if (!rewriteStates.empty())
-        {
+        if (!rewriteStates.empty()) {
             auto replacement = std::move(rewriteStates.front());
             rewriteStates.pop_front();
-            if (replacement.has_value())
-            {
+            if (replacement.has_value()) {
                 state.activeSkills = std::move(*replacement);
             }
-        }
-        else if (succeeds)
-        {
+        } else if (succeeds) {
             state.activeSkills.assign(skills.begin(), skills.end());
         }
         return succeeds;
     }
 
 private:
-    static auto pop_or_default(std::deque<bool>& values, const bool fallback) -> bool
-    {
-        if (values.empty())
-        {
+    static auto pop_or_default(std::deque<bool>& values, const bool fallback) -> bool {
+        if (values.empty()) {
             return fallback;
         }
         const bool result = values.front();
@@ -160,11 +141,8 @@ private:
     }
 };
 
-auto passive_request(
-    const skill_editor::SkillEditOperation operation,
-    std::string oldId = {},
-    std::string newId = {}) -> skill_editor::SkillEditRequest
-{
+auto passive_request(const skill_editor::SkillEditOperation operation, std::string oldId = {},
+                     std::string newId = {}) -> skill_editor::SkillEditRequest {
     return {
         .target = 0x1234,
         .kind = skill_editor::SkillKind::passive,
@@ -174,8 +152,7 @@ auto passive_request(
     };
 }
 
-void test_passive_edits_validate_target_and_limits()
-{
+void test_passive_edits_validate_target_and_limits() {
     FakeSkillGateway gateway;
     gateway.valid = false;
     auto result = skill_editor::execute_skill_edit(
@@ -196,8 +173,7 @@ void test_passive_edits_validate_target_and_limits()
     CHECK(result.status == skill_editor::SkillEditStatus::rejected);
 }
 
-void test_passive_add_remove_and_replace_reread_state()
-{
+void test_passive_add_remove_and_replace_reread_state() {
     FakeSkillGateway gateway;
     gateway.state.passiveIds = {"A", "B"};
 
@@ -218,8 +194,7 @@ void test_passive_add_remove_and_replace_reread_state()
     CHECK(std::ranges::contains(result.state.passiveIds, "D"));
 }
 
-void test_passive_replace_rolls_back_on_failure()
-{
+void test_passive_replace_rolls_back_on_failure() {
     FakeSkillGateway gateway;
     gateway.state.passiveIds = {"A", "B"};
     gateway.addOutcomes = {false, true};
@@ -238,11 +213,9 @@ void test_passive_replace_rolls_back_on_failure()
     CHECK(!std::ranges::contains(result.state.passiveIds, "A"));
 }
 
-auto active_request(
-    const skill_editor::SkillEditOperation operation,
-    const std::size_t slot,
-    std::optional<skill_editor::ActiveSkill> skill = std::nullopt) -> skill_editor::SkillEditRequest
-{
+auto active_request(const skill_editor::SkillEditOperation operation, const std::size_t slot,
+                    std::optional<skill_editor::ActiveSkill> skill = std::nullopt)
+    -> skill_editor::SkillEditRequest {
     return {
         .target = 0x1234,
         .kind = skill_editor::SkillKind::active,
@@ -252,8 +225,7 @@ auto active_request(
     };
 }
 
-void test_active_edits_validate_three_compact_slots()
-{
+void test_active_edits_validate_three_compact_slots() {
     FakeSkillGateway gateway;
     gateway.state.activeSkills = {{1, "FireBall"}};
 
@@ -279,8 +251,7 @@ void test_active_edits_validate_three_compact_slots()
     CHECK(result.status == skill_editor::SkillEditStatus::rejected);
 }
 
-void test_active_add_replace_and_remove_preserve_order()
-{
+void test_active_add_replace_and_remove_preserve_order() {
     FakeSkillGateway gateway;
     gateway.state.activeSkills = {{1, "FireBall"}};
 
@@ -295,7 +266,8 @@ void test_active_add_replace_and_remove_preserve_order()
         gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
     CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
     CHECK(result.state.activeSkills ==
-          std::vector<skill_editor::ActiveSkill>({{1, "FireBall"}, {4, "IceMissile"}, {3, "WindCutter"}}));
+          std::vector<skill_editor::ActiveSkill>(
+              {{1, "FireBall"}, {4, "IceMissile"}, {3, "WindCutter"}}));
 
     result = skill_editor::execute_skill_edit(
         gateway, active_request(skill_editor::SkillEditOperation::remove, 1));
@@ -304,10 +276,10 @@ void test_active_add_replace_and_remove_preserve_order()
           std::vector<skill_editor::ActiveSkill>({{1, "FireBall"}, {3, "WindCutter"}}));
 }
 
-void test_active_edit_rolls_back_complete_original_sequence()
-{
+void test_active_edit_rolls_back_complete_original_sequence() {
     FakeSkillGateway gateway;
-    const std::vector<skill_editor::ActiveSkill> original{{1, "FireBall"}, {2, "WaterGun"}, {3, "WindCutter"}};
+    const std::vector<skill_editor::ActiveSkill> original{
+        {1, "FireBall"}, {2, "WaterGun"}, {3, "WindCutter"}};
     gateway.state.activeSkills = original;
     gateway.rewriteStates = {
         std::vector<skill_editor::ActiveSkill>{{9, "Wrong"}},
@@ -328,12 +300,10 @@ void test_active_edit_rolls_back_complete_original_sequence()
     result = skill_editor::execute_skill_edit(
         gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
     CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
-    CHECK(result.state.activeSkills ==
-          std::vector<skill_editor::ActiveSkill>({{9, "Wrong"}}));
+    CHECK(result.state.activeSkills == std::vector<skill_editor::ActiveSkill>({{9, "Wrong"}}));
 }
 
-void test_skill_edit_queue_is_fifo()
-{
+void test_skill_edit_queue_is_fifo() {
     skill_editor::SkillEditQueue queue;
     queue.push({.target = 1});
     queue.push({.target = 2});
@@ -353,8 +323,7 @@ void test_skill_edit_queue_is_fifo()
     CHECK(queue.size() == 0);
 }
 
-auto main() -> int
-{
+auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
     test_skill_catalog_refresh_keeps_last_success();

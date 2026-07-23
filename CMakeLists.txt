@@ -15,6 +15,9 @@ project(PalworldMods LANGUAGES CXX)
 
 include(CTest)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+include(PalworldTooling)
+
 # Guard: RE-UE4SS must be cloned (by scripts/setup.ps1) before configuring.
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/RE-UE4SS/CMakeLists.txt")
     message(FATAL_ERROR

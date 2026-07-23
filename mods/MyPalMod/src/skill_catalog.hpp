@@ -9,29 +9,24 @@
 #include <utility>
 #include <vector>
 
-namespace skill_editor
-{
-struct SkillOption
-{
+namespace skill_editor {
+struct SkillOption {
     std::string id;
     std::string localizedName;
     std::optional<std::uint16_t> activeValue;
 };
 
-struct SkillCatalogSnapshot
-{
+struct SkillCatalogSnapshot {
     std::vector<SkillOption> passiveSkills;
     std::vector<SkillOption> activeSkills;
     std::string error;
     bool ready{};
 };
 
-[[nodiscard]] inline auto with_catalog_fallback(
-    const SkillCatalogSnapshot& previous,
-    const SkillCatalogSnapshot& refreshed) -> SkillCatalogSnapshot
-{
-    if (refreshed.ready || !previous.ready)
-    {
+[[nodiscard]] inline auto with_catalog_fallback(const SkillCatalogSnapshot& previous,
+                                                const SkillCatalogSnapshot& refreshed)
+    -> SkillCatalogSnapshot {
+    if (refreshed.ready || !previous.ready) {
         return refreshed;
     }
 
@@ -40,32 +35,26 @@ struct SkillCatalogSnapshot
     return fallback;
 }
 
-[[nodiscard]] inline auto ascii_lower(const std::string_view value) -> std::string
-{
+[[nodiscard]] inline auto ascii_lower(const std::string_view value) -> std::string {
     std::string result(value);
-    for (auto& character : result)
-    {
-        if (character >= 'A' && character <= 'Z')
-        {
+    for (auto& character : result) {
+        if (character >= 'A' && character <= 'Z') {
             character = static_cast<char>(character - 'A' + 'a');
         }
     }
     return result;
 }
 
-[[nodiscard]] inline auto skill_label(const SkillOption& option) -> std::string
-{
-    if (option.localizedName.empty())
-    {
+[[nodiscard]] inline auto skill_label(const SkillOption& option) -> std::string {
+    if (option.localizedName.empty()) {
         return option.id;
     }
     return option.localizedName + " [" + option.id + "]";
 }
 
-[[nodiscard]] inline auto matches_skill(const SkillOption& option, const std::string_view query) -> bool
-{
-    if (query.empty())
-    {
+[[nodiscard]] inline auto matches_skill(const SkillOption& option, const std::string_view query)
+    -> bool {
+    if (query.empty()) {
         return true;
     }
 
@@ -74,34 +63,29 @@ struct SkillCatalogSnapshot
            ascii_lower(option.localizedName).contains(normalizedQuery);
 }
 
-[[nodiscard]] inline auto deduplicate_skills(std::vector<SkillOption> options) -> std::vector<SkillOption>
-{
+[[nodiscard]] inline auto deduplicate_skills(std::vector<SkillOption> options)
+    -> std::vector<SkillOption> {
     std::unordered_set<std::string> seen;
     std::vector<SkillOption> result;
     result.reserve(options.size());
-    for (auto& option : options)
-    {
-        if (!option.id.empty() && seen.insert(option.id).second)
-        {
+    for (auto& option : options) {
+        if (!option.id.empty() && seen.insert(option.id).second) {
             result.push_back(std::move(option));
         }
     }
     return result;
 }
 
-[[nodiscard]] inline auto filter_skills(
-    const std::span<const SkillOption> options,
-    const std::string_view query,
-    const std::unordered_set<std::string>& excludedIds) -> std::vector<SkillOption>
-{
+[[nodiscard]] inline auto filter_skills(const std::span<const SkillOption> options,
+                                        const std::string_view query,
+                                        const std::unordered_set<std::string>& excludedIds)
+    -> std::vector<SkillOption> {
     std::vector<SkillOption> result;
-    for (const auto& option : options)
-    {
-        if (!excludedIds.contains(option.id) && matches_skill(option, query))
-        {
+    for (const auto& option : options) {
+        if (!excludedIds.contains(option.id) && matches_skill(option, query)) {
             result.push_back(option);
         }
     }
     return result;
 }
-}
+}  // namespace skill_editor
