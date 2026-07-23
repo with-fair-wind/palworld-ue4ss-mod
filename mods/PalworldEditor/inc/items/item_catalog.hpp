@@ -35,8 +35,8 @@ struct ItemCatalogSnapshot {
     return item.localizedName + " [" + item.id + ']';
 }
 
-[[nodiscard]] inline auto item_label(const ItemCatalogSnapshot& catalog,
-                                     const std::string_view id) -> std::string {
+[[nodiscard]] inline auto item_label(const ItemCatalogSnapshot& catalog, const std::string_view id)
+    -> std::string {
     const auto found = catalog.labelsById.find(std::string(id));
     return found == catalog.labelsById.end() ? std::string(id) : found->second;
 }
@@ -61,8 +61,7 @@ struct ItemCatalogSnapshot {
     return filtered;
 }
 
-[[nodiscard]] inline auto make_item_catalog(std::vector<ItemOption> items)
-    -> ItemCatalogSnapshot {
+[[nodiscard]] inline auto make_item_catalog(std::vector<ItemOption> items) -> ItemCatalogSnapshot {
     std::vector<ItemOption> uniqueItems;
     uniqueItems.reserve(items.size());
     std::unordered_map<std::string, std::size_t> indexesById;

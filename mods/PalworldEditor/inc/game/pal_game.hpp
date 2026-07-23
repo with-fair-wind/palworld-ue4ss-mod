@@ -11,9 +11,11 @@
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <items/item_catalog.hpp>
 #include <support/text_encoding.hpp>
 
 using namespace RC;
@@ -190,8 +192,34 @@ inline auto give_items(const std::string& itemId, int32 count) -> void {
         params.Result);
 }
 
-inline auto scan_all_items() -> std::vector<std::string> {
-    std::vector<std::string> ids;
+inline auto get_ui_utility() -> UObject* {
+    if (auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
+            nullptr, nullptr, STR("/Script/Pal.Default__PalUIUtility"))) {
+        return utility;
+    }
+    return UObjectGlobals::FindFirstOf(STR("PalUIUtility"));
+}
+
+inline auto localized_item_name(UObject* utility, UFunction* function, UObject* worldContext,
+                                const FName& id) -> std::string {
+    if (utility == nullptr || function == nullptr || worldContext == nullptr) {
+        return {};
+    }
+    struct Params {
+        UObject* WorldContextObject;
+        FName StaticItemId;
+        FText OutName;
+    } params{.WorldContextObject = worldContext, .StaticItemId = id};
+    utility->ProcessEvent(function, &params);
+    return text_encoding::to_utf8(params.OutName.ToString());
+}
+
+inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
+    std::vector<item_catalog::ItemOption> items;
+    auto* utility = get_ui_utility();
+    auto* function = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalUIUtility:GetItemName"));
+    auto* worldContext = UObjectGlobals::FindFirstOf(kInventoryClassName);
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
         UClass* cls = obj->GetClassPrivate();
         if (cls == nullptr) {
@@ -216,15 +244,17 @@ inline auto scan_all_items() -> std::vector<std::string> {
         if (FName* id = idProp->ContainerPtrToValuePtr<FName>(obj)) {
             const std::wstring w = id->ToString();
             if (!w.empty()) {
-                ids.emplace_back(text_encoding::to_utf8(w));
+                items.push_back(
+                    {.id = text_encoding::to_utf8(w),
+                     .localizedName = localized_item_name(utility, function, worldContext, *id)});
             }
         }
         return LoopAction::Continue;
     });
-    std::sort(ids.begin(), ids.end());
+    auto catalog = item_catalog::make_item_catalog(std::move(items));
     Output::send<LogLevel::Warning>(STR("scan_all_items: found {} item definitions\n"),
-                                    static_cast<int32>(ids.size()));
-    return ids;
+                                    static_cast<int32>(catalog.items.size()));
+    return catalog;
 }
 
 // ---------------------------------------------------------------------------

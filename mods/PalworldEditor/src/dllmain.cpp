@@ -31,6 +31,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <game/pal_game.hpp>
 #include <imgui.h>
+#include <items/item_catalog.hpp>
 #include <skills/pal_skills.hpp>
 #include <support/text_encoding.hpp>
 
@@ -376,35 +377,23 @@ private:
         ImGui::InputText("##search", self->search_buf_, sizeof(self->search_buf_));
         {
             const std::lock_guard lock(self->inv_mutex_);
-            ImGui::TextDisabled("(%d items)", static_cast<int>(self->item_db_cache_.size()));
+            ImGui::TextDisabled("(%d items)", static_cast<int>(self->item_db_cache_.items.size()));
         }
         ImGui::BeginChild("browser", ImVec2(380, 160), true);
         {
-            std::string filter(self->search_buf_);
-            for (auto& c : filter) {
-                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            }
-            auto tryItem = [&](const char* raw) {
-                std::string lower(raw);
-                for (auto& c : lower) {
-                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                }
-                if (!filter.empty() && lower.find(filter) == std::string::npos) {
-                    return;
-                }
-                if (ImGui::Selectable(raw)) {
-                    const auto copyLen =
-                        std::min<std::size_t>(std::strlen(raw), sizeof(self->item_buf_) - 1);
-                    std::memcpy(self->item_buf_, raw, copyLen);
-                    self->item_buf_[copyLen] = '\0';
-                }
-            };
             const std::lock_guard lock(self->inv_mutex_);
-            if (self->item_db_cache_.empty()) {
+            if (self->item_db_cache_.items.empty()) {
                 ImGui::TextDisabled("尚未发现物品，请重新扫描。");
             }
-            for (const auto& item : self->item_db_cache_) {
-                tryItem(item.c_str());
+            const auto visible =
+                item_catalog::filter_items(self->item_db_cache_, self->search_buf_);
+            for (const auto* item : visible) {
+                const auto label = item_catalog::item_label(*item);
+                if (ImGui::Selectable(label.c_str())) {
+                    const auto copyLen = std::min(item->id.size(), sizeof(self->item_buf_) - 1);
+                    std::memcpy(self->item_buf_, item->id.data(), copyLen);
+                    self->item_buf_[copyLen] = '\0';
+                }
             }
         }
         ImGui::EndChild();
@@ -421,8 +410,9 @@ private:
             ImGui::BeginChild("invlist", ImVec2(380, 220), true);
             for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i) {
                 const auto& e = self->inv_cache_[i];
-                const std::string label =
-                    e.item_id + "  x" + std::to_string(e.count) + " ##inv" + std::to_string(i);
+                const auto itemLabel = item_catalog::item_label(self->item_db_cache_, e.item_id);
+                const auto label =
+                    itemLabel + "  x" + std::to_string(e.count) + " ##inv" + std::to_string(i);
                 if (ImGui::Selectable(label.c_str(), self->selected_ == i)) {
                     self->selected_ = i;
                     self->set_count_input_ = e.count;
@@ -433,7 +423,8 @@ private:
             if (self->selected_ >= 0 &&
                 self->selected_ < static_cast<int>(self->inv_cache_.size())) {
                 const auto& e = self->inv_cache_[self->selected_];
-                ImGui::Text("Selected: %s (slot %d, x%d)", e.item_id.c_str(),
+                const auto itemLabel = item_catalog::item_label(self->item_db_cache_, e.item_id);
+                ImGui::Text("Selected: %s (slot %d, x%d)", itemLabel.c_str(),
                             static_cast<int>(e.slot_index), e.count);
                 ImGui::InputInt("New count", &self->set_count_input_);
                 self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
@@ -703,7 +694,7 @@ private:
     // Inventory + item DB cache (game thread writes, GUI thread reads)
     std::mutex inv_mutex_;
     std::vector<InvEntry> inv_cache_;
-    std::vector<std::string> item_db_cache_;
+    item_catalog::ItemCatalogSnapshot item_db_cache_;
 
     std::atomic<bool> want_read_{false};
     std::atomic<bool> want_discover_{false};
