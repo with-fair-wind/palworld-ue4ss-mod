@@ -50,6 +50,30 @@ cmake --build --preset ninja-msvc-x64 --target deploy
 #    -> Pal/Binaries/Win64/ue4ss/Mods/MyPalMod/dlls/main.dll + enabled.txt
 ```
 
+## 代码质量工具
+
+clangd 会自动读取根目录的 `.clang-format`、`.clang-tidy` 和
+`build/compile_commands.json`。CMake 还会在 PATH 中找到相应 LLVM 工具时注册以下手动 target；
+它们不会随普通构建自动执行，也不会处理 `RE-UE4SS/`：
+
+```powershell
+# 按 Google 风格格式化 mods/ 下 Git 跟踪的 C/C++ 文件
+cmake --build --preset ninja-msvc-x64 --target format
+
+# 只检查格式，不修改文件
+cmake --build --preset ninja-msvc-x64 --target format-check
+
+# 对 compile_commands.json 中 mods/ 下的翻译单元应用 clang-tidy 修复
+cmake --build --preset ninja-msvc-x64 --target tidy
+
+# 只读静态检查；默认不会把 warning 升级为 error
+cmake --build --preset ninja-msvc-x64 --target tidy-check
+```
+
+如需让 `tidy-check` 遇到任意诊断时失败，配置时增加
+`-DPALWORLD_CLANG_TIDY_WARNINGS_AS_ERRORS=ON`。修改 CMake 或新增源文件后，应重新运行
+`cmake --preset ninja-msvc-x64` 刷新 `build/compile_commands.json`。
+
 ## 使用方法
 
 1. 启动 Palworld，读档进入游戏。
