@@ -6,6 +6,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <items/item_catalog.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
 
@@ -74,6 +75,35 @@ void test_skill_catalog_refresh_keeps_last_success() {
     CHECK(!unavailable.ready);
     CHECK(unavailable.passiveSkills.empty());
     CHECK(unavailable.error == "runtime lookup failed");
+}
+
+void test_item_catalog_labels_and_search() {
+    const item_catalog::ItemOption localized{.id = "PalSphere", .localizedName = "帕鲁球"};
+    const item_catalog::ItemOption fallback{.id = "UnknownItem"};
+
+    CHECK(item_catalog::item_label(localized) == "帕鲁球 [PalSphere]");
+    CHECK(item_catalog::item_label(fallback) == "UnknownItem");
+    CHECK(item_catalog::matches_item(localized, "帕鲁"));
+    CHECK(item_catalog::matches_item(localized, "palsphere"));
+    CHECK(!item_catalog::matches_item(localized, "木材"));
+}
+
+void test_item_catalog_deduplicates_indexes_and_sorts() {
+    auto catalog = item_catalog::make_item_catalog({
+        {.id = "Wood", .localizedName = "Zulu"},
+        {.id = "PalSphere"},
+        {.id = "PalSphere", .localizedName = "Alpha"},
+        {.id = "Wood", .localizedName = "Repeated"},
+    });
+
+    CHECK(catalog.items.size() == 2);
+    CHECK(item_catalog::item_label(catalog, "PalSphere") == "Alpha [PalSphere]");
+    CHECK(item_catalog::item_label(catalog, "Missing") == "Missing");
+    CHECK(catalog.items[0].id == "PalSphere");
+
+    const auto filtered = item_catalog::filter_items(catalog, "alpha");
+    CHECK(filtered.size() == 1);
+    CHECK(filtered[0]->id == "PalSphere");
 }
 
 class FakeSkillGateway final : public skill_editor::ISkillGateway {
@@ -327,6 +357,8 @@ auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
     test_skill_catalog_refresh_keeps_last_success();
+    test_item_catalog_labels_and_search();
+    test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();
     test_passive_add_remove_and_replace_reread_state();
     test_passive_replace_rolls_back_on_failure();
