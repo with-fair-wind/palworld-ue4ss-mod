@@ -5,4 +5,4 @@
 # only within its own scope, so without this mod DLLs would land in build/mods/<name>/.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>/bin")
 
-add_subdirectory(MyPalMod)
+add_subdirectory(PalworldEditor)

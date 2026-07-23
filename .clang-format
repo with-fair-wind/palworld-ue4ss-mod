@@ -1,35 +1,44 @@
 ---
-# .clang-format — formatting for the mod's C/C++ sources.
-# Allman braces + 4-space indent + 120-column limit, matching the existing code and
-# the UE4SS style we interoperate with. Run on a file:  clang-format -i <file>
+# Google C++ style adapted for this C++23 UE4SS mod.
+# clangd and the manual CMake targets both discover this file automatically.
 
-BasedOnStyle: Microsoft
+BasedOnStyle: Google
 Language: Cpp
-Standard: c++20
-ColumnLimit: 120
+Standard: Latest
+InsertNewlineAtEOF: true
+
 IndentWidth: 4
 TabWidth: 4
 UseTab: Never
+ColumnLimit: 100
 AccessModifierOffset: -4
-AlignAfterOpenBracket: Align
-AlignTrailingComments: true
-AlignOperands: true
-BinPackArguments: false
-BinPackParameters: false
-BreakBeforeBraces: Allman
+
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: All
+
+BreakBeforeBraces: Attach
 BreakConstructorInitializers: BeforeColon
-ConstructorInitializerIndentWidth: 4
-ContinuationIndentWidth: 4
-Cpp11BracedListStyle: true
+BreakInheritanceList: BeforeColon
+
 DerivePointerAlignment: false
-FixNamespaceComments: true
-IncludeBlocks: Preserve
-IndentCaseLabels: true
 PointerAlignment: Left
-ReflowComments: true
+ReferenceAlignment: Left
+
+SpaceAfterTemplateKeyword: true
+SpaceBeforeCpp11BracedList: false
+SpaceBeforeRangeBasedForLoopColon: true
+
+IncludeBlocks: Regroup
+IncludeCategories:
+  - Regex: '^<[a-z][a-z0-9_]*>$'
+    Priority: 1
+  - Regex: '^<.*\.h(pp)?>$'
+    Priority: 2
+  - Regex: '^".*"$'
+    Priority: 3
 SortIncludes: CaseSensitive
-SpaceBeforeParens: ControlStatements
-SpacesBeforeTrailingComments: 1
-SpacesInAngles: Never
-SpacesInParentheses: false
-SpacesInSquareBrackets: false
+
+FixNamespaceComments: true
+NamespaceIndentation: None

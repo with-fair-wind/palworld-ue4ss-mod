@@ -1,7 +1,7 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    构建并把 MyPalMod 部署到 Palworld 游戏目录（执行 'deploy' target）。
+    构建并把 PalworldEditor 部署到 Palworld 游戏目录（执行 'deploy' target）。
 .DESCRIPTION
     需要在配置时已设置 PALWORLD_INSTALL_DIR
     （通过 -DPALWORLD_INSTALL_DIR=<路径> 或 PALWORLD_INSTALL_DIR 环境变量）。
