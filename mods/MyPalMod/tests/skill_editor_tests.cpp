@@ -59,6 +59,28 @@ void test_skill_catalog_filter_and_deduplicate()
     CHECK(visible[0].id == "Passive_Workaholic");
 }
 
+void test_skill_catalog_refresh_keeps_last_success()
+{
+    skill_editor::SkillCatalogSnapshot previous{
+        .passiveSkills = {{.id = "Passive_Swift", .localizedName = "神速"}},
+        .activeSkills = {
+            {.id = "FireBall", .localizedName = "火球", .activeValue = std::uint16_t{1}}},
+        .ready = true,
+    };
+    skill_editor::SkillCatalogSnapshot failed{.error = "runtime lookup failed"};
+
+    const auto fallback = skill_editor::with_catalog_fallback(previous, failed);
+    CHECK(fallback.ready);
+    CHECK(fallback.passiveSkills.size() == 1);
+    CHECK(fallback.activeSkills.size() == 1);
+    CHECK(fallback.error == "runtime lookup failed");
+
+    const auto unavailable = skill_editor::with_catalog_fallback({}, failed);
+    CHECK(!unavailable.ready);
+    CHECK(unavailable.passiveSkills.empty());
+    CHECK(unavailable.error == "runtime lookup failed");
+}
+
 class FakeSkillGateway final : public skill_editor::ISkillGateway
 {
 public:
@@ -335,6 +357,7 @@ auto main() -> int
 {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
+    test_skill_catalog_refresh_keeps_last_success();
     test_passive_edits_validate_target_and_limits();
     test_passive_add_remove_and_replace_reread_state();
     test_passive_replace_rolls_back_on_failure();

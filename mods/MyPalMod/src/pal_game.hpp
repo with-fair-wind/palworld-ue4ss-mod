@@ -9,6 +9,8 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
+#include "text_encoding.hpp"
+
 #include <algorithm>
 #include <map>
 #include <string>
@@ -150,7 +152,7 @@ inline auto read_inventory() -> std::vector<InvEntry>
             if (FName* sid = itemIdProp->ContainerPtrToValuePtr<FName>(slot))
             {
                 const std::wstring w = sid->ToString();
-                name = std::string(w.begin(), w.end());
+                name = text_encoding::to_utf8(w);
             }
         }
         if (count > 0 && !name.empty())
@@ -200,7 +202,7 @@ inline auto give_items(const std::string& itemId, int32 count) -> void
     {
         return;
     }
-    const std::wstring wide(itemId.begin(), itemId.end());
+    const std::wstring wide = text_encoding::widen_ascii(itemId);
     struct
     {
         FName StaticItemId;
@@ -252,7 +254,7 @@ inline auto scan_all_items() -> std::vector<std::string>
                 const std::wstring w = id->ToString();
                 if (!w.empty())
                 {
-                    ids.emplace_back(w.begin(), w.end());
+                    ids.emplace_back(text_encoding::to_utf8(w));
                 }
             }
             return LoopAction::Continue;
@@ -287,7 +289,7 @@ inline auto scan_pals() -> std::vector<PalEntry>
                 if (FName* charId = spProp->ContainerPtrToValuePtr<FName>(obj))
                 {
                     const std::wstring w = charId->ToString();
-                    name = std::string(w.begin(), w.end());
+                    name = text_encoding::to_utf8(w);
                 }
             }
             if (!name.empty())

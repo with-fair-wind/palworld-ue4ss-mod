@@ -26,6 +26,7 @@
 #include "item_database.h"
 #include "pal_game.hpp"
 #include "pal_skills.hpp"
+#include "text_encoding.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -119,7 +120,7 @@ public:
                     if (FName* charId = spProp->ContainerPtrToValuePtr<FName>(pal))
                     {
                         const std::wstring w = charId->ToString();
-                        name = std::string(w.begin(), w.end());
+                        name = text_encoding::to_utf8(w);
                     }
                 }
             }

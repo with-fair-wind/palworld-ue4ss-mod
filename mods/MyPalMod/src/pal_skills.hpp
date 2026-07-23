@@ -1,6 +1,9 @@
 #pragma once
 
+#include "skill_catalog.hpp"
 #include "skill_editor_service.hpp"
+
+#include <unordered_map>
 
 namespace pal_skills
 {
@@ -14,5 +17,10 @@ public:
     auto rewrite_active(
         skill_editor::SkillTarget target,
         std::span<const skill_editor::ActiveSkill> skills) -> bool override;
+
+    auto load_catalog(skill_editor::SkillTarget contextTarget) -> skill_editor::SkillCatalogSnapshot;
+
+private:
+    std::unordered_map<std::uint16_t, std::string> activeIds_;
 };
 }

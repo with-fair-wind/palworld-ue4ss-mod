@@ -1,16 +1,21 @@
 #include "pal_skills.hpp"
 
 #include "pal_game.hpp"
+#include "text_encoding.hpp"
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
+#include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <string>
+#include <unordered_set>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -27,32 +32,77 @@ enum class EPalWazaID : std::uint16_t
     return pal_game::is_valid(pal) ? pal : nullptr;
 }
 
-[[nodiscard]] auto narrow_id(const std::wstring& value) -> std::string
-{
-    std::string result;
-    result.reserve(value.size());
-    for (const auto character : value)
-    {
-        result.push_back(character >= 0 && character <= 0x7F ? static_cast<char>(character) : '?');
-    }
-    return result;
-}
-
-[[nodiscard]] auto widen_id(const std::string_view value) -> std::wstring
-{
-    std::wstring result;
-    result.reserve(value.size());
-    for (const auto character : value)
-    {
-        result.push_back(static_cast<wchar_t>(static_cast<unsigned char>(character)));
-    }
-    return result;
-}
-
 template <typename T>
 [[nodiscard]] auto find_function(const wchar_t* path) -> T*
 {
     return UObjectGlobals::StaticFindObject<T*>(nullptr, nullptr, path);
+}
+
+[[nodiscard]] auto ui_utility() -> UObject*
+{
+    if (auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
+            nullptr, nullptr, STR("/Script/Pal.Default__PalUIUtility")))
+    {
+        return utility;
+    }
+    return UObjectGlobals::FindFirstOf(STR("PalUIUtility"));
+}
+
+[[nodiscard]] auto passive_localized_name(
+    UObject* utility,
+    UObject* worldContext,
+    const FName& id) -> std::string
+{
+    auto* function = find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetPassiveSkillName"));
+    if (utility == nullptr || function == nullptr)
+    {
+        return {};
+    }
+
+    struct Params
+    {
+        UObject* WorldContextObject;
+        FName PassiveSkillId;
+        FText OutName;
+    } params{.WorldContextObject = worldContext, .PassiveSkillId = id};
+    utility->ProcessEvent(function, &params);
+    return text_encoding::to_utf8(params.OutName.ToString());
+}
+
+[[nodiscard]] auto active_localized_name(
+    UObject* utility,
+    UObject* worldContext,
+    const EPalWazaID id) -> std::string
+{
+    auto* function = find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetWazaName"));
+    if (utility == nullptr || function == nullptr)
+    {
+        return {};
+    }
+
+    struct Params
+    {
+        UObject* WorldContextObject;
+        EPalWazaID WazaId;
+        FText OutName;
+    } params{.WorldContextObject = worldContext, .WazaId = id};
+    utility->ProcessEvent(function, &params);
+    return text_encoding::to_utf8(params.OutName.ToString());
+}
+
+[[nodiscard]] auto strip_enum_prefix(std::string name) -> std::string
+{
+    if (const auto separator = name.rfind("::"); separator != std::string::npos)
+    {
+        name.erase(0, separator + 2);
+    }
+    return name;
+}
+
+[[nodiscard]] auto is_active_sentinel(const std::string_view id) -> bool
+{
+    const auto lowered = skill_editor::ascii_lower(id);
+    return lowered.empty() || lowered == "none" || lowered == "max" || lowered.ends_with("_max");
 }
 }
 
@@ -84,7 +134,7 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target) -> skil
         state.passiveIds.reserve(static_cast<std::size_t>(std::max(params.ReturnValue.Num(), 0)));
         for (int32 index = 0; index < params.ReturnValue.Num(); ++index)
         {
-            state.passiveIds.push_back(narrow_id(params.ReturnValue[index].ToString()));
+            state.passiveIds.push_back(text_encoding::to_utf8(params.ReturnValue[index].ToString()));
         }
     }
 
@@ -102,7 +152,9 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target) -> skil
         for (int32 index = 0; index < count; ++index)
         {
             const auto value = static_cast<std::uint16_t>(params.ReturnValue[index]);
-            state.activeSkills.push_back({.value = value, .id = std::to_string(value)});
+            const auto found = activeIds_.find(value);
+            state.activeSkills.push_back(
+                {.value = value, .id = found == activeIds_.end() ? std::to_string(value) : found->second});
         }
         if (params.ReturnValue.Num() > 3)
         {
@@ -132,7 +184,7 @@ auto PalSkillGateway::add_passive(
         FName AddSkill;
         FName OverrideSkill;
     } params;
-    const auto wide = widen_id(id);
+    const auto wide = text_encoding::widen_ascii(id);
     params.AddSkill = FName(wide.c_str());
     pal->ProcessEvent(function, &params);
     return true;
@@ -154,7 +206,7 @@ auto PalSkillGateway::remove_passive(
     {
         FName SkillId;
     } params;
-    const auto wide = widen_id(id);
+    const auto wide = text_encoding::widen_ascii(id);
     params.SkillId = FName(wide.c_str());
     pal->ProcessEvent(function, &params);
     return true;
@@ -188,5 +240,91 @@ auto PalSkillGateway::rewrite_active(
         pal->ProcessEvent(addFunction, &params);
     }
     return true;
+}
+
+auto PalSkillGateway::load_catalog(
+    const skill_editor::SkillTarget contextTarget) -> skill_editor::SkillCatalogSnapshot
+{
+    skill_editor::SkillCatalogSnapshot catalog;
+    auto* worldContext = to_pal(contextTarget);
+    auto* utility = ui_utility();
+
+    auto* manager = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
+    auto* passiveFunction =
+        find_function<UFunction>(STR("/Script/Pal.PalPassiveSkillManager:GetPalAssignablePassiveIDs"));
+    if (manager != nullptr && passiveFunction != nullptr)
+    {
+        struct Params
+        {
+            TArray<FName> List;
+        } params;
+        manager->ProcessEvent(passiveFunction, &params);
+        catalog.passiveSkills.reserve(static_cast<std::size_t>(std::max(params.List.Num(), 0)));
+        for (int32 index = 0; index < params.List.Num(); ++index)
+        {
+            const auto& id = params.List[index];
+            catalog.passiveSkills.push_back(
+                {.id = text_encoding::to_utf8(id.ToString()),
+                 .localizedName = passive_localized_name(utility, worldContext, id)});
+        }
+        catalog.passiveSkills = skill_editor::deduplicate_skills(std::move(catalog.passiveSkills));
+    }
+
+    if (auto* enumeration =
+            UObjectGlobals::StaticFindObject<UEnum*>(nullptr, nullptr, STR("/Script/Pal.EPalWazaID")))
+    {
+        auto names = enumeration->GetEnumNames();
+        std::unordered_set<std::uint16_t> seenValues;
+        catalog.activeSkills.reserve(static_cast<std::size_t>(std::max(names.Num(), 0)));
+        for (int32 index = 0; index < names.Num(); ++index)
+        {
+            const auto& pair = names[index];
+            if (pair.Value < 0 || pair.Value > std::numeric_limits<std::uint16_t>::max())
+            {
+                continue;
+            }
+
+            auto id = strip_enum_prefix(text_encoding::to_utf8(pair.Key.ToString()));
+            const auto value = static_cast<std::uint16_t>(pair.Value);
+            if (is_active_sentinel(id) || !seenValues.insert(value).second)
+            {
+                continue;
+            }
+            catalog.activeSkills.push_back(
+                {.id = std::move(id),
+                 .localizedName = active_localized_name(utility, worldContext, static_cast<EPalWazaID>(value)),
+                 .activeValue = value});
+        }
+    }
+
+    if (catalog.passiveSkills.empty())
+    {
+        catalog.error = "Unable to load Pal-assignable passive skills";
+        return catalog;
+    }
+    if (catalog.activeSkills.empty())
+    {
+        catalog.error = "Unable to load EPalWazaID active skills";
+        return catalog;
+    }
+
+    const auto byLabel = [](const skill_editor::SkillOption& left, const skill_editor::SkillOption& right)
+    {
+        return skill_editor::ascii_lower(skill_editor::skill_label(left)) <
+               skill_editor::ascii_lower(skill_editor::skill_label(right));
+    };
+    std::ranges::sort(catalog.passiveSkills, byLabel);
+    std::ranges::sort(catalog.activeSkills, byLabel);
+
+    activeIds_.clear();
+    for (const auto& option : catalog.activeSkills)
+    {
+        if (option.activeValue.has_value())
+        {
+            activeIds_.insert_or_assign(*option.activeValue, option.id);
+        }
+    }
+    catalog.ready = true;
+    return catalog;
 }
 }

@@ -18,6 +18,28 @@ struct SkillOption
     std::optional<std::uint16_t> activeValue;
 };
 
+struct SkillCatalogSnapshot
+{
+    std::vector<SkillOption> passiveSkills;
+    std::vector<SkillOption> activeSkills;
+    std::string error;
+    bool ready{};
+};
+
+[[nodiscard]] inline auto with_catalog_fallback(
+    const SkillCatalogSnapshot& previous,
+    const SkillCatalogSnapshot& refreshed) -> SkillCatalogSnapshot
+{
+    if (refreshed.ready || !previous.ready)
+    {
+        return refreshed;
+    }
+
+    auto fallback = previous;
+    fallback.error = refreshed.error;
+    return fallback;
+}
+
 [[nodiscard]] inline auto ascii_lower(const std::string_view value) -> std::string
 {
     std::string result(value);
