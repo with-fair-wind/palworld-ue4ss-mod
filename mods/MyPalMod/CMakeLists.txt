@@ -24,6 +24,15 @@ target_link_libraries(${TARGET} PRIVATE UE4SS)
 # Output name = MyPalMod (DLL: MyPalMod.dll; UE4SS installs it as dlls/main.dll).
 set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME ${TARGET})
 
+if(BUILD_TESTING)
+    add_executable(MyPalModSkillTests
+        tests/skill_editor_tests.cpp
+    )
+    target_include_directories(MyPalModSkillTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_features(MyPalModSkillTests PRIVATE cxx_std_23)
+    add_test(NAME MyPalMod.SkillEditor COMMAND MyPalModSkillTests)
+endif()
+
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
 include(${CMAKE_SOURCE_DIR}/cmake/Deploy.cmake)
 palworld_add_deploy_target(${TARGET})
