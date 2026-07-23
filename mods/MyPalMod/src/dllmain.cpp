@@ -25,6 +25,7 @@
 
 #include "item_database.h"
 #include "pal_game.hpp"
+#include "pal_skills.hpp"
 
 #include <atomic>
 #include <cstring>
@@ -200,53 +201,6 @@ public:
             pal_cache_ = std::move(fresh);
         }
 
-        // Passive add/remove
-        if (passive_requested_.load())
-        {
-            UObject* pal = nullptr;
-            std::string skill;
-            bool doAdd = false;
-            {
-                const std::lock_guard lock(req_mutex_);
-                if (passive_requested_.load())
-                {
-                    passive_requested_.store(false);
-                    pal = passive_pal_;
-                    skill = passive_skill_;
-                    doAdd = passive_add_;
-                }
-            }
-            if (pal_game::is_valid(pal) && !skill.empty())
-            {
-                if (doAdd)
-                {
-                    pal_game::add_passive(pal, skill);
-                }
-                else
-                {
-                    pal_game::remove_passive(pal, skill);
-                }
-            }
-        }
-
-        // Read passives
-        if (passive_read_requested_.load())
-        {
-            UObject* readPal = nullptr;
-            {
-                const std::lock_guard lock(req_mutex_);
-                if (passive_read_requested_.load())
-                {
-                    passive_read_requested_.store(false);
-                    readPal = passive_pal_;
-                }
-            }
-            if (pal_game::is_valid(readPal))
-            {
-                pal_game::read_pal_passives(readPal);
-            }
-        }
-
         // Discover
         if (want_discover_.exchange(false))
         {
@@ -393,32 +347,6 @@ private:
             }
             ImGui::TextColored(
                 ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "Currently Viewed: %s", vName.empty() ? "(reading...)" : vName.c_str());
-            auto* viewedPal = reinterpret_cast<UObject*>(vPtr);
-            ImGui::InputText("Passive SkillId##viewed", self->passive_buf_, sizeof(self->passive_buf_));
-            if (ImGui::Button("Add##v"))
-            {
-                const std::lock_guard lock(self->req_mutex_);
-                self->passive_pal_ = viewedPal;
-                self->passive_skill_ = self->passive_buf_;
-                self->passive_add_ = true;
-                self->passive_requested_ = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Remove##v"))
-            {
-                const std::lock_guard lock(self->req_mutex_);
-                self->passive_pal_ = viewedPal;
-                self->passive_skill_ = self->passive_buf_;
-                self->passive_add_ = false;
-                self->passive_requested_ = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Read##v"))
-            {
-                const std::lock_guard lock(self->req_mutex_);
-                self->passive_pal_ = viewedPal;
-                self->passive_read_requested_ = true;
-            }
         }
         else
         {
@@ -450,42 +378,7 @@ private:
         }
         ImGui::EndChild();
 
-        UObject* selPal = nullptr;
-        {
-            const std::lock_guard lock(self->inv_mutex_);
-            if (self->pal_selected_ >= 0 && self->pal_selected_ < static_cast<int>(self->pal_cache_.size()))
-            {
-                selPal = self->pal_cache_[self->pal_selected_].ptr;
-            }
-        }
-        if (selPal != nullptr)
-        {
-            ImGui::InputText("Passive SkillId", self->passive_buf_, sizeof(self->passive_buf_));
-            if (ImGui::Button("Add Passive"))
-            {
-                const std::lock_guard lock(self->req_mutex_);
-                self->passive_pal_ = selPal;
-                self->passive_skill_ = self->passive_buf_;
-                self->passive_add_ = true;
-                self->passive_requested_ = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Remove Passive"))
-            {
-                const std::lock_guard lock(self->req_mutex_);
-                self->passive_pal_ = selPal;
-                self->passive_skill_ = self->passive_buf_;
-                self->passive_add_ = false;
-                self->passive_requested_ = true;
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Read Passives"))
-            {
-                const std::lock_guard lock(self->req_mutex_);
-                self->passive_pal_ = selPal;
-                self->passive_read_requested_ = true;
-            }
-        }
+        ImGui::TextDisabled("Active/passive skill controls are loading...");
     }
 
     // --- Members ---
@@ -516,21 +409,17 @@ private:
     std::atomic<bool> want_scan_items_{false};
 
     // Pal editor
-    char passive_buf_[64]{};
     int pal_selected_ = -1;
     std::vector<PalEntry> pal_cache_;
     std::atomic<bool> want_scan_pals_{false};
-    UObject* passive_pal_{nullptr};
-    std::string passive_skill_;
-    bool passive_add_{false};
-    std::atomic<bool> passive_requested_{false};
-    std::atomic<bool> passive_read_requested_{false};
 
     // Viewed-Pal auto-detection (via GetPassiveSkillList hook)
     std::atomic<uintptr_t> lastViewedPal_{0};
     UFunction* fnGetPSL_{};
     std::string viewedPalName_;
     uintptr_t lastCachedPal_{0};
+
+    pal_skills::PalSkillGateway skillGateway_;
 };
 
 #define MYPALMOD_API __declspec(dllexport)

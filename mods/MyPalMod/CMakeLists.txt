@@ -14,7 +14,10 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_library(${TARGET} SHARED src/dllmain.cpp)
+add_library(${TARGET} SHARED
+    src/dllmain.cpp
+    src/pal_skills.cpp
+)
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
