@@ -4,7 +4,7 @@
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
 //
 // An in-game item/Pal/passive editor via the UE4SS GUI. Features are triggered from a
-// floating ImGui window (select the "MyPalMod" tab). Game-interaction functions live in
+// floating ImGui window (select the "PalworldEditor" tab). Game-interaction functions live in
 // pal_game.hpp; this file holds the mod class, the GUI render callback, the request
 // dispatch (on_update), and the ProcessEvent hook (viewed-Pal tracking).
 //
@@ -29,9 +29,8 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
-#include <imgui.h>
-
 #include <game/pal_game.hpp>
+#include <imgui.h>
 #include <skills/pal_skills.hpp>
 #include <support/text_encoding.hpp>
 
@@ -40,21 +39,21 @@ using namespace RC::Unreal;
 using pal_game::InvEntry;
 using pal_game::PalEntry;
 
-class MyPalMod final : public CppUserModBase {
+class PalworldEditorMod final : public CppUserModBase {
 public:
-    MyPalMod() : CppUserModBase() {
-        ModName = STR("MyPalMod");
+    PalworldEditorMod() : CppUserModBase() {
+        ModName = STR("PalworldEditor");
         ModVersion = STR("1.4.0");
         ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v1.4.0)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.0)\n"));
 
-        register_tab(STR("MyPalMod"), [](CppUserModBase* mod) {
+        register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
-            auto* self = static_cast<MyPalMod*>(mod);
-            ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-            if (ImGui::Begin("MyPalMod v1.4.0", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            auto* self = static_cast<PalworldEditorMod*>(mod);
+            ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
+            if (ImGui::Begin("PalworldEditor v1.4.0", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -71,7 +70,7 @@ public:
         });
     }
 
-    ~MyPalMod() override = default;
+    ~PalworldEditorMod() override = default;
 
     auto on_unreal_init() -> void override {
         if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
@@ -91,9 +90,10 @@ public:
                         lastViewedPal_.store(reinterpret_cast<uintptr_t>(Context));
                     }
                 },
-                Hook::FCallbackOptions{.OwnerModName = STR("MyPalMod"),
+                Hook::FCallbackOptions{.OwnerModName = STR("PalworldEditor"),
                                        .HookName = STR("PalViewTracker")});
-            Output::send<LogLevel::Verbose>(STR("MyPalMod: PalViewTracker hook registered\n"));
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: PalViewTracker hook registered\n"));
         }
 
         want_scan_items_.store(true);
@@ -319,7 +319,7 @@ private:
         return found == options.end() ? std::string(id) : skill_editor::skill_label(*found);
     }
 
-    static void reset_skill_editor_ui(MyPalMod* self) {
+    static void reset_skill_editor_ui(PalworldEditorMod* self) {
         self->passiveEditIndex_ = -1;
         self->activeEditSlot_ = -1;
         self->passiveChoice_.reset();
@@ -355,7 +355,7 @@ private:
 
     // --- GUI render helpers (static, called from the register_tab lambda) ---
 
-    static void render_give_items(MyPalMod* self) {
+    static void render_give_items(PalworldEditorMod* self) {
         ImGui::TextUnformatted("Give items");
         ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
         ImGui::InputInt("Count", &self->count_input_);
@@ -368,7 +368,7 @@ private:
         }
     }
 
-    static void render_item_browser(MyPalMod* self) {
+    static void render_item_browser(PalworldEditorMod* self) {
         if (ImGui::Button("Scan game items")) {
             self->want_scan_items_.store(true);
         }
@@ -410,7 +410,7 @@ private:
         ImGui::EndChild();
     }
 
-    static void render_inventory(MyPalMod* self) {
+    static void render_inventory(PalworldEditorMod* self) {
         if (ImGui::Button("Refresh inventory")) {
             self->want_read_.store(true);
         }
@@ -447,7 +447,7 @@ private:
         }
     }
 
-    static void render_passive_skills(MyPalMod* self, const SkillEditorSnapshot& snapshot,
+    static void render_passive_skills(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
                                       const bool pending) {
         ImGui::Text("被动技能 (%d/4)", static_cast<int>(snapshot.state.passiveIds.size()));
         std::unordered_set<std::string> excluded(snapshot.state.passiveIds.begin(),
@@ -527,7 +527,7 @@ private:
         }
     }
 
-    static void render_active_skills(MyPalMod* self, const SkillEditorSnapshot& snapshot,
+    static void render_active_skills(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
                                      const bool pending) {
         ImGui::TextUnformatted("主动技能（EquipWaza）");
         std::unordered_set<std::string> excluded;
@@ -607,7 +607,7 @@ private:
         }
     }
 
-    static void render_pal_editor(MyPalMod* self) {
+    static void render_pal_editor(PalworldEditorMod* self) {
         if (!ImGui::CollapsingHeader("Pal editor")) {
             return;
         }
@@ -738,13 +738,13 @@ private:
     skill_editor::SkillTarget skillUiTarget_{};
 };
 
-#define MYPALMOD_API __declspec(dllexport)
+#define PALWORLD_EDITOR_API __declspec(dllexport)
 extern "C" {
-MYPALMOD_API CppUserModBase* start_mod() {
-    return new MyPalMod();
+PALWORLD_EDITOR_API CppUserModBase* start_mod() {
+    return new PalworldEditorMod();
 }
 
-MYPALMOD_API void uninstall_mod(CppUserModBase* mod) {
+PALWORLD_EDITOR_API void uninstall_mod(CppUserModBase* mod) {
     delete mod;
 }
 }

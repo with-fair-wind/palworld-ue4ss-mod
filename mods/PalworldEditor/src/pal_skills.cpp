@@ -1,5 +1,3 @@
-#include <skills/pal_skills.hpp>
-
 #include <algorithm>
 #include <cstdint>
 #include <limits>
@@ -13,8 +11,8 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
-
 #include <game/pal_game.hpp>
+#include <skills/pal_skills.hpp>
 #include <support/text_encoding.hpp>
 
 using namespace RC;
@@ -131,7 +129,8 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target)
         }
         if (params.ReturnValue.Num() > 3) {
             Output::send<LogLevel::Warning>(
-                STR("MyPalMod: GetEquipWaza returned {} entries; only the first 3 are editable\n"),
+                STR("PalworldEditor: GetEquipWaza returned {} entries; only the first 3 are "
+                    "editable\n"),
                 params.ReturnValue.Num());
         }
     }

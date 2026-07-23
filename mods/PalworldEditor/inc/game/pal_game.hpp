@@ -14,7 +14,6 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
-
 #include <support/text_encoding.hpp>
 
 using namespace RC;
@@ -273,7 +272,7 @@ inline auto scan_pals() -> std::vector<PalEntry> {
 // ---------------------------------------------------------------------------
 
 inline auto discover_objects() -> void {
-    Output::send<LogLevel::Warning>(STR("=== MyPalMod discovery: scanning UObjects ===\n"));
+    Output::send<LogLevel::Warning>(STR("=== PalworldEditor discovery: scanning UObjects ===\n"));
     std::map<std::wstring, int> matching;
     int total = 0;
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {

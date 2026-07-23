@@ -1,4 +1,4 @@
-# MyPalMod 1.4.0 — Palworld 物品与帕鲁技能编辑器
+# PalworldEditor 1.4.0 — Palworld 物品与帕鲁技能编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
 提供游戏内物品编辑，以及当前选中帕鲁的主动/被动技能编辑。所有操作都在 UE4SS GUI 的 ImGui
@@ -37,17 +37,17 @@ pwsh scripts/setup.ps1
 
 # 2. 配置 + 构建
 cmake --preset ninja-msvc-x64
-cmake --build --preset ninja-msvc-x64 --target MyPalMod
-#    -> build/Game__Shipping__Win64/bin/MyPalMod.dll
+cmake --build --preset ninja-msvc-x64 --target PalworldEditor
+#    -> build/Game__Shipping__Win64/bin/PalworldEditor.dll
 
 # 3. 运行纯 C++ 技能编辑测试
-cmake --build --preset ninja-msvc-x64 --target MyPalModSkillTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests
 ctest --test-dir build --output-on-failure
 
 # 4. 部署到游戏
 $env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"  # 游戏安装目录
 cmake --build --preset ninja-msvc-x64 --target deploy
-#    -> Pal/Binaries/Win64/ue4ss/Mods/MyPalMod/dlls/main.dll + enabled.txt
+#    -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll + enabled.txt
 ```
 
 ## 代码质量工具
@@ -78,11 +78,12 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 
 1. 启动 Palworld，读档进入游戏。
 2. 打开 **UE4SS GUI**（与游戏同时出现的独立窗口）。
-3. 点击 **MyPalMod** 标签 → 弹出浮动窗口。
+3. 点击 **PalworldEditor** 标签 → 弹出浮动窗口。
 
 ### 物品编辑
 - **Give items**：输入物品 ID（如 `PalSphere_Tera`）+ 数量 → Give。
-- **Item browser**：点 "Scan game items" 扫描全部物品 → 搜索 → 点击自动填入。
+- **Item browser**：进入游戏后会自动扫描一次当前已加载的物品定义；也可点
+  "Scan game items" 重新扫描 → 搜索 → 点击自动填入。
 - **Refresh inventory** → 列出当前背包 → 选中 → Set count 修改数量。
 
 ### 帕鲁主动/被动技能
@@ -104,23 +105,29 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 下拉框只在点击确认时提交修改；选择候选本身不会立刻写入游戏。已经拥有/装备的技能会从候选中隐藏。
 每次修改都在游戏线程执行并重读实际状态；替换未生效时会尝试恢复完整原状态。
 
-## 物品 ID 参考
+## 物品 ID
 
-Bare ID（无前缀），完整列表见 [ItemIDs.txt](https://github.com/KURAMAAA0/PalModding/blob/main/ItemIDs.txt)。常用：`PalSphere`、`PalSphere_Tera`、`PalSphere_Legend`、`Stone`、`Wood`、`Money`、`AncientParts2`。
+浏览器通过 UE4SS 运行时读取已经加载的 `PalStaticItemData*` UObject 的 `ID`，不再维护静态物品表，
+也不需要解包游戏资源。扫描范围取决于游戏当时已经加载的物品定义；仍可在 Give 输入框中手动输入
+Bare ID（无前缀）。
 
 ## 目录结构
 
 ```
-mods/MyPalMod/
+mods/PalworldEditor/
 ├── CMakeLists.txt
+├── inc/
+│   ├── game/
+│   │   └── pal_game.hpp             物品/背包/帕鲁扫描
+│   ├── skills/
+│   │   ├── pal_skills.hpp           Palworld 技能目录适配层
+│   │   ├── skill_catalog.hpp        可搜索技能目录纯逻辑
+│   │   └── skill_editor_service.hpp 编辑校验、重读、回滚与 FIFO 队列
+│   └── support/
+│       └── text_encoding.hpp        UE 宽字符串到 UTF-8
 ├── src/
 │   ├── dllmain.cpp              Mod 类 + GUI + 游戏线程请求分发 + 目标钩子
-│   ├── pal_game.hpp             物品/背包/帕鲁扫描
-│   ├── pal_skills.hpp/.cpp      Palworld 技能目录与公开函数适配层
-│   ├── skill_catalog.hpp        可搜索技能目录纯逻辑
-│   ├── skill_editor_service.hpp 编辑校验、重读、回滚与 FIFO 队列
-│   ├── text_encoding.hpp        UE 宽字符串到 UTF-8
-│   └── item_database.h          精选物品 ID 列表
+│   └── pal_skills.cpp           技能目录与游戏函数实现
 └── tests/
     └── skill_editor_tests.cpp   不链接 UE4SS 的 CTest 测试
 ```
