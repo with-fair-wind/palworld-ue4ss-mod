@@ -28,7 +28,13 @@ struct ActiveSkill {
     /** @brief 面向显示和目录查询的技能字符串标识。 */
     std::string id;
 
-    /** @brief 比较两个主动技能的全部字段是否相等。 */
+    /**
+     * @brief 比较两个主动技能的全部字段是否相等。
+     *
+     * @param[in] 左侧 用作比较左操作数的主动技能。
+     * @param[in] 右侧 用作比较右操作数的主动技能。
+     * @return 两个对象的 `value` 与 `id` 均相等时为 `true`，否则为 `false`。
+     */
     friend auto operator==(const ActiveSkill&, const ActiveSkill&) -> bool = default;
 };
 
@@ -98,13 +104,21 @@ struct SkillEditResult {
  */
 class SkillEditQueue {
 public:
-    /** @brief 加锁后将请求追加到 FIFO 队尾。 */
+    /**
+     * @brief 加锁后将请求追加到 FIFO 队尾。
+     *
+     * @param[in] request 要移入队列、等待游戏线程执行的编辑请求。
+     */
     auto push(SkillEditRequest request) -> void {
         const std::lock_guard lock(mutex_);
         requests_.push_back(std::move(request));
     }
 
-    /** @brief 加锁后从 FIFO 队首取出一个请求；队列为空时返回 std::nullopt。 */
+    /**
+     * @brief 加锁后从 FIFO 队首取出一个请求。
+     *
+     * @return 队列非空时返回最早提交的请求；队列为空时返回 std::nullopt。
+     */
     [[nodiscard]] auto try_pop() -> std::optional<SkillEditRequest> {
         const std::lock_guard lock(mutex_);
         if (requests_.empty()) {
@@ -116,13 +130,23 @@ public:
         return request;
     }
 
-    /** @brief 加锁后返回尚未由游戏线程执行的请求数量。 */
+    /**
+     * @brief 加锁后返回尚未由游戏线程执行的请求数量。
+     *
+     * @return 当前 FIFO 队列中等待执行的请求数。
+     */
     [[nodiscard]] auto size() const -> std::size_t {
         const std::lock_guard lock(mutex_);
         return requests_.size();
     }
 
-    /** @brief 加锁后检查是否已有请求指向给定目标。 */
+    /**
+     * @brief 加锁后检查是否已有请求指向给定目标。
+     *
+     * @param[in] target 要查找的临时目标句柄。
+     * @retval true 队列中至少有一个请求指向 `target`。
+     * @retval false 队列中没有请求指向 `target`。
+     */
     [[nodiscard]] auto contains_target(const SkillTarget target) const -> bool {
         const std::lock_guard lock(mutex_);
         return std::ranges::any_of(requests_, [target](const SkillEditRequest& request) {
@@ -141,28 +165,48 @@ public:
     /** @brief 确保通过接口销毁派生网关时正确析构。 */
     virtual ~ISkillGateway() = default;
 
-    /** @brief 校验临时目标句柄当前是否仍指向可操作的游戏对象。 */
+    /**
+     * @brief 校验临时目标句柄当前是否仍指向可操作的游戏对象。
+     *
+     * @param[in] target 待校验的非拥有临时目标句柄。
+     * @retval true `target` 当前可安全读取或修改。
+     * @retval false `target` 为空、已失效或不再可操作。
+     */
     [[nodiscard]] virtual auto is_valid(SkillTarget target) const -> bool = 0;
-    /** @brief 读取目标的实际游戏值；调用前仍需校验 `target`。 */
+    /**
+     * @brief 读取目标的实际游戏值。
+     *
+     * @param[in] target 已通过 is_valid 校验的临时目标句柄。
+     * @return 从游戏读取到的实际被动技能和主动技能槽状态。
+     */
     virtual auto read_state(SkillTarget target) -> SkillState = 0;
     /**
      * @brief 请求添加被动技能。
      *
-     * 调用前仍需校验 `target`；返回值仅表示反射调用能否发起，调用方必须重读验证游戏是否接受修改。
+     * @param[in] target 已通过 is_valid 校验的临时目标句柄。
+     * @param[in] id 要添加的被动技能标识。
+     * @retval true 反射调用已成功发起，但游戏是否接受修改仍须重读验证。
+     * @retval false 反射调用未能发起；调用方仍应按需要重读实际状态。
      */
     virtual auto add_passive(SkillTarget target, std::string_view id) -> bool = 0;
     /**
      * @brief 请求移除被动技能。
      *
-     * 调用前仍需校验 `target`；返回值仅表示反射调用能否发起，调用方必须重读验证游戏是否接受修改。
+     * @param[in] target 已通过 is_valid 校验的临时目标句柄。
+     * @param[in] id 要移除的被动技能标识。
+     * @retval true 反射调用已成功发起，但游戏是否接受修改仍须重读验证。
+     * @retval false 反射调用未能发起；调用方仍应按需要重读实际状态。
      */
     virtual auto remove_passive(SkillTarget target, std::string_view id) -> bool = 0;
     /**
      * @brief 以给定 EquipWaza 槽位顺序重写主动技能。
      *
-     * 调用前仍需校验 `target`；输入最多三项，且其顺序就是 EquipWaza 槽位顺序。
-     * 实现可能先清空再逐项重写；
-     * 返回值仅表示反射调用能否发起，调用方必须重读验证游戏是否接受修改。
+     * @param[in] target 已通过 is_valid 校验的临时目标句柄。
+     * @param[in] skills 最多三项的目标主动技能序列；输入顺序就是 EquipWaza 槽位顺序。
+     * @retval true 反射调用已成功发起，但游戏是否接受修改仍须重读验证。
+     * @retval false 反射调用未能发起；调用方仍应按需要重读实际状态。
+     *
+     * 实现可能先清空再逐项重写。
      */
     virtual auto rewrite_active(SkillTarget target, std::span<const ActiveSkill> skills)
         -> bool = 0;
@@ -287,8 +331,9 @@ namespace detail {
 /**
  * @brief 执行主动技能编辑的验证、写入、重读与回滚状态机。
  *
- * 先验证槽位和请求，再重写槽位并重读实际状态；验证失败时重写原始序列并重读。
- * 恢复成功返回 rolledBack，恢复失败返回 rollbackFailed。
+ * 前置请求或槽位验证失败时直接返回 rejected，不触发回滚。仅当已经调用 rewrite_active，
+ * 随后重读验证失败时，才重写原始序列并重读。恢复成功返回 rolledBack，
+ * 恢复失败返回 rollbackFailed。
  */
 [[nodiscard]] inline auto execute_active(ISkillGateway& gateway, const SkillEditRequest& request,
                                          const SkillState& original) -> SkillEditResult {
@@ -347,6 +392,10 @@ namespace detail {
  *
  * 先拒绝空或失效目标，再读取原始状态并按 SkillKind 分派。
  * 返回值始终包含可获得的最新实际状态和面向 UI 的消息。
+ *
+ * @param[in] gateway 提供目标校验、游戏状态读取和技能写入的网关。
+ * @param[in] request 要验证并执行的技能编辑请求。
+ * @return 包含执行状态、可获得的最新实际状态和面向 UI 消息的结果。
  *
  * @warning 若网关实现涉及 Unreal 反射，必须在游戏线程调用此函数。
  */
