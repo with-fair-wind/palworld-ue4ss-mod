@@ -14,63 +14,97 @@
 #include <vector>
 
 namespace skill_editor {
+/**
+ * @brief 将非拥有 `UObject*` 编码为整数的临时目标句柄。
+ *
+ * 使用前必须通过 ISkillGateway::is_valid 校验；句柄本身不延长 Unreal 对象的生命周期。
+ */
 using SkillTarget = std::uintptr_t;
 
+/** @brief 一个可装备主动技能的数值标识与字符串标识。 */
 struct ActiveSkill {
+    /** @brief 用于比较、写入 EquipWaza 和验证的游戏数值标识。 */
     std::uint16_t value{};
+    /** @brief 面向显示和目录查询的技能字符串标识。 */
     std::string id;
 
+    /** @brief 比较两个主动技能的全部字段是否相等。 */
     friend auto operator==(const ActiveSkill&, const ActiveSkill&) -> bool = default;
 };
 
+/** @brief 从游戏读取到的被动技能列表和 EquipWaza 主动技能槽状态。 */
 struct SkillState {
+    /** @brief 当前拥有的被动技能标识。 */
     std::vector<std::string> passiveIds;
+    /** @brief 当前 EquipWaza 槽位顺序中的主动技能。 */
     std::vector<ActiveSkill> activeSkills;
 };
 
+/** @brief 要编辑的技能类别。 */
 enum class SkillKind {
-    passive,
-    active,
+    passive, /**< 被动技能列表。 */
+    active,  /**< EquipWaza 主动技能槽。 */
 };
 
+/** @brief 对选定技能类别执行的编辑动作。 */
 enum class SkillEditOperation {
-    add,
-    replace,
-    remove,
+    add,     /**< 新增一项技能。 */
+    replace, /**< 用新技能替换已有技能。 */
+    remove,  /**< 移除已有技能。 */
 };
 
+/** @brief 由 UI 提交、等待游戏线程执行的一次技能编辑请求。 */
 struct SkillEditRequest {
+    /** @brief 待编辑 Pal 的临时句柄；执行前必须校验。 */
     SkillTarget target{};
+    /** @brief 决定请求操作被动列表还是主动槽位。 */
     SkillKind kind{};
+    /** @brief 决定新增、替换或移除的编辑语义。 */
     SkillEditOperation operation{};
+    /** @brief 仅当 `kind` 为 active 时生效的 EquipWaza 槽位索引。 */
     std::size_t activeSlot{};
+    /** @brief 仅当 `kind` 为 passive 且 `operation` 为 replace/remove 时生效的原被动技能标识。 */
     std::string oldPassiveId;
+    /** @brief 仅当 `kind` 为 passive 且 `operation` 为 add/replace 时生效的新被动技能标识。 */
     std::string newPassiveId;
+    /** @brief 仅当 `kind` 为 active 且 `operation` 为 add/replace 时生效的新主动技能。 */
     std::optional<ActiveSkill> newActiveSkill;
 };
 
+/** @brief 技能编辑执行后可供 UI 展示的终态。 */
 enum class SkillEditStatus {
-    succeeded,
-    invalidTarget,
-    rejected,
-    failed,
-    rolledBack,
-    rollbackFailed,
+    succeeded,      /**< 写入后重读验证与期望状态一致。 */
+    invalidTarget,  /**< 目标为空或已失效，尚未读取或修改游戏状态。 */
+    rejected,       /**< 请求在写入前未通过领域规则验证。 */
+    failed,         /**< 游戏未接受写入，且无需或未尝试回滚。 */
+    rolledBack,     /**< 写入验证失败，但重读确认原始状态已恢复。 */
+    rollbackFailed, /**< 写入和回滚后均未能恢复期望的原始状态。 */
 };
 
+/** @brief 一次编辑尝试的状态、实际游戏快照和面向 UI 的说明。 */
 struct SkillEditResult {
+    /** @brief 编辑或回滚后重新读取到的实际游戏状态。 */
     SkillEditStatus status{};
+    /** @brief 可获得的最新实际游戏状态。 */
     SkillState state;
+    /** @brief 可直接显示给 UI 的结果消息。 */
     std::string message;
 };
 
+/**
+ * @brief 在线程安全 FIFO 中暂存 UI 提交的编辑请求。
+ *
+ * 支持多个生产者提交请求，并由唯一游戏线程消费者按提交顺序取出执行；所有公开方法均在内部加锁。
+ */
 class SkillEditQueue {
 public:
+    /** @brief 加锁后将请求追加到 FIFO 队尾。 */
     auto push(SkillEditRequest request) -> void {
         const std::lock_guard lock(mutex_);
         requests_.push_back(std::move(request));
     }
 
+    /** @brief 加锁后从 FIFO 队首取出一个请求；队列为空时返回 std::nullopt。 */
     [[nodiscard]] auto try_pop() -> std::optional<SkillEditRequest> {
         const std::lock_guard lock(mutex_);
         if (requests_.empty()) {
@@ -82,11 +116,13 @@ public:
         return request;
     }
 
+    /** @brief 加锁后返回尚未由游戏线程执行的请求数量。 */
     [[nodiscard]] auto size() const -> std::size_t {
         const std::lock_guard lock(mutex_);
         return requests_.size();
     }
 
+    /** @brief 加锁后检查是否已有请求指向给定目标。 */
     [[nodiscard]] auto contains_target(const SkillTarget target) const -> bool {
         const std::lock_guard lock(mutex_);
         return std::ranges::any_of(requests_, [target](const SkillEditRequest& request) {
@@ -95,28 +131,52 @@ public:
     }
 
 private:
-    mutable std::mutex mutex_;
-    std::deque<SkillEditRequest> requests_;
+    mutable std::mutex mutex_;              /**< 保护 `requests_` 的唯一互斥量。 */
+    std::deque<SkillEditRequest> requests_; /**< 按提交顺序保存尚未由游戏线程执行的请求。 */
 };
 
+/** @brief 将领域服务与 Unreal 反射及实际游戏对象隔离的游戏访问网关。 */
 class ISkillGateway {
 public:
+    /** @brief 确保通过接口销毁派生网关时正确析构。 */
     virtual ~ISkillGateway() = default;
 
+    /** @brief 校验临时目标句柄当前是否仍指向可操作的游戏对象。 */
     [[nodiscard]] virtual auto is_valid(SkillTarget target) const -> bool = 0;
+    /** @brief 读取目标的实际游戏值；调用前仍需校验 `target`。 */
     virtual auto read_state(SkillTarget target) -> SkillState = 0;
+    /**
+     * @brief 请求添加被动技能。
+     *
+     * 调用前仍需校验 `target`；返回值仅表示反射调用能否发起，调用方必须重读验证游戏是否接受修改。
+     */
     virtual auto add_passive(SkillTarget target, std::string_view id) -> bool = 0;
+    /**
+     * @brief 请求移除被动技能。
+     *
+     * 调用前仍需校验 `target`；返回值仅表示反射调用能否发起，调用方必须重读验证游戏是否接受修改。
+     */
     virtual auto remove_passive(SkillTarget target, std::string_view id) -> bool = 0;
+    /**
+     * @brief 以给定 EquipWaza 槽位顺序重写主动技能。
+     *
+     * 调用前仍需校验 `target`；输入最多三项，且其顺序就是 EquipWaza 槽位顺序。
+     * 实现可能先清空再逐项重写；
+     * 返回值仅表示反射调用能否发起，调用方必须重读验证游戏是否接受修改。
+     */
     virtual auto rewrite_active(SkillTarget target, std::span<const ActiveSkill> skills)
         -> bool = 0;
 };
 
+/** @brief 不对外暴露的请求验证、状态比较与执行辅助算法。 */
 namespace detail {
+/** @brief 判断被动技能列表是否包含给定标识。 */
 [[nodiscard]] inline auto contains_passive(const std::vector<std::string>& passives,
                                            const std::string_view id) -> bool {
     return std::ranges::find(passives, id) != passives.end();
 }
 
+/** @brief 比较两份被动技能列表；忽略顺序但保留每个标识的重复次数。 */
 [[nodiscard]] inline auto same_passives(const std::vector<std::string>& left,
                                         const std::vector<std::string>& right) -> bool {
     if (left.size() != right.size()) {
@@ -126,11 +186,18 @@ namespace detail {
            std::unordered_multiset<std::string>(right.begin(), right.end());
 }
 
+/** @brief 组装包含移动后状态和消息的编辑结果。 */
 [[nodiscard]] inline auto result(const SkillEditStatus status, SkillState state,
                                  std::string message) -> SkillEditResult {
     return {.status = status, .state = std::move(state), .message = std::move(message)};
 }
 
+/**
+ * @brief 执行被动技能编辑的验证、写入、重读与回滚状态机。
+ *
+ * 先验证请求和原始状态，再发起写入并重读实际状态；替换失败时尝试恢复原技能。
+ * 重读确认恢复则返回 rolledBack，否则返回 rollbackFailed。
+ */
 [[nodiscard]] inline auto execute_passive(ISkillGateway& gateway, const SkillEditRequest& request,
                                           const SkillState& original) -> SkillEditResult {
     const auto reject = [&](std::string message) {
@@ -201,12 +268,14 @@ namespace detail {
                   "Replace and rollback both failed");
 }
 
+/** @brief 判断主动技能列表中是否存在给定数值标识。 */
 [[nodiscard]] inline auto contains_active(const std::vector<ActiveSkill>& skills,
                                           const std::uint16_t value) -> bool {
     return std::ranges::any_of(skills,
                                [value](const ActiveSkill& skill) { return skill.value == value; });
 }
 
+/** @brief 仅按主动技能数值及其槽位顺序比较两条 EquipWaza 序列。 */
 [[nodiscard]] inline auto same_active_sequence(const std::vector<ActiveSkill>& left,
                                                const std::vector<ActiveSkill>& right) -> bool {
     return left.size() == right.size() &&
@@ -215,6 +284,12 @@ namespace detail {
            });
 }
 
+/**
+ * @brief 执行主动技能编辑的验证、写入、重读与回滚状态机。
+ *
+ * 先验证槽位和请求，再重写槽位并重读实际状态；验证失败时重写原始序列并重读。
+ * 恢复成功返回 rolledBack，恢复失败返回 rollbackFailed。
+ */
 [[nodiscard]] inline auto execute_active(ISkillGateway& gateway, const SkillEditRequest& request,
                                          const SkillState& original) -> SkillEditResult {
     const auto reject = [&](std::string message) {
@@ -267,6 +342,14 @@ namespace detail {
 }
 }  // namespace detail
 
+/**
+ * @brief 执行一次已排队的技能编辑请求。
+ *
+ * 先拒绝空或失效目标，再读取原始状态并按 SkillKind 分派。
+ * 返回值始终包含可获得的最新实际状态和面向 UI 的消息。
+ *
+ * @warning 若网关实现涉及 Unreal 反射，必须在游戏线程调用此函数。
+ */
 [[nodiscard]] inline auto execute_skill_edit(ISkillGateway& gateway,
                                              const SkillEditRequest& request) -> SkillEditResult {
     if (request.target == 0 || !gateway.is_valid(request.target)) {
