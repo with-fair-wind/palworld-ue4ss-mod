@@ -9,15 +9,15 @@
 | 功能 | 说明 |
 |---|---|
 | **给予物品** | 输入物品 ID + 数量 → 调 `AddItem_ServerInternal` |
-| **物品浏览器** | 扫描全部游戏物品定义（`UPalStaticItemDataBase`）→ 搜索 → 点击填充 |
-| **背包列表** | 读取主背包 → 显示物品 × 数量 |
+| **物品浏览器** | 扫描游戏物品定义与本地化名称 → 按名称/ID 搜索 → 点击填充 Raw ID |
+| **背包列表** | 读取主背包 → 显示 `本地化名称 [RawId] ×数量` |
 | **修改数量** | 选中物品 → 设置新数量（写 `StackCount`） |
 | **帕鲁列表** | 扫描全部 `PalIndividualCharacterParameter` → 标记 `[boxed]`/`[active]` |
 | **目标帕鲁** | 自动识别当前查看的帕鲁；无有效查看目标时退回 Scan Pals 手动选择 |
 | **被动技能** | 最多 4 个；支持新增、替换、删除 |
 | **主动技能** | 编辑 3 个 `EquipWaza` 槽位；支持装备、替换、清空 |
 | **技能目录** | 运行时加载全部可分配被动与 `EPalWazaID` 主动技能 |
-| **中文搜索** | 下拉框显示 `中文名 [RawId]`，可按中文名或原始 ID 搜索 |
+| **中文搜索** | 物品与技能均显示 `中文名 [RawId]`，可按中文名或原始 ID 搜索 |
 | **安全修改** | 游戏线程 FIFO 执行，操作后重读；替换失败时恢复原技能 |
 | **类名发现** | 扫描 UObject 直方图（调试用） |
 
@@ -82,9 +82,10 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 
 ### 物品编辑
 - **Give items**：输入物品 ID（如 `PalSphere_Tera`）+ 数量 → Give。
-- **Item browser**：进入游戏后会自动扫描一次当前已加载的物品定义；也可点
-  "Scan game items" 重新扫描 → 搜索 → 点击自动填入。
-- **Refresh inventory** → 列出当前背包 → 选中 → Set count 修改数量。
+- **Item browser**：进入游戏后会自动扫描一次当前已加载的物品定义与当前语言名称；也可点
+  "Scan game items" 重新扫描。列表显示 `名称 [RawId]`，支持按名称或 ID 搜索；点击后只把 Raw ID
+  填入 Give 输入框。
+- **Refresh inventory** → 以 `名称 [RawId] ×数量` 列出当前背包 → 选中 → Set count 修改数量。
 
 ### 帕鲁主动/被动技能
 
@@ -107,9 +108,10 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 
 ## 物品 ID
 
-浏览器通过 UE4SS 运行时读取已经加载的 `PalStaticItemData*` UObject 的 `ID`，不再维护静态物品表，
-也不需要解包游戏资源。扫描范围取决于游戏当时已经加载的物品定义；仍可在 Give 输入框中手动输入
-Bare ID（无前缀）。
+浏览器通过 UE4SS 运行时读取已经加载的 `PalStaticItemData*` UObject 的 `ID`，并调用
+`PalUIUtility:GetItemName` 获取游戏当前语言的名称，不再维护静态物品表，也不需要解包游戏资源。
+游戏语言为中文时，物品浏览器和背包显示 `中文名 [RawId]`；若名称或目录尚不可用则回退为 Raw ID。
+扫描范围取决于游戏当时已经加载的物品定义；仍可在 Give 输入框中手动输入 Bare ID（无前缀）。
 
 ## 目录结构
 
@@ -119,6 +121,8 @@ mods/PalworldEditor/
 ├── inc/
 │   ├── game/
 │   │   └── pal_game.hpp             物品/背包/帕鲁扫描
+│   ├── items/
+│   │   └── item_catalog.hpp          物品标签、搜索、去重、排序与索引
 │   ├── skills/
 │   │   ├── pal_skills.hpp           Palworld 技能目录适配层
 │   │   ├── skill_catalog.hpp        可搜索技能目录纯逻辑
