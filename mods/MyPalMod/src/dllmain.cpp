@@ -47,11 +47,11 @@ public:
     MyPalMod() : CppUserModBase()
     {
         ModName = STR("MyPalMod");
-        ModVersion = STR("1.3.1");
-        ModDescription = STR("In-game item/Pal/passive editor for Palworld 1.0");
+        ModVersion = STR("1.4.0");
+        ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v1.3.1)\n"));
+        Output::send<LogLevel::Verbose>(STR("MyPalMod loaded (v1.4.0)\n"));
 
         register_tab(STR("MyPalMod"),
                      [](CppUserModBase* mod)
@@ -59,7 +59,7 @@ public:
                          UE4SS_ENABLE_IMGUI()
                          auto* self = static_cast<MyPalMod*>(mod);
                          ImGui::TextUnformatted("A floating 'MyPalMod' window should be visible ->");
-                         if (ImGui::Begin("MyPalMod v1.3", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+                         if (ImGui::Begin("MyPalMod v1.4.0", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
                          {
                              render_give_items(self);
                              ImGui::Separator();
