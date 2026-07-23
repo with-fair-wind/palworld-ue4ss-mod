@@ -310,6 +310,27 @@ void test_active_edit_rolls_back_complete_original_sequence()
           std::vector<skill_editor::ActiveSkill>({{9, "Wrong"}}));
 }
 
+void test_skill_edit_queue_is_fifo()
+{
+    skill_editor::SkillEditQueue queue;
+    queue.push({.target = 1});
+    queue.push({.target = 2});
+    queue.push({.target = 3});
+
+    CHECK(queue.size() == 3);
+    CHECK(queue.contains_target(2));
+    CHECK(!queue.contains_target(9));
+
+    const auto first = queue.try_pop();
+    const auto second = queue.try_pop();
+    const auto third = queue.try_pop();
+    CHECK(first.has_value() && first->target == 1);
+    CHECK(second.has_value() && second->target == 2);
+    CHECK(third.has_value() && third->target == 3);
+    CHECK(!queue.try_pop().has_value());
+    CHECK(queue.size() == 0);
+}
+
 auto main() -> int
 {
     test_skill_catalog_search_and_labels();
@@ -320,5 +341,6 @@ auto main() -> int
     test_active_edits_validate_three_compact_slots();
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();
+    test_skill_edit_queue_is_fifo();
     return failures == 0 ? 0 : 1;
 }

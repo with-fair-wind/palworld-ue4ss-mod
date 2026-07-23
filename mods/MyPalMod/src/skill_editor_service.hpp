@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -68,6 +70,46 @@ struct SkillEditResult
     SkillEditStatus status{};
     SkillState state;
     std::string message;
+};
+
+class SkillEditQueue
+{
+public:
+    auto push(SkillEditRequest request) -> void
+    {
+        const std::lock_guard lock(mutex_);
+        requests_.push_back(std::move(request));
+    }
+
+    [[nodiscard]] auto try_pop() -> std::optional<SkillEditRequest>
+    {
+        const std::lock_guard lock(mutex_);
+        if (requests_.empty())
+        {
+            return std::nullopt;
+        }
+
+        auto request = std::move(requests_.front());
+        requests_.pop_front();
+        return request;
+    }
+
+    [[nodiscard]] auto size() const -> std::size_t
+    {
+        const std::lock_guard lock(mutex_);
+        return requests_.size();
+    }
+
+    [[nodiscard]] auto contains_target(const SkillTarget target) const -> bool
+    {
+        const std::lock_guard lock(mutex_);
+        return std::ranges::any_of(
+            requests_, [target](const SkillEditRequest& request) { return request.target == target; });
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::deque<SkillEditRequest> requests_;
 };
 
 class ISkillGateway
