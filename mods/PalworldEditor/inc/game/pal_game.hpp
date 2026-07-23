@@ -1,7 +1,11 @@
+/**
+ * @file pal_game.hpp
+ * @brief 提供 PalworldEditor 对背包、物品、帕鲁对象和诊断扫描的游戏反射适配接口。
+ * @details 本文件中的函数通过 UE4SS 访问 Unreal UObject 和 `ProcessEvent`。除纯常量外，
+ *          所有接口都必须在 Unreal 初始化完成后的游戏线程调用；返回的 Unreal 裸指针均为
+ *          非拥有观察指针，不会延长游戏对象生命周期。
+ */
 #pragma once
-// pal_game.hpp — Game-interaction functions for PalworldEditor.
-// All functions here run on the GAME THREAD (via on_update or hooks).
-// They interact with Palworld's UObject system via UE4SS reflection.
 
 #include <algorithm>
 #include <map>
@@ -21,33 +25,52 @@
 using namespace RC;
 using namespace RC::Unreal;
 
+/** @brief 封装 PalworldEditor 直接调用的游戏线程反射操作。 */
 namespace pal_game {
+/** @brief 主玩家背包数据对象的 Unreal 类名。 */
 inline constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
 
-// Basic UObject validity check — catches stale pointers after object destruction.
+/**
+ * @brief 对 UObject 观察指针执行轻量有效性检查。
+ * @param[in] obj 待检查的非拥有 UObject 指针。
+ * @retval true 指针非空且仍能取得类元数据。
+ * @retval false 指针为空或对象的类元数据已经失效。
+ * @warning 本检查不能延长对象生命周期，也不能保证对象在后续帧仍然有效。
+ */
 inline auto is_valid(UObject* obj) -> bool {
     return obj != nullptr && obj->GetClassPrivate() != nullptr;
 }
 
+/**
+ * @brief UObject 诊断扫描关注的类名关键字。
+ * @details 用于缩小诊断日志范围，不参与物品、背包或技能的业务扫描。
+ */
 inline constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Inventory", L"IndividualCharacter", L"ItemContainer", L"Otomo", L"PalCharacterContainer",
 };
 
+/** @brief 表示主背包中的一个非空物品槽快照。 */
 struct InvEntry {
-    std::string item_id;
-    int count;
-    int32_t slot_index;
+    std::string item_id; /**< 传给游戏接口的物品 Raw ID，不是本地化展示名称。 */
+    int count;           /**< 扫描时读取到的堆叠数量。 */
+    int32_t slot_index;  /**< 容器槽位索引；修改数量时使用此值，而不是 `item_id`。 */
 };
 
+/**
+ * @brief 表示当前已加载的一只帕鲁及其非拥有对象指针。
+ * @warning `ptr` 依赖游戏对象生命周期，跨帧使用前必须重新调用 is_valid()。
+ */
 struct PalEntry {
-    std::string name;
-    UObject* ptr;
+    std::string name; /**< Raw 物种名及 `[boxed]`/`[active]` 状态后缀。 */
+    UObject* ptr;     /**< 指向 `PalIndividualCharacterParameter` 的非拥有观察指针。 */
 };
 
-// ---------------------------------------------------------------------------
-// Inventory access
-// ---------------------------------------------------------------------------
-
+/**
+ * @brief 获取主玩家的 Common 背包容器。
+ * @return 指向主背包容器的非拥有观察指针。
+ * @retval nullptr 背包对象、反射函数或对应容器不可用。
+ * @warning 只能在游戏线程调用，返回值跨帧使用前需要重新校验。
+ */
 inline auto get_main_container() -> UObject* {
     UObject* inv = UObjectGlobals::FindFirstOf(kInventoryClassName);
     if (inv == nullptr) {
@@ -59,44 +82,69 @@ inline auto get_main_container() -> UObject* {
     if (fn == nullptr) {
         return nullptr;
     }
+    /** @brief `TryGetContainerFromInventoryType` 的反射参数布局。 */
     struct {
-        uint8_t Type;
-        UObject* Out;
-        bool Ret;
+        uint8_t Type; /**< `EPalPlayerInventoryType` 数值；0 表示 Common。 */
+        UObject* Out; /**< 游戏写回的非拥有容器指针。 */
+        bool Ret;     /**< 游戏函数写回的成功标志；当前实现以 `Out` 为准。 */
     } p{};
     p.Type = 0;  // EPalPlayerInventoryType::Common
     inv->ProcessEvent(fn, &p);
     return p.Out;
 }
 
+/**
+ * @brief 读取物品容器的槽位总数。
+ * @param[in] container 非拥有物品容器指针。
+ * @return 容器报告的槽位数量。
+ * @retval 0 容器为空、`PalItemContainer:Num` 不可用或容器本身为空。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto container_num(UObject* container) -> int32_t {
     UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Num"));
     if (fn == nullptr || container == nullptr) {
         return 0;
     }
+    /** @brief `PalItemContainer:Num` 的返回参数布局。 */
     struct {
-        int32_t Ret;
+        int32_t Ret; /**< 游戏函数写回的槽位数量。 */
     } n{};
     container->ProcessEvent(fn, &n);
     return n.Ret;
 }
 
+/**
+ * @brief 按索引获取物品容器中的槽位对象。
+ * @param[in] container 非拥有物品容器指针。
+ * @param[in] index 要读取的槽位索引，调用方应保证其位于 `[0, container_num())`。
+ * @return 指向槽位对象的非拥有观察指针。
+ * @retval nullptr 容器、反射函数或对应槽位不可用。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto container_get(UObject* container, int32_t index) -> UObject* {
     UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Get"));
     if (fn == nullptr || container == nullptr) {
         return nullptr;
     }
+    /** @brief `PalItemContainer:Get` 的反射参数布局。 */
     struct {
-        int32_t Index;
-        UObject* Slot;
+        int32_t Index; /**< 传入游戏函数的槽位索引。 */
+        UObject* Slot; /**< 游戏函数写回的非拥有槽位指针。 */
     } gp{};
     gp.Index = index;
     container->ProcessEvent(fn, &gp);
     return gp.Slot;
 }
 
+/**
+ * @brief 通过 `StackCount` 属性读取一个物品槽的堆叠数量。
+ * @param[in] slot 非拥有物品槽指针。
+ * @return 槽位当前的堆叠数量。
+ * @retval 0 槽位为空、属性不存在或属性不是 `FIntProperty`。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto read_slot_stack_count(UObject* slot) -> int32_t {
     if (slot == nullptr) {
         return 0;
@@ -108,6 +156,12 @@ inline auto read_slot_stack_count(UObject* slot) -> int32_t {
     return 0;
 }
 
+/**
+ * @brief 扫描主背包并生成全部非空物品槽快照。
+ * @return 按容器槽位顺序排列的非空物品列表。
+ * @note 只保留 `StackCount > 0` 且 `ItemId` 能转换为非空 UTF-8 Raw ID 的槽位。
+ * @warning 只能在游戏线程调用；返回结果不持有任何 UObject 指针。
+ */
 inline auto read_inventory() -> std::vector<InvEntry> {
     std::vector<InvEntry> items;
     UObject* container = get_main_container();
@@ -141,6 +195,12 @@ inline auto read_inventory() -> std::vector<InvEntry> {
     return items;
 }
 
+/**
+ * @brief 直接修改主背包指定槽位的 `StackCount` 属性。
+ * @param[in] slotIndex 主背包容器槽位索引。
+ * @param[in] newCount 要写入的数量；本接口不执行范围裁剪。
+ * @warning 只能在游戏线程调用。容器、槽位或属性不可用时静默返回。
+ */
 inline auto set_slot_count(int32_t slotIndex, int32_t newCount) -> void {
     UObject* container = get_main_container();
     if (container == nullptr) {
@@ -161,6 +221,12 @@ inline auto set_slot_count(int32_t slotIndex, int32_t newCount) -> void {
                                     old, newCount);
 }
 
+/**
+ * @brief 通过 `AddItem_ServerInternal` 向玩家主背包添加物品。
+ * @param[in] itemId 仅含 ASCII 的物品 Raw ID；本接口使用 widen_ascii() 构造 `FName`。
+ * @param[in] count 直接传给游戏函数的添加数量。
+ * @warning 只能在游戏线程调用。背包对象或反射函数不可用时不执行添加。
+ */
 inline auto give_items(const std::string& itemId, int32 count) -> void {
     UObject* inventory = UObjectGlobals::FindFirstOf(kInventoryClassName);
     if (inventory == nullptr) {
@@ -173,13 +239,14 @@ inline auto give_items(const std::string& itemId, int32 count) -> void {
         return;
     }
     const std::wstring wide = text_encoding::widen_ascii(itemId);
+    /** @brief `AddItem_ServerInternal` 的反射参数布局。 */
     struct {
-        FName StaticItemId;
-        int32_t Count;
-        bool IsAssignPassive;
-        float LogDelay;
-        bool bNotifyLog;
-        int32_t Result;
+        FName StaticItemId;   /**< 要添加的物品 Raw ID。 */
+        int32_t Count;        /**< 要添加的物品数量。 */
+        bool IsAssignPassive; /**< 是否为生成物品分配随机被动；本 mod 固定为 `false`。 */
+        float LogDelay;       /**< 游戏通知延迟；本 mod 固定为 0。 */
+        bool bNotifyLog;      /**< 是否显示游戏内获得日志；本 mod 固定为 `false`。 */
+        int32_t Result;       /**< 游戏函数写回的添加结果枚举数值。 */
     } params{};
     params.StaticItemId = FName(wide.c_str());
     params.Count = count;
@@ -192,6 +259,13 @@ inline auto give_items(const std::string& itemId, int32 count) -> void {
         params.Result);
 }
 
+/**
+ * @brief 查找提供物品本地化名称的 `PalUIUtility` 默认对象。
+ * @return 指向 UI 工具对象的非拥有观察指针。
+ * @retval nullptr 默认对象和当前已加载对象中均未找到 `PalUIUtility`。
+ * @note 优先使用 `/Script/Pal.Default__PalUIUtility`，再退回按类名查找。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto get_ui_utility() -> UObject* {
     if (auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
             nullptr, nullptr, STR("/Script/Pal.Default__PalUIUtility"))) {
@@ -200,20 +274,40 @@ inline auto get_ui_utility() -> UObject* {
     return UObjectGlobals::FindFirstOf(STR("PalUIUtility"));
 }
 
+/**
+ * @brief 调用 `PalUIUtility:GetItemName` 获取指定物品的当前语言名称。
+ * @param[in] utility 非拥有 `PalUIUtility` 对象指针。
+ * @param[in] function 非拥有 `GetItemName` 反射函数指针。
+ * @param[in] worldContext 非拥有世界上下文对象，通常使用主背包数据对象。
+ * @param[in] id 物品的 `FName` Raw ID。
+ * @return 转换为 UTF-8 的当前游戏语言名称。
+ * @retval std::string{} 任一必需对象为空，或返回的 `FText` 无法转换。
+ * @warning 所有 Unreal 指针只在游戏对象仍有效期间可用，且本接口只能在游戏线程调用。
+ */
 inline auto localized_item_name(UObject* utility, UFunction* function, UObject* worldContext,
                                 const FName& id) -> std::string {
     if (utility == nullptr || function == nullptr || worldContext == nullptr) {
         return {};
     }
+    /** @brief `PalUIUtility:GetItemName` 的反射参数布局。 */
     struct Params {
-        UObject* WorldContextObject;
-        FName StaticItemId;
-        FText OutName;
+        UObject* WorldContextObject; /**< 非拥有世界上下文对象。 */
+        FName StaticItemId;          /**< 要查询的物品 Raw ID。 */
+        FText OutName;               /**< 游戏函数写回的本地化名称。 */
     } params{.WorldContextObject = worldContext, .StaticItemId = id};
     utility->ProcessEvent(function, &params);
     return text_encoding::to_utf8(params.OutName.ToString());
 }
 
+/**
+ * @brief 扫描当前已加载的物品定义并建立可搜索的本地化目录。
+ * @return 已去重、排序并建立 Raw ID 标签索引的物品目录快照。
+ * @details 扫描名称以 `PalStaticItemData` 开头的 UObject，过滤 Table、Asset、Manager、
+ *          Struct、AndNum 和 RowName 辅助类型，从 `ID` 属性读取 Raw ID，并通过
+ *          `PalUIUtility:GetItemName` 查询当前游戏语言名称。
+ * @note 扫描范围只包含调用时已经加载的 UObject；名称解析失败时目录标签回退到 Raw ID。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
     std::vector<item_catalog::ItemOption> items;
     auto* utility = get_ui_utility();
@@ -257,10 +351,14 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
     return catalog;
 }
 
-// ---------------------------------------------------------------------------
-// Pal scanning + passive skill editing
-// ---------------------------------------------------------------------------
-
+/**
+ * @brief 扫描当前已加载的帕鲁个体参数对象。
+ * @return 按展示名称排序的帕鲁快照列表。
+ * @details 只收集类名为 `PalIndividualCharacterParameter` 的对象，从 `SaveParameter`
+ *          读取 Raw 物种名，并根据 `IndividualActor` 是否存在追加 `[active]` 或 `[boxed]`。
+ * @warning 返回的 `PalEntry::ptr` 是非拥有观察指针，跨帧使用前必须重新校验。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto scan_pals() -> std::vector<PalEntry> {
     std::vector<PalEntry> pals;
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
@@ -297,10 +395,13 @@ inline auto scan_pals() -> std::vector<PalEntry> {
     return pals;
 }
 
-// ---------------------------------------------------------------------------
-// Diagnostics
-// ---------------------------------------------------------------------------
-
+/**
+ * @brief 输出与 PalworldEditor 关注对象相关的 UObject 类名直方图。
+ * @details 扫描全部已加载 UObject，只统计类名包含 kDiscoveryKeywords 任一关键字的对象，
+ *          并按类名最多输出 200 条计数记录。
+ * @note 本接口只写诊断日志，不修改游戏对象。
+ * @warning 只能在游戏线程调用。
+ */
 inline auto discover_objects() -> void {
     Output::send<LogLevel::Warning>(STR("=== PalworldEditor discovery: scanning UObjects ===\n"));
     std::map<std::wstring, int> matching;

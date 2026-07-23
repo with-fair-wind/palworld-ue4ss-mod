@@ -1,3 +1,8 @@
+/**
+ * @file skill_editor_service.hpp
+ * @brief 定义与 Unreal 解耦的技能编辑领域模型、线程安全请求队列和验证/回滚服务。
+ * @details 本文件只依赖标准库和值类型；具体游戏读写由 `ISkillGateway` 实现。
+ */
 #pragma once
 
 #include <algorithm>
@@ -13,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+/** @brief 提供主动/被动技能编辑的纯领域接口和执行算法。 */
 namespace skill_editor {
 /**
  * @brief 将非拥有 `UObject*` 编码为整数的临时目标句柄。
@@ -31,8 +37,7 @@ struct ActiveSkill {
     /**
      * @brief 比较两个主动技能的全部字段是否相等。
      *
-     * @param[in] 左侧 用作比较左操作数的主动技能。
-     * @param[in] 右侧 用作比较右操作数的主动技能。
+     * @details 第一个参数是左操作数，第二个参数是右操作数；两个参数均为只读输入。
      * @return 两个对象的 `value` 与 `id` 均相等时为 `true`，否则为 `false`。
      */
     friend auto operator==(const ActiveSkill&, const ActiveSkill&) -> bool = default;
