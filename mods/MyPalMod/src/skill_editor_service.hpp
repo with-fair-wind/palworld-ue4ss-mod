@@ -192,6 +192,89 @@ namespace detail
     }
     return result(SkillEditStatus::rollbackFailed, std::move(rolledBack), "Replace and rollback both failed");
 }
+
+[[nodiscard]] inline auto contains_active(
+    const std::vector<ActiveSkill>& skills,
+    const std::uint16_t value) -> bool
+{
+    return std::ranges::any_of(skills, [value](const ActiveSkill& skill) { return skill.value == value; });
+}
+
+[[nodiscard]] inline auto same_active_sequence(
+    const std::vector<ActiveSkill>& left,
+    const std::vector<ActiveSkill>& right) -> bool
+{
+    return left.size() == right.size() &&
+           std::ranges::equal(
+               left,
+               right,
+               [](const ActiveSkill& lhs, const ActiveSkill& rhs) { return lhs.value == rhs.value; });
+}
+
+[[nodiscard]] inline auto execute_active(
+    ISkillGateway& gateway,
+    const SkillEditRequest& request,
+    const SkillState& original) -> SkillEditResult
+{
+    const auto reject = [&](std::string message)
+    {
+        return result(SkillEditStatus::rejected, original, std::move(message));
+    };
+
+    if (request.activeSlot >= 3 || original.activeSkills.size() > 3)
+    {
+        return reject("Active skill slot is outside the three EquipWaza slots");
+    }
+
+    auto desired = original.activeSkills;
+    if (request.operation == SkillEditOperation::add)
+    {
+        if (!request.newActiveSkill.has_value() || request.activeSlot != desired.size() || desired.size() >= 3)
+        {
+            return reject("Active skill can only be added to the first empty trailing slot");
+        }
+        if (contains_active(desired, request.newActiveSkill->value))
+        {
+            return reject("Active skill is already equipped");
+        }
+        desired.push_back(*request.newActiveSkill);
+    }
+    else if (request.operation == SkillEditOperation::replace)
+    {
+        if (!request.newActiveSkill.has_value() || request.activeSlot >= desired.size())
+        {
+            return reject("Active skill replacement slot is empty");
+        }
+        if (contains_active(desired, request.newActiveSkill->value))
+        {
+            return reject("Active skill is already equipped");
+        }
+        desired[request.activeSlot] = *request.newActiveSkill;
+    }
+    else
+    {
+        if (request.activeSlot >= desired.size())
+        {
+            return reject("Active skill removal slot is empty");
+        }
+        desired.erase(desired.begin() + static_cast<std::ptrdiff_t>(request.activeSlot));
+    }
+
+    gateway.rewrite_active(request.target, desired);
+    auto actual = gateway.read_state(request.target);
+    if (same_active_sequence(actual.activeSkills, desired))
+    {
+        return result(SkillEditStatus::succeeded, std::move(actual), "Active skill slots updated");
+    }
+
+    gateway.rewrite_active(request.target, original.activeSkills);
+    auto rolledBack = gateway.read_state(request.target);
+    if (same_active_sequence(rolledBack.activeSkills, original.activeSkills))
+    {
+        return result(SkillEditStatus::rolledBack, std::move(rolledBack), "Active edit failed; original slots restored");
+    }
+    return result(SkillEditStatus::rollbackFailed, std::move(rolledBack), "Active edit and rollback both failed");
+}
 }
 
 [[nodiscard]] inline auto execute_skill_edit(
@@ -208,6 +291,6 @@ namespace detail
     {
         return detail::execute_passive(gateway, request, original);
     }
-    return detail::result(SkillEditStatus::rejected, original, "Active skill editing is not implemented");
+    return detail::execute_active(gateway, request, original);
 }
 }

@@ -66,6 +66,8 @@ public:
     skill_editor::SkillState state;
     std::deque<bool> addOutcomes;
     std::deque<bool> removeOutcomes;
+    std::deque<bool> rewriteOutcomes;
+    std::deque<std::optional<std::vector<skill_editor::ActiveSkill>>> rewriteStates;
     std::vector<std::string> calls;
 
     auto is_valid(const skill_editor::SkillTarget) const -> bool override
@@ -103,10 +105,24 @@ public:
 
     auto rewrite_active(
         const skill_editor::SkillTarget,
-        const std::span<const skill_editor::ActiveSkill>) -> bool override
+        const std::span<const skill_editor::ActiveSkill> skills) -> bool override
     {
         calls.emplace_back("rewrite");
-        return false;
+        const bool succeeds = pop_or_default(rewriteOutcomes, true);
+        if (!rewriteStates.empty())
+        {
+            auto replacement = std::move(rewriteStates.front());
+            rewriteStates.pop_front();
+            if (replacement.has_value())
+            {
+                state.activeSkills = std::move(*replacement);
+            }
+        }
+        else if (succeeds)
+        {
+            state.activeSkills.assign(skills.begin(), skills.end());
+        }
+        return succeeds;
     }
 
 private:
@@ -200,6 +216,100 @@ void test_passive_replace_rolls_back_on_failure()
     CHECK(!std::ranges::contains(result.state.passiveIds, "A"));
 }
 
+auto active_request(
+    const skill_editor::SkillEditOperation operation,
+    const std::size_t slot,
+    std::optional<skill_editor::ActiveSkill> skill = std::nullopt) -> skill_editor::SkillEditRequest
+{
+    return {
+        .target = 0x1234,
+        .kind = skill_editor::SkillKind::active,
+        .operation = operation,
+        .activeSlot = slot,
+        .newActiveSkill = std::move(skill),
+    };
+}
+
+void test_active_edits_validate_three_compact_slots()
+{
+    FakeSkillGateway gateway;
+    gateway.state.activeSkills = {{1, "FireBall"}};
+
+    auto result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::add, 2, {{2, "WaterGun"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{2, "WaterGun"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::remove, 3));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+
+    gateway.state.activeSkills = {{1, "FireBall"}, {2, "WaterGun"}, {3, "WindCutter"}};
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::add, 3, {{4, "IceMissile"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{3, "WindCutter"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+}
+
+void test_active_add_replace_and_remove_preserve_order()
+{
+    FakeSkillGateway gateway;
+    gateway.state.activeSkills = {{1, "FireBall"}};
+
+    auto result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::add, 1, {{2, "WaterGun"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(result.state.activeSkills ==
+          std::vector<skill_editor::ActiveSkill>({{1, "FireBall"}, {2, "WaterGun"}}));
+
+    gateway.state.activeSkills.push_back({3, "WindCutter"});
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(result.state.activeSkills ==
+          std::vector<skill_editor::ActiveSkill>({{1, "FireBall"}, {4, "IceMissile"}, {3, "WindCutter"}}));
+
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::remove, 1));
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(result.state.activeSkills ==
+          std::vector<skill_editor::ActiveSkill>({{1, "FireBall"}, {3, "WindCutter"}}));
+}
+
+void test_active_edit_rolls_back_complete_original_sequence()
+{
+    FakeSkillGateway gateway;
+    const std::vector<skill_editor::ActiveSkill> original{{1, "FireBall"}, {2, "WaterGun"}, {3, "WindCutter"}};
+    gateway.state.activeSkills = original;
+    gateway.rewriteStates = {
+        std::vector<skill_editor::ActiveSkill>{{9, "Wrong"}},
+        original,
+    };
+
+    auto result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::rolledBack);
+    CHECK(result.state.activeSkills == original);
+
+    gateway.state.activeSkills = original;
+    gateway.rewriteStates = {
+        std::vector<skill_editor::ActiveSkill>{{9, "Wrong"}},
+        std::nullopt,
+    };
+    gateway.rewriteOutcomes = {true, false};
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
+    CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
+    CHECK(result.state.activeSkills ==
+          std::vector<skill_editor::ActiveSkill>({{9, "Wrong"}}));
+}
+
 auto main() -> int
 {
     test_skill_catalog_search_and_labels();
@@ -207,5 +317,8 @@ auto main() -> int
     test_passive_edits_validate_target_and_limits();
     test_passive_add_remove_and_replace_reread_state();
     test_passive_replace_rolls_back_on_failure();
+    test_active_edits_validate_three_compact_slots();
+    test_active_add_replace_and_remove_preserve_order();
+    test_active_edit_rolls_back_complete_original_sequence();
     return failures == 0 ? 0 : 1;
 }
