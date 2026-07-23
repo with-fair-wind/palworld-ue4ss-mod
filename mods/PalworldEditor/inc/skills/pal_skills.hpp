@@ -2,8 +2,8 @@
 
 #include <unordered_map>
 
-#include "skill_catalog.hpp"
-#include "skill_editor_service.hpp"
+#include <skills/skill_catalog.hpp>
+#include <skills/skill_editor_service.hpp>
 
 namespace pal_skills {
 class PalSkillGateway final : public skill_editor::ISkillGateway {

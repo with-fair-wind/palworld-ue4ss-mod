@@ -1,5 +1,5 @@
 #pragma once
-// pal_game.hpp — Game-interaction functions for MyPalMod.
+// pal_game.hpp — Game-interaction functions for PalworldEditor.
 // All functions here run on the GAME THREAD (via on_update or hooks).
 // They interact with Palworld's UObject system via UE4SS reflection.
 
@@ -15,7 +15,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
-#include "text_encoding.hpp"
+#include <support/text_encoding.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;

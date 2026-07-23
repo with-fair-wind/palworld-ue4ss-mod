@@ -1,4 +1,4 @@
-// MyPalMod — UE4SS C++ mod for Palworld 1.0.
+// PalworldEditor — UE4SS C++ mod for Palworld 1.0.
 //
 //   Build:   cmake --preset ninja-msvc-x64 && cmake --build --preset ninja-msvc-x64
 //   Deploy:  cmake --build --preset ninja-msvc-x64 --target deploy
@@ -31,10 +31,9 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <imgui.h>
 
-#include "item_database.h"
-#include "pal_game.hpp"
-#include "pal_skills.hpp"
-#include "text_encoding.hpp"
+#include <game/pal_game.hpp>
+#include <skills/pal_skills.hpp>
+#include <support/text_encoding.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -96,6 +95,8 @@ public:
                                        .HookName = STR("PalViewTracker")});
             Output::send<LogLevel::Verbose>(STR("MyPalMod: PalViewTracker hook registered\n"));
         }
+
+        want_scan_items_.store(true);
     }
 
     auto on_update() -> void override {
@@ -375,9 +376,7 @@ private:
         ImGui::InputText("##search", self->search_buf_, sizeof(self->search_buf_));
         {
             const std::lock_guard lock(self->inv_mutex_);
-            ImGui::TextDisabled("(%d items)", self->item_db_cache_.empty()
-                                                  ? kBrowseItemCount
-                                                  : static_cast<int>(self->item_db_cache_.size()));
+            ImGui::TextDisabled("(%d items)", static_cast<int>(self->item_db_cache_.size()));
         }
         ImGui::BeginChild("browser", ImVec2(380, 160), true);
         {
@@ -401,14 +400,11 @@ private:
                 }
             };
             const std::lock_guard lock(self->inv_mutex_);
-            if (!self->item_db_cache_.empty()) {
-                for (const auto& item : self->item_db_cache_) {
-                    tryItem(item.c_str());
-                }
-            } else {
-                for (int bi = 0; bi < kBrowseItemCount; ++bi) {
-                    tryItem(kBrowseItems[bi]);
-                }
+            if (self->item_db_cache_.empty()) {
+                ImGui::TextDisabled("尚未发现物品，请重新扫描。");
+            }
+            for (const auto& item : self->item_db_cache_) {
+                tryItem(item.c_str());
             }
         }
         ImGui::EndChild();

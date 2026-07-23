@@ -6,8 +6,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "skill_catalog.hpp"
-#include "skill_editor_service.hpp"
+#include <skills/skill_catalog.hpp>
+#include <skills/skill_editor_service.hpp>
 
 namespace {
 auto failures = 0;
