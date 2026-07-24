@@ -14,6 +14,7 @@
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
+#include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
@@ -39,6 +40,128 @@ inline constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData"
  */
 inline auto is_valid(UObject* obj) -> bool {
     return obj != nullptr && obj->GetClassPrivate() != nullptr;
+}
+
+/**
+ * @brief 获取可安全作为 Pal 蓝图工具函数世界上下文的玩家背包对象。
+ * @return 找到时返回 `PalPlayerInventoryData` 的非拥有观察指针。
+ * @retval nullptr 玩家背包对象尚未加载或已经无效。
+ * @warning 只能在游戏线程调用，返回值不能跨帧缓存。
+ */
+[[nodiscard]] inline auto get_world_context() -> UObject* {
+    auto* const worldContext = UObjectGlobals::FindFirstOf(kInventoryClassName);
+    return is_valid(worldContext) ? worldContext : nullptr;
+}
+
+/**
+ * @brief 当前待出战帕鲁的运行时解析结果。
+ */
+struct SelectedPalTarget {
+    /** @brief 当前帕鲁的个体参数对象；解析失败时为空。 */
+    UObject* parameter{};
+
+    /** @brief 帕鲁 `CharacterID` 的 UTF-8 表示。 */
+    std::string characterId;
+};
+
+/**
+ * @brief 解析 Q/E 当前选中的下一只待出战帕鲁。
+ * @return 参数对象与 `CharacterID`；任一步骤失败时返回空结果。
+ * @details 从稳定的 `PalPlayerInventoryData` 世界上下文开始，依次取得 Otomo holder、
+ *          当前选中槽位、个体 handle 和个体 parameter，不缓存任何中间裸指针。
+ * @warning 只能在游戏线程调用；返回的参数对象只允许在当前帧使用。
+ */
+[[nodiscard]] inline auto resolve_selected_otomo() -> SelectedPalTarget {
+    auto* const worldContext = get_world_context();
+    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const getHolderFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalUtility:GetOtomoHolderComponent"));
+    if (worldContext == nullptr || utility == nullptr || getHolderFunction == nullptr) {
+        return {};
+    }
+
+    /** @brief `PalUtility:GetOtomoHolderComponent` 的反射参数布局。 */
+    struct GetHolderParams {
+        UObject* WorldContextObject{}; /**< 非拥有世界上下文对象。 */
+        UObject* ReturnValue{};        /**< 游戏写回的非拥有 holder 对象。 */
+    } getHolderParams{.WorldContextObject = worldContext};
+    utility->ProcessEvent(getHolderFunction, &getHolderParams);
+    auto* const holder = getHolderParams.ReturnValue;
+    if (!is_valid(holder)) {
+        return {};
+    }
+
+    auto* const getSelectedFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr,
+        STR("/Script/Pal.PalOtomoHolderComponentBase:GetSelectedOtomoID"));
+    if (getSelectedFunction == nullptr) {
+        return {};
+    }
+    /** @brief `PalOtomoHolderComponentBase:GetSelectedOtomoID` 的返回参数布局。 */
+    struct GetSelectedParams {
+        int32_t ReturnValue{-1}; /**< 游戏写回的当前选中 Otomo 槽位索引。 */
+    } getSelectedParams;
+    holder->ProcessEvent(getSelectedFunction, &getSelectedParams);
+    if (getSelectedParams.ReturnValue < 0) {
+        return {};
+    }
+
+    auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr,
+        STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
+    if (getHandleFunction == nullptr) {
+        return {};
+    }
+    /** @brief `PalOtomoHolderComponentBase:GetOtomoIndividualHandle` 的反射参数布局。 */
+    struct GetHandleParams {
+        int32_t SlotIndex{};     /**< 要解析的当前选中槽位。 */
+        UObject* ReturnValue{}; /**< 游戏写回的非拥有个体 handle。 */
+    } getHandleParams{.SlotIndex = getSelectedParams.ReturnValue};
+    holder->ProcessEvent(getHandleFunction, &getHandleParams);
+    auto* const handle = getHandleParams.ReturnValue;
+    if (!is_valid(handle)) {
+        return {};
+    }
+
+    auto* const getParameterFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr,
+        STR("/Script/Pal.PalIndividualCharacterHandle:TryGetIndividualParameter"));
+    if (getParameterFunction == nullptr) {
+        return {};
+    }
+    /** @brief `PalIndividualCharacterHandle:TryGetIndividualParameter` 的返回参数布局。 */
+    struct GetParameterParams {
+        UObject* ReturnValue{}; /**< 游戏写回的非拥有个体参数对象。 */
+    } getParameterParams;
+    handle->ProcessEvent(getParameterFunction, &getParameterParams);
+    auto* const parameter = getParameterParams.ReturnValue;
+    if (!is_valid(parameter)) {
+        return {};
+    }
+
+    auto* const expectedClass = UObjectGlobals::StaticFindObject<UClass*>(
+        nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter"));
+    if (expectedClass == nullptr || !parameter->GetClassPrivate()->IsChildOf(expectedClass)) {
+        return {};
+    }
+
+    auto* const getCharacterIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr,
+        STR("/Script/Pal.PalIndividualCharacterParameter:GetCharacterID"));
+    if (getCharacterIdFunction == nullptr) {
+        return {};
+    }
+    /** @brief `PalIndividualCharacterParameter:GetCharacterID` 的返回参数布局。 */
+    struct GetCharacterIdParams {
+        FName ReturnValue; /**< 游戏写回的帕鲁 CharacterID。 */
+    } getCharacterIdParams;
+    parameter->ProcessEvent(getCharacterIdFunction, &getCharacterIdParams);
+
+    return {
+        .parameter = parameter,
+        .characterId = text_encoding::to_utf8(getCharacterIdParams.ReturnValue.ToString()),
+    };
 }
 
 /**

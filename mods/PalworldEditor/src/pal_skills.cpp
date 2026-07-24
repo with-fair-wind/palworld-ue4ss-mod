@@ -78,7 +78,7 @@ template <typename T>
 [[nodiscard]] auto passive_localized_name(UObject* utility, UObject* worldContext, const FName& id)
     -> std::string {
     auto* function = find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetPassiveSkillName"));
-    if (utility == nullptr || function == nullptr) {
+    if (utility == nullptr || worldContext == nullptr || function == nullptr) {
         return {};
     }
 
@@ -102,7 +102,7 @@ template <typename T>
 [[nodiscard]] auto active_localized_name(UObject* utility, UObject* worldContext,
                                          const EPalWazaID id) -> std::string {
     auto* function = find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetWazaName"));
-    if (utility == nullptr || function == nullptr) {
+    if (utility == nullptr || worldContext == nullptr || function == nullptr) {
         return {};
     }
 
@@ -284,10 +284,13 @@ auto PalSkillGateway::rewrite_active(const skill_editor::SkillTarget target,
  *          运行时 `EPalWazaID` 枚举。结果会去重、过滤哨兵项、按本地化标签排序并重建
  *          activeIds_。完整调用契约见头文件中的成员声明。
  */
-auto PalSkillGateway::load_catalog(const skill_editor::SkillTarget contextTarget)
-    -> skill_editor::SkillCatalogSnapshot {
+auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     skill_editor::SkillCatalogSnapshot catalog;
-    auto* worldContext = to_pal(contextTarget);
+    auto* const worldContext = pal_game::get_world_context();
+    if (worldContext == nullptr) {
+        catalog.error = "PalPlayerInventoryData world context is unavailable";
+        return catalog;
+    }
     auto* utility = ui_utility();
 
     auto* manager = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));

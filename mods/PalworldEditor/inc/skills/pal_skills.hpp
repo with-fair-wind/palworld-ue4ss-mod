@@ -66,12 +66,11 @@ public:
 
     /**
      * @brief 从当前运行时加载全部可分配被动技能和主动技能枚举值。
-     * @param[in] contextTarget 用于本地化查询的帕鲁世界上下文句柄。
      * @return 技能目录快照；任一目录为空时 `ready` 为 `false` 并设置 `error`。
-     * @details 成功时会同步重建主动技能数值到 Raw ID 的内部映射，供 read_state() 使用。
+     * @details 本方法自行获取稳定的玩家背包世界上下文。成功时会同步重建主动技能数值到
+     *          Raw ID 的内部映射，供 read_state() 使用。
      */
-    auto load_catalog(skill_editor::SkillTarget contextTarget)
-        -> skill_editor::SkillCatalogSnapshot;
+    auto load_catalog() -> skill_editor::SkillCatalogSnapshot;
 
 private:
     /**

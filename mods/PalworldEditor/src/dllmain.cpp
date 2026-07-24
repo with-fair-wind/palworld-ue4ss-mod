@@ -227,7 +227,7 @@ public:
             }
             ViewTrackingGuard guard(suppressViewTracking_);
             refreshedCatalog = skill_editor::with_catalog_fallback(
-                previous, skillGateway_.load_catalog(resolved.target));
+                previous, skillGateway_.load_catalog());
         }
 
         std::optional<skill_editor::SkillState> refreshedState;
