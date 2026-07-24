@@ -159,15 +159,6 @@ struct LocalOtomoHolderResolution {
 }
 
 /**
- * @brief 获取可作为 Pal 蓝图工具函数世界上下文的本地玩家队伍 Holder。
- * @return 唯一本地 Holder 的非拥有观察指针；解析失败时返回 nullptr。
- * @warning 只能在游戏线程调用，返回值不能跨帧缓存。
- */
-[[nodiscard]] inline auto get_world_context() -> UObject* {
-    return resolve_local_otomo_holder().holder;
-}
-
-/**
  * @brief 当前待出战帕鲁的运行时解析结果。
  */
 struct SelectedPalTarget {

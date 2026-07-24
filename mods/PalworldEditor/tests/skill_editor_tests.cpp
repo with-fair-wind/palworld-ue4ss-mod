@@ -82,6 +82,8 @@ void test_active_skill_definitions_are_unique_and_known_values_match() {
     CHECK(skill_editor::find_active_skill_id(22) == std::optional<std::string_view>{"AirCanon"});
     CHECK(skill_editor::find_active_skill_id(124) == std::optional<std::string_view>{"MudShot"});
     CHECK(!skill_editor::find_active_skill_id(0).has_value());
+    CHECK(skill_editor::active_skill_id_or_numeric(15) == "Unique_Boar_Tackle");
+    CHECK(skill_editor::active_skill_id_or_numeric(124) == "MudShot");
     CHECK(skill_editor::active_skill_id_or_numeric(65535) == "65535");
 }
 

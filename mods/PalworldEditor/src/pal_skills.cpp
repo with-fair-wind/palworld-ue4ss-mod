@@ -7,9 +7,7 @@
  */
 #include <algorithm>
 #include <cstdint>
-#include <limits>
 #include <string>
-#include <unordered_set>
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
@@ -29,7 +27,7 @@ using namespace RC::Unreal;
 namespace {
 /**
  * @brief 与 Palworld 的 `EPalWazaID` 底层布局一致的强类型数值。
- * @details 枚举成员在运行时通过 Unreal `UEnum` 发现，本地只固定 16 位底层类型。
+ * @details 枚举成员来自生成的纯 C++ 定义表，本地类型只用于匹配反射函数的 16 位参数布局。
  */
 enum class EPalWazaID : std::uint16_t {};
 
@@ -71,14 +69,14 @@ template <typename T>
 /**
  * @brief 查询被动技能在当前游戏语言下的名称。
  * @param[in] utility 非拥有 `PalUIUtility` 对象指针。
+ * @param[in] function 非拥有 `GetPassiveSkillName` 函数指针。
  * @param[in] worldContext 非拥有世界上下文对象。
  * @param[in] id 被动技能 Raw ID。
  * @return UTF-8 本地化名称；工具或反射函数不可用、文本转换失败时返回空字符串。
  */
-[[nodiscard]] auto passive_localized_name(UObject* utility, UObject* worldContext, const FName& id)
-    -> std::string {
-    auto* function = find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetPassiveSkillName"));
-    if (utility == nullptr || worldContext == nullptr || function == nullptr) {
+[[nodiscard]] auto passive_localized_name(UObject* utility, UFunction* function,
+                                          UObject* worldContext, const FName& id) -> std::string {
+    if (utility == nullptr || function == nullptr || worldContext == nullptr) {
         return {};
     }
 
@@ -95,14 +93,15 @@ template <typename T>
 /**
  * @brief 查询主动技能在当前游戏语言下的名称。
  * @param[in] utility 非拥有 `PalUIUtility` 对象指针。
+ * @param[in] function 非拥有 `GetWazaName` 函数指针。
  * @param[in] worldContext 非拥有世界上下文对象。
  * @param[in] id 主动技能 `EPalWazaID` 数值。
  * @return UTF-8 本地化名称；工具或反射函数不可用、文本转换失败时返回空字符串。
  */
-[[nodiscard]] auto active_localized_name(UObject* utility, UObject* worldContext,
-                                         const EPalWazaID id) -> std::string {
-    auto* function = find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetWazaName"));
-    if (utility == nullptr || worldContext == nullptr || function == nullptr) {
+[[nodiscard]] auto active_localized_name(UObject* utility, UFunction* function,
+                                         UObject* worldContext, const EPalWazaID id)
+    -> std::string {
+    if (utility == nullptr || function == nullptr || worldContext == nullptr) {
         return {};
     }
 
@@ -116,28 +115,6 @@ template <typename T>
     return text_encoding::to_utf8(params.OutName.ToString());
 }
 
-/**
- * @brief 去掉 Unreal 枚举项名称中的命名空间前缀。
- * @param[in] name 可能形如 `EPalWazaID::FireBall` 的 UTF-8 名称。
- * @return 只保留最后一个 `::` 之后内容的 Raw ID；无前缀时原样返回。
- */
-[[nodiscard]] auto strip_enum_prefix(std::string name) -> std::string {
-    if (const auto separator = name.rfind("::"); separator != std::string::npos) {
-        name.erase(0, separator + 2);
-    }
-    return name;
-}
-
-/**
- * @brief 判断主动技能枚举项是否是不可分配的哨兵值。
- * @param[in] id 已移除枚举前缀的主动技能 Raw ID。
- * @retval true ID 为空、等于 `None`/`Max`（忽略 ASCII 大小写）或以 `_max` 结尾。
- * @retval false ID 表示候选业务技能。
- */
-[[nodiscard]] auto is_active_sentinel(const std::string_view id) -> bool {
-    const auto lowered = skill_editor::ascii_lower(id);
-    return lowered.empty() || lowered == "none" || lowered == "max" || lowered.ends_with("_max");
-}
 }  // namespace
 
 /** @brief 实现 Palworld 特定技能网关的成员函数。 */
@@ -186,10 +163,8 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target)
         state.activeSkills.reserve(static_cast<std::size_t>(std::max(count, 0)));
         for (int32 index = 0; index < count; ++index) {
             const auto value = static_cast<std::uint16_t>(params.ReturnValue[index]);
-            const auto found = activeIds_.find(value);
             state.activeSkills.push_back(
-                {.value = value,
-                 .id = found == activeIds_.end() ? std::to_string(value) : found->second});
+                {.value = value, .id = skill_editor::active_skill_id_or_numeric(value)});
         }
         if (params.ReturnValue.Num() > 3) {
             Output::send<LogLevel::Warning>(
@@ -281,62 +256,45 @@ auto PalSkillGateway::rewrite_active(const skill_editor::SkillTarget target,
 
 /**
  * @details 被动技能来自 `PalPassiveSkillManager:GetPalAssignablePassiveIDs`；主动技能来自
- *          运行时 `EPalWazaID` 枚举。结果会去重、过滤哨兵项、按本地化标签排序并重建
- *          activeIds_。完整调用契约见头文件中的成员声明。
+ *          生成的 Palworld 1.0 定义表。`PalPlayerInventoryData` 只用于查询当前游戏语言名称，
+ *          本地化不可用时目录仍回退到 Raw ID。完整调用契约见头文件中的成员声明。
  */
 auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     skill_editor::SkillCatalogSnapshot catalog;
-    auto* const worldContext = pal_game::get_world_context();
-    if (worldContext == nullptr) {
-        catalog.passive.error = "Local player party Holder world context is unavailable";
-        catalog.active.error = "Local player party Holder world context is unavailable";
-        return catalog;
-    }
-    auto* utility = ui_utility();
+    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
+    auto* const utility = ui_utility();
+    auto* const passiveNameFunction =
+        find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetPassiveSkillName"));
+    auto* const activeNameFunction =
+        find_function<UFunction>(STR("/Script/Pal.PalUIUtility:GetWazaName"));
 
-    auto* manager = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
-    auto* passiveFunction = find_function<UFunction>(
+    auto* const manager = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
+    auto* const passiveListFunction = find_function<UFunction>(
         STR("/Script/Pal.PalPassiveSkillManager:GetPalAssignablePassiveIDs"));
-    if (manager != nullptr && passiveFunction != nullptr) {
+    if (manager != nullptr && passiveListFunction != nullptr) {
         /** @brief `GetPalAssignablePassiveIDs` 的反射输出布局。 */
         struct Params {
             TArray<FName> List; /**< 游戏写回的可分配被动技能 Raw ID 数组。 */
         } params;
-        manager->ProcessEvent(passiveFunction, &params);
+        manager->ProcessEvent(passiveListFunction, &params);
         catalog.passive.skills.reserve(static_cast<std::size_t>(std::max(params.List.Num(), 0)));
         for (int32 index = 0; index < params.List.Num(); ++index) {
             const auto& id = params.List[index];
-            catalog.passive.skills.push_back(
-                {.id = text_encoding::to_utf8(id.ToString()),
-                 .localizedName = passive_localized_name(utility, worldContext, id)});
+            catalog.passive.skills.push_back({.id = text_encoding::to_utf8(id.ToString()),
+                                              .localizedName = passive_localized_name(
+                                                  utility, passiveNameFunction, worldContext, id)});
         }
         catalog.passive.skills =
             skill_editor::deduplicate_skills(std::move(catalog.passive.skills));
     }
 
-    if (auto* enumeration = UObjectGlobals::StaticFindObject<UEnum*>(
-            nullptr, nullptr, STR("/Script/Pal.EPalWazaID"))) {
-        auto names = enumeration->GetEnumNames();
-        std::unordered_set<std::uint16_t> seenValues;
-        catalog.active.skills.reserve(static_cast<std::size_t>(std::max(names.Num(), 0)));
-        for (int32 index = 0; index < names.Num(); ++index) {
-            const auto& pair = names[index];
-            if (pair.Value < 0 || pair.Value > std::numeric_limits<std::uint16_t>::max()) {
-                continue;
-            }
-
-            auto id = strip_enum_prefix(text_encoding::to_utf8(pair.Key.ToString()));
-            const auto value = static_cast<std::uint16_t>(pair.Value);
-            if (is_active_sentinel(id) || !seenValues.insert(value).second) {
-                continue;
-            }
-            catalog.active.skills.push_back(
-                {.id = std::move(id),
-                 .localizedName =
-                     active_localized_name(utility, worldContext, static_cast<EPalWazaID>(value)),
-                 .activeValue = value});
-        }
-    }
+    catalog.active.skills = skill_editor::make_active_skill_options(
+        skill_editor::active_skill_definitions(),
+        [utility, activeNameFunction,
+         worldContext](const skill_editor::ActiveSkillDefinition& definition) {
+            return active_localized_name(utility, activeNameFunction, worldContext,
+                                         static_cast<EPalWazaID>(definition.value));
+        });
 
     const auto byLabel = [](const skill_editor::SkillOption& left,
                             const skill_editor::SkillOption& right) {
@@ -352,17 +310,24 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     }
 
     if (catalog.active.skills.empty()) {
-        catalog.active.error = "Unable to load EPalWazaID active skills";
+        catalog.active.error = "Generated EPalWazaID catalog is empty";
     } else {
         std::ranges::sort(catalog.active.skills, byLabel);
         catalog.active.ready = true;
     }
 
-    activeIds_.clear();
-    for (const auto& option : catalog.active.skills) {
-        if (option.activeValue.has_value()) {
-            activeIds_.insert_or_assign(*option.activeValue, option.id);
-        }
+    const bool passiveHasLocalizedNames = std::ranges::any_of(
+        catalog.passive.skills, [](const auto& option) { return !option.localizedName.empty(); });
+    const bool activeHasLocalizedNames = std::ranges::any_of(
+        catalog.active.skills, [](const auto& option) { return !option.localizedName.empty(); });
+    const bool localizationContextReady = utility != nullptr && worldContext != nullptr;
+    if (catalog.passive.ready && (!localizationContextReady || passiveNameFunction == nullptr ||
+                                  !passiveHasLocalizedNames)) {
+        catalog.passive.error = "Skill localization is unavailable; showing Raw IDs until refresh";
+    }
+    if (catalog.active.ready &&
+        (!localizationContextReady || activeNameFunction == nullptr || !activeHasLocalizedNames)) {
+        catalog.active.error = "Skill localization is unavailable; showing Raw IDs until refresh";
     }
     return catalog;
 }

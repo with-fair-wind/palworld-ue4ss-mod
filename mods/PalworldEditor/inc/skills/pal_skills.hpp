@@ -4,8 +4,6 @@
  */
 #pragma once
 
-#include <unordered_map>
-
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
 
@@ -30,6 +28,7 @@ public:
      * @brief 读取帕鲁当前的被动技能与前三个 `EquipWaza` 主动技能槽。
      * @param[in] target 已由 is_valid() 校验的技能目标句柄。
      * @return 从游戏反射接口读取的实际技能状态；目标失效时返回空状态。
+     * @details 主动技能数值通过 Palworld 1.0 生成定义表还原为 Raw ID，未知值回退为十进制文本。
      */
     auto read_state(skill_editor::SkillTarget target) -> skill_editor::SkillState override;
 
@@ -65,19 +64,11 @@ public:
                         std::span<const skill_editor::ActiveSkill> skills) -> bool override;
 
     /**
-     * @brief 从当前运行时加载全部可分配被动技能和主动技能枚举值。
+     * @brief 加载全部可分配被动技能和生成的 Palworld 1.0 主动技能定义。
      * @return 被动与主动区段分别报告可用状态和最近错误的技能目录快照。
-     * @details 本方法自行获取本地玩家世界上下文。主动目录成功时会同步重建技能数值到
-     *          Raw ID 的内部映射，供 read_state() 使用；一类目录失败不会清空另一类目录。
+     * @details `PalPlayerInventoryData` 仅作为当前语言名称查询的世界上下文；上下文暂不可用时
+     *          目录仍以 Raw ID 可用。一类目录失败不会清空另一类目录。
      */
     auto load_catalog() -> skill_editor::SkillCatalogSnapshot;
-
-private:
-    /**
-     * @brief 最近一次成功目录加载生成的 `EPalWazaID` 数值到 Raw ID 映射。
-     * @details 此值类型缓存不拥有 Unreal 对象，仅在游戏线程由 load_catalog() 重建并由
-     *          read_state() 读取。
-     */
-    std::unordered_map<std::uint16_t, std::string> activeIds_;
 };
 }  // namespace pal_skills
