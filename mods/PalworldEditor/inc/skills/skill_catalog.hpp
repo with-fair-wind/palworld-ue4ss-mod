@@ -14,6 +14,8 @@
 #include <utility>
 #include <vector>
 
+#include <skills/active_skill_definitions.hpp>
+
 /**
  * @brief 定义技能目录展示、回退和筛选的纯值逻辑。
  */
@@ -26,6 +28,29 @@ struct SkillOption {
     std::string localizedName; /**< 当前游戏语言的展示名称；为空时界面回退到 `id`。 */
     std::optional<std::uint16_t> activeValue; /**< 仅主动技能具有的 `EPalWazaID` 数值。 */
 };
+
+/**
+ * @brief 从稳定的主动技能定义构建带当前语言名称的界面选项。
+ * @tparam Localizer 接收 `ActiveSkillDefinition` 并返回 UTF-8 本地化名称的可调用对象。
+ * @param[in] definitions 主动技能数值与 Raw ID 定义。
+ * @param[in] localize 当前语言名称解析器；解析失败时返回空字符串。
+ * @return 与输入顺序一致的主动技能选项。
+ */
+template <typename Localizer>
+[[nodiscard]] auto make_active_skill_options(
+    const std::span<const ActiveSkillDefinition> definitions, Localizer&& localize)
+    -> std::vector<SkillOption> {
+    std::vector<SkillOption> options;
+    options.reserve(definitions.size());
+    for (const auto& definition : definitions) {
+        options.push_back({
+            .id = std::string(definition.id),
+            .localizedName = localize(definition),
+            .activeValue = definition.value,
+        });
+    }
+    return options;
+}
 
 /**
  * @brief 保存主动与被动技能目录的刷新状态。

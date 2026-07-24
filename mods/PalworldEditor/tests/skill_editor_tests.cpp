@@ -3,12 +3,15 @@
 #include <cstdint>
 #include <deque>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
 #include <items/item_catalog.hpp>
+#include <skills/active_skill_definitions.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
@@ -56,6 +59,54 @@ void test_skill_catalog_filter_and_deduplicate() {
         unique, "passive", std::unordered_set<std::string>{"Passive_Swift"});
     CHECK(visible.size() == 1);
     CHECK(visible[0].id == "Passive_Workaholic");
+}
+
+void test_active_skill_definitions_are_unique_and_known_values_match() {
+    const auto definitions = skill_editor::active_skill_definitions();
+    CHECK(!definitions.empty());
+
+    std::unordered_set<std::uint16_t> values;
+    std::unordered_set<std::string_view> ids;
+    for (const auto& definition : definitions) {
+        CHECK(definition.value != 0);
+        CHECK(!definition.id.empty());
+        CHECK(definition.id != "None");
+        CHECK(definition.id != "MAX");
+        CHECK(values.insert(definition.value).second);
+        CHECK(ids.insert(definition.id).second);
+    }
+
+    CHECK(skill_editor::find_active_skill_id(1) ==
+          std::optional<std::string_view>{"Human_Punch"});
+    CHECK(skill_editor::find_active_skill_id(15) ==
+          std::optional<std::string_view>{"Unique_Boar_Tackle"});
+    CHECK(skill_editor::find_active_skill_id(22) ==
+          std::optional<std::string_view>{"AirCanon"});
+    CHECK(skill_editor::find_active_skill_id(124) ==
+          std::optional<std::string_view>{"MudShot"});
+    CHECK(!skill_editor::find_active_skill_id(0).has_value());
+    CHECK(skill_editor::active_skill_id_or_numeric(65535) == "65535");
+}
+
+void test_active_skill_options_use_runtime_localization_with_raw_id_fallback() {
+    constexpr std::array definitions{
+        skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
+        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
+    };
+
+    const auto options = skill_editor::make_active_skill_options(
+        definitions, [](const skill_editor::ActiveSkillDefinition& definition) {
+            return definition.value == 15 ? std::string{"野猪突进"} : std::string{};
+        });
+
+    CHECK(options.size() == 2);
+    CHECK(options[0].id == "Unique_Boar_Tackle");
+    CHECK(options[0].localizedName == "野猪突进");
+    CHECK(options[0].activeValue == std::optional<std::uint16_t>{std::uint16_t{15}});
+    CHECK(skill_editor::skill_label(options[0]) == "野猪突进 [Unique_Boar_Tackle]");
+    CHECK(options[1].id == "MudShot");
+    CHECK(options[1].localizedName.empty());
+    CHECK(skill_editor::skill_label(options[1]) == "MudShot");
 }
 
 void test_skill_catalog_refresh_keeps_last_success() {
@@ -511,6 +562,8 @@ void test_stale_generation_never_reaches_apply_callback() {
 auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
+    test_active_skill_definitions_are_unique_and_known_values_match();
+    test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
     test_skill_catalog_refresh_keeps_last_success();
     test_item_catalog_labels_and_search();
     test_item_catalog_deduplicates_indexes_and_sorts();
