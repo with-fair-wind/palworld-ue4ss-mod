@@ -427,7 +427,9 @@ struct LocalCandidateProbe {
 auto select_local_candidate(const std::vector<LocalCandidateProbe*>& candidates) {
     return skill_editor::find_unique_local_candidate(
         candidates,
-        [](const LocalCandidateProbe* candidate) { return candidate != nullptr && candidate->valid; },
+        [](const LocalCandidateProbe* candidate) {
+            return candidate != nullptr && candidate->valid;
+        },
         [](LocalCandidateProbe* candidate) {
             return candidate->hasOwnerPawn ? candidate : nullptr;
         },

@@ -45,17 +45,17 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.4.2");
+        ModVersion = STR("1.4.3");
         ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.2)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.3)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.4.2", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.4.3", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -161,8 +161,12 @@ public:
 
         if (!lastResolutionStatus_.has_value() || *lastResolutionStatus_ != selectedPal.status) {
             Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: selected Pal resolution status={}\n"),
-                static_cast<int32>(selectedPal.status));
+                STR("PalworldEditor: selected Pal resolution status={}, holder_candidates={}, "
+                    "local_candidates={}, classes=[{}]\n"),
+                static_cast<int32>(selectedPal.status),
+                static_cast<int32>(selectedPal.holderCandidateCount),
+                static_cast<int32>(selectedPal.localHolderCandidateCount),
+                selectedPal.holderCandidateClasses);
             lastResolutionStatus_ = selectedPal.status;
         }
 
@@ -274,9 +278,9 @@ private:
         std::string lastResult;                     /**< 最近一次技能编辑结果的面向用户消息。 */
         skill_editor::SelectedTargetResolutionStatus resolutionStatus{
             skill_editor::SelectedTargetResolutionStatus::
-                worldContextUnavailable}; /**< 当前解析状态。 */
-        bool targetSelected{};            /**< 是否存在用户显式确认的技能目标。 */
-        bool pending{};                   /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
+                holderCandidatesUnavailable}; /**< 当前解析状态。 */
+        bool targetSelected{};                /**< 是否存在用户显式确认的技能目标。 */
+        bool pending{};                       /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
     };
 
     /**
@@ -634,7 +638,8 @@ private:
     /**
      * @brief 渲染当前待出战帕鲁、技能目录状态和主动/被动技能编辑区域。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
-     * @details 每帧解析只检测 Q/E 目标变化；用户点击“选择当前帕鲁”后才显示编辑区。
+     * @details 每帧解析只检测数字键当前高亮、下一次按 E 召唤的队伍目标变化；
+     *          用户点击“选择当前帕鲁”后才显示编辑区。
      *          GUI 请求只携带目标代数，不传递 Unreal 对象地址。
      * @warning 只在 GUI 线程调用。
      */
@@ -670,7 +675,8 @@ private:
             ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
                                snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
         } else {
-            ImGui::TextDisabled("请在游戏中用 Q/E 选择帕鲁，然后点击“选择当前帕鲁”。");
+            ImGui::TextDisabled(
+                "请用数字键高亮队伍帕鲁，再点击“选择当前帕鲁”；目标应与下一次按 E 召唤一致。");
         }
         if (snapshot.resolutionStatus != skill_editor::SelectedTargetResolutionStatus::success) {
             const auto message = skill_editor::resolution_status_message(snapshot.resolutionStatus);
@@ -747,7 +753,7 @@ private:
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
-    /** @brief 游戏线程保存的、由用户显式确认的当前 Q/E 帕鲁纯值目标状态。 */
+    /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
     skill_editor::SelectedTargetState selectedTarget_;
     /** @brief 最近一次输出日志的目标解析状态；仅由游戏线程访问。 */
     std::optional<skill_editor::SelectedTargetResolutionStatus> lastResolutionStatus_;
@@ -757,7 +763,7 @@ private:
     std::mutex skillSnapshotMutex_;
     /** @brief 最近一次发布给 GUI 的完整技能编辑快照；由 skillSnapshotMutex_ 保护。 */
     SkillEditorSnapshot skillSnapshot_;
-    /** @brief 请求游戏线程显式确认当前 Q/E 帕鲁为技能编辑目标。 */
+    /** @brief 请求游戏线程显式确认当前高亮队伍帕鲁为技能编辑目标。 */
     std::atomic<bool> wantSelectCurrentPal_{false};
     /** @brief 请求游戏线程重新加载运行时技能目录；初始值触发首次加载。 */
     std::atomic<bool> wantRefreshSkillCatalog_{true};

@@ -69,10 +69,6 @@ enum class SelectedTargetResolutionStatus {
     holderOwnerControllerUnavailable,  /**< Holder 所属玩家角色没有可用控制器。 */
     localHolderUnavailable,            /**< 未找到由本地玩家控制的 Otomo Holder。 */
     localHolderAmbiguous,              /**< 发现多个由本地玩家控制的 Otomo Holder。 */
-    worldContextUnavailable,           /**< 未找到本地 PlayerController。 */
-    palUtilityUnavailable,             /**< 未找到 PalUtility 默认对象。 */
-    getHolderFunctionUnavailable,      /**< 未找到 GetOtomoHolderComponent。 */
-    holderUnavailable,                 /**< 未取得当前玩家的 Otomo Holder。 */
     getSelectedFunctionUnavailable,    /**< 未找到 GetSelectedOtomoID。 */
     selectedSlotUnavailable,           /**< 当前槽位索引无效。 */
     getHandleFunctionUnavailable,      /**< 未找到 GetOtomoIndividualHandle。 */
@@ -106,14 +102,6 @@ enum class SelectedTargetResolutionStatus {
             return "未找到本地玩家的队伍 Holder";
         case localHolderAmbiguous:
             return "发现多个本地玩家队伍 Holder，已拒绝猜测";
-        case worldContextUnavailable:
-            return "未找到本地 PlayerController";
-        case palUtilityUnavailable:
-            return "未找到 PalUtility";
-        case getHolderFunctionUnavailable:
-            return "未找到 GetOtomoHolderComponent";
-        case holderUnavailable:
-            return "未取得当前玩家的 Otomo Holder";
         case getSelectedFunctionUnavailable:
             return "实际 Holder 类未实现 GetSelectedOtomoID";
         case selectedSlotUnavailable:
@@ -138,16 +126,7 @@ enum class SelectedTargetResolutionStatus {
     return "未知目标解析错误";
 }
 
-/**
- * @brief 从候选集合中选择第一个有效且属于本地玩家的值。
- * @tparam Range 可输入遍历的候选集合类型。
- * @tparam IsValid 接受候选值并判断其是否可用的谓词。
- * @tparam IsLocal 接受候选值并判断其是否属于本地玩家的谓词。
- * @param[in] candidates 按运行时发现顺序排列的候选值。
- * @param[in] isValid 候选有效性谓词。
- * @param[in] isLocal 本地玩家谓词。
- * @return 第一个同时满足两个谓词的候选；不存在时返回 std::nullopt。
- */
+/** @brief 唯一本地候选解析的终止状态。 */
 enum class LocalCandidateSelectionStatus {
     success,
     noCandidates,
@@ -157,6 +136,10 @@ enum class LocalCandidateSelectionStatus {
     ambiguousLocalCandidates,
 };
 
+/**
+ * @brief 唯一本地候选解析结果。
+ * @tparam Candidate 候选值类型。
+ */
 template <typename Candidate>
 struct LocalCandidateSelection {
     std::optional<Candidate> candidate;
@@ -165,6 +148,20 @@ struct LocalCandidateSelection {
     std::size_t localCandidateCount{};
 };
 
+/**
+ * @brief 经由所属角色和控制器链解析唯一的本地玩家候选。
+ * @tparam Range 可输入遍历的候选集合类型。
+ * @tparam IsValid 接受候选值并判断其是否可用的谓词。
+ * @tparam ResolveOwnerPawn 从候选值解析所属玩家角色的函数。
+ * @tparam ResolveController 从所属角色解析控制器的函数。
+ * @tparam IsLocal 判断控制器是否属于本地玩家的谓词。
+ * @param[in] candidates 按运行时发现顺序排列的候选值。
+ * @param[in] isValid 候选有效性谓词。
+ * @param[in] resolveOwnerPawn 所属玩家角色解析函数。
+ * @param[in] resolveController 控制器解析函数。
+ * @param[in] isLocal 本地玩家控制器谓词。
+ * @return 唯一本地候选及分阶段诊断；没有或存在多个本地候选时不返回候选值。
+ */
 template <std::ranges::input_range Range, typename IsValid, typename ResolveOwnerPawn,
           typename ResolveController, typename IsLocal>
 [[nodiscard]] auto find_unique_local_candidate(const Range& candidates, IsValid&& isValid,
@@ -248,7 +245,7 @@ public:
     }
 
     /**
-     * @brief 在已确认目标与当前 Q/E 观测不同时取消选择。
+     * @brief 在已确认目标与当前高亮队伍帕鲁观测不同时取消选择。
      * @param[in] observation 当前帧的纯值目标观测。
      * @retval true 已确认目标失效并被清空。
      * @retval false 尚未选择目标，或当前观测仍指向同一个体。
@@ -304,7 +301,7 @@ public:
     }
 
     /**
-     * @brief 校验请求代数和当前 Q/E 观测仍指向已确认个体。
+     * @brief 校验请求代数和当前高亮队伍帕鲁观测仍指向已确认个体。
      * @param[in] generation GUI 提交请求时取得的目标代数。
      * @param[in] observation 执行前在游戏线程重新解析的目标。
      * @return 已选择、代数相同且实例 GUID 相同时返回 true。

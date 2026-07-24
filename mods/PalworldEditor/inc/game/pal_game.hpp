@@ -216,8 +216,7 @@ struct SelectedPalTarget {
         return failure(holderResolution.status);
     }
 
-    auto* const getSelectedFunction =
-        holder->GetFunctionByNameInChain(STR("GetSelectedOtomoID"));
+    auto* const getSelectedFunction = holder->GetFunctionByNameInChain(STR("GetSelectedOtomoID"));
     if (getSelectedFunction == nullptr) {
         return failure(getSelectedFunctionUnavailable);
     }
