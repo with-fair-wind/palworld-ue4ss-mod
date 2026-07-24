@@ -76,14 +76,11 @@ void test_active_skill_definitions_are_unique_and_known_values_match() {
         CHECK(ids.insert(definition.id).second);
     }
 
-    CHECK(skill_editor::find_active_skill_id(1) ==
-          std::optional<std::string_view>{"Human_Punch"});
+    CHECK(skill_editor::find_active_skill_id(1) == std::optional<std::string_view>{"Human_Punch"});
     CHECK(skill_editor::find_active_skill_id(15) ==
           std::optional<std::string_view>{"Unique_Boar_Tackle"});
-    CHECK(skill_editor::find_active_skill_id(22) ==
-          std::optional<std::string_view>{"AirCanon"});
-    CHECK(skill_editor::find_active_skill_id(124) ==
-          std::optional<std::string_view>{"MudShot"});
+    CHECK(skill_editor::find_active_skill_id(22) == std::optional<std::string_view>{"AirCanon"});
+    CHECK(skill_editor::find_active_skill_id(124) == std::optional<std::string_view>{"MudShot"});
     CHECK(!skill_editor::find_active_skill_id(0).has_value());
     CHECK(skill_editor::active_skill_id_or_numeric(65535) == "65535");
 }
@@ -109,26 +106,55 @@ void test_active_skill_options_use_runtime_localization_with_raw_id_fallback() {
     CHECK(skill_editor::skill_label(options[1]) == "MudShot");
 }
 
-void test_skill_catalog_refresh_keeps_last_success() {
-    skill_editor::SkillCatalogSnapshot previous{
-        .passiveSkills = {{.id = "Passive_Swift", .localizedName = "神速"}},
-        .activeSkills = {{.id = "FireBall",
-                          .localizedName = "火球",
-                          .activeValue = std::uint16_t{1}}},
-        .ready = true,
+void test_skill_catalog_refresh_merges_sections_independently() {
+    const skill_editor::SkillCatalogSnapshot previous{
+        .passive =
+            {
+                .skills = {{.id = "Passive_Old", .localizedName = "旧被动"}},
+                .ready = true,
+            },
+        .active =
+            {
+                .skills = {{.id = "OldActive", .activeValue = std::uint16_t{1}}},
+                .ready = true,
+            },
     };
-    skill_editor::SkillCatalogSnapshot failed{.error = "runtime lookup failed"};
+    const skill_editor::SkillCatalogSnapshot refreshed{
+        .passive =
+            {
+                .skills = {{.id = "Passive_New", .localizedName = "新被动"}},
+                .ready = true,
+            },
+        .active = {.error = "active refresh failed"},
+    };
 
-    const auto fallback = skill_editor::with_catalog_fallback(previous, failed);
-    CHECK(fallback.ready);
-    CHECK(fallback.passiveSkills.size() == 1);
-    CHECK(fallback.activeSkills.size() == 1);
-    CHECK(fallback.error == "runtime lookup failed");
+    const auto merged = skill_editor::with_catalog_fallback(previous, refreshed);
+    CHECK(merged.passive.ready);
+    CHECK(merged.passive.skills.size() == 1);
+    CHECK(merged.passive.skills[0].id == "Passive_New");
+    CHECK(merged.passive.error.empty());
+    CHECK(merged.active.ready);
+    CHECK(merged.active.skills.size() == 1);
+    CHECK(merged.active.skills[0].id == "OldActive");
+    CHECK(merged.active.error == "active refresh failed");
+}
 
-    const auto unavailable = skill_editor::with_catalog_fallback({}, failed);
-    CHECK(!unavailable.ready);
-    CHECK(unavailable.passiveSkills.empty());
-    CHECK(unavailable.error == "runtime lookup failed");
+void test_skill_catalog_first_partial_load_keeps_available_section() {
+    const skill_editor::SkillCatalogSnapshot refreshed{
+        .passive =
+            {
+                .skills = {{.id = "Passive_Swift", .localizedName = "神速"}},
+                .ready = true,
+            },
+        .active = {.error = "active unavailable"},
+    };
+
+    const auto merged = skill_editor::with_catalog_fallback({}, refreshed);
+    CHECK(merged.passive.ready);
+    CHECK(merged.passive.skills.size() == 1);
+    CHECK(!merged.active.ready);
+    CHECK(merged.active.skills.empty());
+    CHECK(merged.active.error == "active unavailable");
 }
 
 void test_item_catalog_labels_and_search() {
@@ -564,7 +590,8 @@ auto main() -> int {
     test_skill_catalog_filter_and_deduplicate();
     test_active_skill_definitions_are_unique_and_known_values_match();
     test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
-    test_skill_catalog_refresh_keeps_last_success();
+    test_skill_catalog_refresh_merges_sections_independently();
+    test_skill_catalog_first_partial_load_keeps_available_section();
     test_item_catalog_labels_and_search();
     test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();

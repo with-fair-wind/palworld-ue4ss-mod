@@ -52,26 +52,30 @@ template <typename Localizer>
     return options;
 }
 
-/**
- * @brief 保存主动与被动技能目录的刷新状态。
- */
-struct SkillCatalogSnapshot {
-    std::vector<SkillOption> passiveSkills; /**< 可展示的被动技能目录。 */
-    std::vector<SkillOption> activeSkills;  /**< 可展示的主动技能目录。 */
-    std::string error; /**< 最近一次目录刷新产生的错误说明；为空表示没有错误。 */
-    bool ready{};      /**< 为 `true` 表示目录可用；为 `false` 表示尚未获得可用目录。 */
+/** @brief 保存一类技能目录的内容、最近错误和可用状态。 */
+struct SkillCatalogSection {
+    std::vector<SkillOption> skills; /**< 当前可展示和选择的技能目录。 */
+    std::string error;               /**< 最近一次该类目录刷新产生的错误；为空表示没有错误。 */
+    bool ready{};                    /**< 为 `true` 表示该类目录可供选择。 */
 };
 
 /**
- * @brief 在刷新目录不可用时保留上一份可用目录。
- * @param[in] previous 上一份目录快照。
- * @param[in] refreshed 最新刷新得到的目录快照。
- * @return 刷新成功或此前无可用目录时返回最新快照；刷新失败时保留上一份可用目录，
- *         但传播最新错误。
+ * @brief 保存相互独立的被动与主动技能目录刷新状态。
  */
-[[nodiscard]] inline auto with_catalog_fallback(const SkillCatalogSnapshot& previous,
-                                                const SkillCatalogSnapshot& refreshed)
-    -> SkillCatalogSnapshot {
+struct SkillCatalogSnapshot {
+    SkillCatalogSection passive; /**< 被动技能目录区段。 */
+    SkillCatalogSection active;  /**< 主动技能目录区段。 */
+};
+
+/**
+ * @brief 在单个目录区段刷新失败时保留上一份可用内容。
+ * @param[in] previous 上一份区段快照。
+ * @param[in] refreshed 最新刷新得到的区段快照。
+ * @return 新区段可用或旧区段不可用时返回新区段；否则保留旧内容并传播最新错误。
+ */
+[[nodiscard]] inline auto with_section_fallback(const SkillCatalogSection& previous,
+                                                const SkillCatalogSection& refreshed)
+    -> SkillCatalogSection {
     if (refreshed.ready || !previous.ready) {
         return refreshed;
     }
@@ -79,6 +83,21 @@ struct SkillCatalogSnapshot {
     auto fallback = previous;
     fallback.error = refreshed.error;
     return fallback;
+}
+
+/**
+ * @brief 分别合并被动与主动技能目录的刷新结果。
+ * @param[in] previous 上一份完整目录快照。
+ * @param[in] refreshed 最新完整目录刷新结果。
+ * @return 两个区段分别应用回退规则后的目录快照。
+ */
+[[nodiscard]] inline auto with_catalog_fallback(const SkillCatalogSnapshot& previous,
+                                                const SkillCatalogSnapshot& refreshed)
+    -> SkillCatalogSnapshot {
+    return {
+        .passive = with_section_fallback(previous.passive, refreshed.passive),
+        .active = with_section_fallback(previous.active, refreshed.active),
+    };
 }
 
 /**

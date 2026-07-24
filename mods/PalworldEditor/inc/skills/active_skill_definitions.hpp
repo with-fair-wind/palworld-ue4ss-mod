@@ -427,8 +427,7 @@ inline constexpr std::array kActiveSkillDefinitions{
     return std::nullopt;
 }
 
-[[nodiscard]] inline auto active_skill_id_or_numeric(const std::uint16_t value)
-    -> std::string {
+[[nodiscard]] inline auto active_skill_id_or_numeric(const std::uint16_t value) -> std::string {
     if (const auto id = find_active_skill_id(value)) {
         return std::string(*id);
     }

@@ -476,7 +476,7 @@ private:
         ImGui::BeginDisabled(pending);
         for (std::size_t index = 0; index < snapshot.state.passiveIds.size(); ++index) {
             const auto& id = snapshot.state.passiveIds[index];
-            const auto label = find_skill_label(snapshot.catalog.passiveSkills, id);
+            const auto label = find_skill_label(snapshot.catalog.passive.skills, id);
             ImGui::Text("%d. %s", static_cast<int>(index + 1), label.c_str());
             ImGui::SameLine();
             const auto replaceId = "替换##passive-" + std::to_string(index);
@@ -513,8 +513,8 @@ private:
 
         const bool replacing = self->passiveEditIndex_ >= 0;
         ImGui::TextUnformatted(replacing ? "选择替换后的被动技能：" : "选择要新增的被动技能：");
-        ImGui::BeginDisabled(pending || !snapshot.catalog.ready);
-        render_skill_picker("##passive-picker", snapshot.catalog.passiveSkills, excluded,
+        ImGui::BeginDisabled(pending || !snapshot.catalog.passive.ready);
+        render_skill_picker("##passive-picker", snapshot.catalog.passive.skills, excluded,
                             self->passiveSearch_, sizeof(self->passiveSearch_),
                             self->passiveChoice_);
         const bool canConfirm =
@@ -567,7 +567,7 @@ private:
         for (std::size_t slot = 0; slot < 3; ++slot) {
             if (slot < snapshot.state.activeSkills.size()) {
                 const auto& skill = snapshot.state.activeSkills[slot];
-                const auto label = find_skill_label(snapshot.catalog.activeSkills, skill.id);
+                const auto label = find_skill_label(snapshot.catalog.active.skills, skill.id);
                 ImGui::Text("槽位 %d：%s", static_cast<int>(slot + 1), label.c_str());
                 ImGui::SameLine();
                 const auto replaceId = "替换##active-" + std::to_string(slot);
@@ -608,8 +608,8 @@ private:
         const auto slot = static_cast<std::size_t>(self->activeEditSlot_);
         const bool replacing = slot < snapshot.state.activeSkills.size();
         ImGui::Text("为槽位 %d 选择主动技能：", self->activeEditSlot_ + 1);
-        ImGui::BeginDisabled(pending || !snapshot.catalog.ready);
-        render_skill_picker("##active-picker", snapshot.catalog.activeSkills, excluded,
+        ImGui::BeginDisabled(pending || !snapshot.catalog.active.ready);
+        render_skill_picker("##active-picker", snapshot.catalog.active.skills, excluded,
                             self->activeSearch_, sizeof(self->activeSearch_), self->activeChoice_);
         const bool canConfirm =
             self->activeChoice_.has_value() && self->activeChoice_->activeValue.has_value();
@@ -657,6 +657,19 @@ private:
             self->skillUiGeneration_ = snapshot.targetGeneration;
             reset_skill_editor_ui(self);
         }
+        const auto choiceStillExists = [](const std::optional<skill_editor::SkillOption>& choice,
+                                          const skill_editor::SkillCatalogSection& section) {
+            return !choice.has_value() ||
+                   std::ranges::any_of(section.skills, [&choice](const auto& option) {
+                       return option.id == choice->id;
+                   });
+        };
+        if (!choiceStillExists(self->passiveChoice_, snapshot.catalog.passive)) {
+            self->passiveChoice_.reset();
+        }
+        if (!choiceStillExists(self->activeChoice_, snapshot.catalog.active)) {
+            self->activeChoice_.reset();
+        }
 
         const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
         ImGui::BeginDisabled(pending);
@@ -689,9 +702,13 @@ private:
         if (!snapshot.lastResult.empty()) {
             ImGui::TextWrapped("结果：%s", snapshot.lastResult.c_str());
         }
-        if (!snapshot.catalog.error.empty()) {
-            ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "技能目录：%s",
-                               snapshot.catalog.error.c_str());
+        if (!snapshot.catalog.passive.error.empty()) {
+            ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "被动技能目录：%s",
+                               snapshot.catalog.passive.error.c_str());
+        }
+        if (!snapshot.catalog.active.error.empty()) {
+            ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "主动技能目录：%s",
+                               snapshot.catalog.active.error.c_str());
         }
         ImGui::Separator();
 

@@ -288,7 +288,8 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     skill_editor::SkillCatalogSnapshot catalog;
     auto* const worldContext = pal_game::get_world_context();
     if (worldContext == nullptr) {
-        catalog.error = "Local player party Holder world context is unavailable";
+        catalog.passive.error = "Local player party Holder world context is unavailable";
+        catalog.active.error = "Local player party Holder world context is unavailable";
         return catalog;
     }
     auto* utility = ui_utility();
@@ -302,21 +303,22 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
             TArray<FName> List; /**< 游戏写回的可分配被动技能 Raw ID 数组。 */
         } params;
         manager->ProcessEvent(passiveFunction, &params);
-        catalog.passiveSkills.reserve(static_cast<std::size_t>(std::max(params.List.Num(), 0)));
+        catalog.passive.skills.reserve(static_cast<std::size_t>(std::max(params.List.Num(), 0)));
         for (int32 index = 0; index < params.List.Num(); ++index) {
             const auto& id = params.List[index];
-            catalog.passiveSkills.push_back(
+            catalog.passive.skills.push_back(
                 {.id = text_encoding::to_utf8(id.ToString()),
                  .localizedName = passive_localized_name(utility, worldContext, id)});
         }
-        catalog.passiveSkills = skill_editor::deduplicate_skills(std::move(catalog.passiveSkills));
+        catalog.passive.skills =
+            skill_editor::deduplicate_skills(std::move(catalog.passive.skills));
     }
 
     if (auto* enumeration = UObjectGlobals::StaticFindObject<UEnum*>(
             nullptr, nullptr, STR("/Script/Pal.EPalWazaID"))) {
         auto names = enumeration->GetEnumNames();
         std::unordered_set<std::uint16_t> seenValues;
-        catalog.activeSkills.reserve(static_cast<std::size_t>(std::max(names.Num(), 0)));
+        catalog.active.skills.reserve(static_cast<std::size_t>(std::max(names.Num(), 0)));
         for (int32 index = 0; index < names.Num(); ++index) {
             const auto& pair = names[index];
             if (pair.Value < 0 || pair.Value > std::numeric_limits<std::uint16_t>::max()) {
@@ -328,7 +330,7 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
             if (is_active_sentinel(id) || !seenValues.insert(value).second) {
                 continue;
             }
-            catalog.activeSkills.push_back(
+            catalog.active.skills.push_back(
                 {.id = std::move(id),
                  .localizedName =
                      active_localized_name(utility, worldContext, static_cast<EPalWazaID>(value)),
@@ -336,30 +338,32 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
         }
     }
 
-    if (catalog.passiveSkills.empty()) {
-        catalog.error = "Unable to load Pal-assignable passive skills";
-        return catalog;
-    }
-    if (catalog.activeSkills.empty()) {
-        catalog.error = "Unable to load EPalWazaID active skills";
-        return catalog;
-    }
-
     const auto byLabel = [](const skill_editor::SkillOption& left,
                             const skill_editor::SkillOption& right) {
         return skill_editor::ascii_lower(skill_editor::skill_label(left)) <
                skill_editor::ascii_lower(skill_editor::skill_label(right));
     };
-    std::ranges::sort(catalog.passiveSkills, byLabel);
-    std::ranges::sort(catalog.activeSkills, byLabel);
+
+    if (catalog.passive.skills.empty()) {
+        catalog.passive.error = "Unable to load Pal-assignable passive skills";
+    } else {
+        std::ranges::sort(catalog.passive.skills, byLabel);
+        catalog.passive.ready = true;
+    }
+
+    if (catalog.active.skills.empty()) {
+        catalog.active.error = "Unable to load EPalWazaID active skills";
+    } else {
+        std::ranges::sort(catalog.active.skills, byLabel);
+        catalog.active.ready = true;
+    }
 
     activeIds_.clear();
-    for (const auto& option : catalog.activeSkills) {
+    for (const auto& option : catalog.active.skills) {
         if (option.activeValue.has_value()) {
             activeIds_.insert_or_assign(*option.activeValue, option.id);
         }
     }
-    catalog.ready = true;
     return catalog;
 }
 }  // namespace pal_skills

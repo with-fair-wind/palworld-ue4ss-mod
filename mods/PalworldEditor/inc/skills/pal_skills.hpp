@@ -66,9 +66,9 @@ public:
 
     /**
      * @brief 从当前运行时加载全部可分配被动技能和主动技能枚举值。
-     * @return 技能目录快照；任一目录为空时 `ready` 为 `false` 并设置 `error`。
-     * @details 本方法自行获取稳定的玩家背包世界上下文。成功时会同步重建主动技能数值到
-     *          Raw ID 的内部映射，供 read_state() 使用。
+     * @return 被动与主动区段分别报告可用状态和最近错误的技能目录快照。
+     * @details 本方法自行获取本地玩家世界上下文。主动目录成功时会同步重建技能数值到
+     *          Raw ID 的内部映射，供 read_state() 使用；一类目录失败不会清空另一类目录。
      */
     auto load_catalog() -> skill_editor::SkillCatalogSnapshot;
 
