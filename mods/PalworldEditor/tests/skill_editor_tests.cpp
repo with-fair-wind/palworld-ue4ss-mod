@@ -410,6 +410,15 @@ void test_resolution_status_has_actionable_message() {
               .empty());
 }
 
+void test_first_valid_local_candidate_is_selected() {
+    const std::array candidates{1, 2, 3, 4};
+    const auto selected = skill_editor::find_local_candidate(
+        candidates, [](const int value) { return value != 1; },
+        [](const int value) { return value == 3 || value == 4; });
+    CHECK(selected.has_value());
+    CHECK(*selected == 3);
+}
+
 void test_stale_generation_never_reaches_apply_callback() {
     skill_editor::SelectedTargetState state;
     const skill_editor::SelectedTargetObservation observed{
@@ -458,6 +467,7 @@ auto main() -> int {
     test_target_requires_explicit_confirmation();
     test_qe_change_invalidates_even_for_same_character_id();
     test_resolution_status_has_actionable_message();
+    test_first_valid_local_candidate_is_selected();
     test_stale_generation_never_reaches_apply_callback();
     return failures == 0 ? 0 : 1;
 }

@@ -54,6 +54,7 @@
 - Produces: `skill_editor::SelectedTargetState::invalidate_if_changed()`
 - Produces: `skill_editor::SelectedTargetState::matches()`
 - Produces: `SkillEditRequest::targetGeneration`
+- Produces: `SkillEditQueue::clear() -> std::size_t`
 - Produces: `apply_if_target_is_current(request, state, observation, transientTarget, apply)`
 
 - [ ] **Step 1: 写入显式确认和 GUID 切换的失败测试**
@@ -128,6 +129,18 @@ std::uint64_t targetGeneration{};
 ```
 
 删除未被生产代码使用的 `SkillEditQueue::contains_target()`；队列不得再根据瞬时指针查询请求。
+增加：
+
+```cpp
+auto clear() -> std::size_t {
+    const std::lock_guard lock(mutex_);
+    const auto discarded = requests_.size();
+    requests_.clear();
+    return discarded;
+}
+```
+
+测试应先压入三个请求，确认 `clear()` 返回 3、随后 `size()` 为 0 且 `try_pop()` 返回空。
 
 - [ ] **Step 4: 实现纯值目标身份、解析状态和手动确认状态机**
 
@@ -483,7 +496,8 @@ std::uint64_t skillUiGeneration_{};
 
 1. 每帧调用 `resolve_selected_otomo()`。
 2. 只有 `status == success` 时把 `selectedPal.observation` 作为有效观测。
-3. 已选择时调用 `invalidate_if_changed()`；变化或失败时清空技能状态和结果。
+3. 已选择时调用 `invalidate_if_changed()`；变化或失败时清空技能状态，并通过
+   `skillQueue_.clear()` 一次性丢弃所有旧请求。
 4. 消费 `wantSelectCurrentPal_`；成功解析时调用 `confirm()` 并读取技能状态。
 5. 选择失败时不启用编辑，把具体解析状态发布给 GUI。
 6. `wantRefreshSkillCatalog_` 独立于目标选择处理，不得自动确认目标。
@@ -503,6 +517,12 @@ editResult = skill_editor::apply_if_target_is_current(
 
 ```cpp
 "当前帕鲁已变化，请重新点击“选择当前帕鲁”。"
+```
+
+若目标变化时丢弃了队列请求，则 `lastResult` 显示：
+
+```cpp
+"当前帕鲁已变化，已取消待处理的技能修改。"
 ```
 
 - [ ] **Step 3: 发布无指针 GUI 快照**

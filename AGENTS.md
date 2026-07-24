@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.4.1），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.4.2），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及 Q/E 当前选中的下一只待出战帕鲁的
 主动/被动技能编辑。
@@ -95,8 +95,9 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 宽度）。Unreal API（`RC::Unreal::*`、`UObjectGlobals` 等）只能在 `on_unreal_init()` 内部及之后使用。
 
 ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的请求参数和原子请求标志。所有 UObject 指针都视为
-非拥有句柄；业务数据的反射读取和修改只在 `on_update()` 所在游戏线程执行。当前技能目标每帧从稳定的
-`PalPlayerInventoryData` 世界上下文解析，不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。
+非拥有句柄；业务数据的反射读取和修改只在 `on_update()` 所在游戏线程执行。当前技能目标从本地
+`PlayerController` 世界上下文解析，用户点击“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数确认；
+Q/E 切换会取消选择并清空旧请求。不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -129,10 +130,10 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.1)`；打开 UE4SS GUI 的
-`PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、Q/E 切换待出战目标、
-被动技能新增/替换/删除，以及主动技能装备/替换/清空。若 mod 未加载，检查安装路径、`dlls/main.dll` 命名，以及
-`enabled.txt`/`mods.txt`。
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.2)`；打开 UE4SS GUI 的
+`PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、Q/E 选定帕鲁后点击
+“选择当前帕鲁”、Q/E 切换时编辑区失效、被动技能新增/替换/删除，以及主动技能装备/替换/清空。若 mod 未加载，
+检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。
 
 ## 权威参考资料
 

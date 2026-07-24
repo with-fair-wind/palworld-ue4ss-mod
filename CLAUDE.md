@@ -6,12 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.1），通过
+这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.2），通过
 UE4SS GUI 提供：
 
 - 运行时物品目录和当前语言名称搜索；
 - 给予物品、读取主背包和修改槽位数量；
-- 每帧识别 Q/E 当前选中的下一只待出战帕鲁；
+- 用 Q/E 指定并通过按钮显式确认下一只待出战帕鲁；
 - 被动技能新增、替换、删除；
 - 三个 `EquipWaza` 主动技能槽位的装备、替换和清空。
 
@@ -69,8 +69,9 @@ mods/PalworldEditor/
 - `dllmain.cpp`：`PalworldEditorMod` 生命周期、ImGui 和线程间请求交接。
 
 ImGui 回调只读写标准库 UI 状态、原子请求标志以及互斥锁保护的快照/参数。所有 UObject 反射读取和修改都在
-`on_update()` 所在游戏线程执行。当前目标每帧从 `PalPlayerInventoryData` 世界上下文解析，扫描结果中的
-UObject 指针不会跨帧缓存，也不再依赖帕鲁详情页 Hook。
+`on_update()` 所在游戏线程执行。当前目标从本地 `PlayerController` 世界上下文解析；用户点击
+“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数确认，Q/E 切换会取消选择并清空旧请求。
+扫描结果中的 UObject 指针不会跨帧缓存，也不再依赖帕鲁详情页 Hook。
 
 物品和技能界面显示 `本地化名称 [RawId]`，但游戏调用始终使用 Raw ID；背包修改使用槽位索引。主动技能通过
 `ClearEquipWaza()` 后按顺序调用 `AddEquipWaza()` 重写完整装备列表，失败时由领域服务尝试恢复原状态。
@@ -96,6 +97,6 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.1)`；打开 `PalworldEditor` 页签后验证物品、
-背包、Q/E 当前待出战帕鲁识别，以及主动/被动技能编辑。反射签名和 UFunction 参数布局来自 Palworld 1.0，游戏更新后可能
-需要结合本地 `UHTHeaderDump/` 重新核对。
+游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.2)`；打开 `PalworldEditor` 页签后验证物品、
+背包、Q/E 选择后点击“选择当前帕鲁”、Q/E 切换后编辑失效，以及主动/被动技能编辑。反射签名和 UFunction
+参数布局来自 Palworld 1.0，游戏更新后可能需要结合本地 `UHTHeaderDump/` 重新核对。

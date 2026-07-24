@@ -123,6 +123,28 @@ enum class SelectedTargetResolutionStatus {
 }
 
 /**
+ * @brief 从候选集合中选择第一个有效且属于本地玩家的值。
+ * @tparam Range 可输入遍历的候选集合类型。
+ * @tparam IsValid 接受候选值并判断其是否可用的谓词。
+ * @tparam IsLocal 接受候选值并判断其是否属于本地玩家的谓词。
+ * @param[in] candidates 按运行时发现顺序排列的候选值。
+ * @param[in] isValid 候选有效性谓词。
+ * @param[in] isLocal 本地玩家谓词。
+ * @return 第一个同时满足两个谓词的候选；不存在时返回 std::nullopt。
+ */
+template <std::ranges::input_range Range, typename IsValid, typename IsLocal>
+[[nodiscard]] auto find_local_candidate(const Range& candidates, IsValid&& isValid,
+                                        IsLocal&& isLocal)
+    -> std::optional<std::ranges::range_value_t<Range>> {
+    for (const auto& candidate : candidates) {
+        if (std::invoke(isValid, candidate) && std::invoke(isLocal, candidate)) {
+            return candidate;
+        }
+    }
+    return std::nullopt;
+}
+
+/**
  * @brief 保存用户显式确认的目标身份，并用代数保护排队请求。
  */
 class SelectedTargetState {
@@ -222,7 +244,9 @@ private:
  * @brief 仅在排队请求仍指向当前待出战帕鲁时调用写入回调。
  * @tparam Apply 接受 `const SkillEditRequest&` 并返回 `SkillEditResult` 的可调用类型。
  * @param[in] request 待执行的排队请求。
- * @param[in] current 执行时重新观测到的当前目标。
+ * @param[in] state 用户显式确认的目标身份与代数状态。
+ * @param[in] observation 执行时在游戏线程重新解析出的纯值目标。
+ * @param[in] transientTarget 仅在当前帧有效、通过观测取得的 Unreal 目标句柄。
  * @param[in] apply 真正执行技能写入的回调。
  * @return 目标一致时返回回调结果；目标已切换或为空时返回 `std::nullopt`。
  */

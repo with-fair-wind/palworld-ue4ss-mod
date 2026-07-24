@@ -15,11 +15,14 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/FString.hpp>
 #include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UnrealCoreStructs.hpp>
 #include <items/item_catalog.hpp>
+#include <skills/selected_target_state.hpp>
 #include <support/text_encoding.hpp>
 
 using namespace RC;
@@ -42,14 +45,31 @@ inline auto is_valid(UObject* obj) -> bool {
 }
 
 /**
- * @brief 获取可安全作为 Pal 蓝图工具函数世界上下文的玩家背包对象。
- * @return 找到时返回 `PalPlayerInventoryData` 的非拥有观察指针。
- * @retval nullptr 玩家背包对象尚未加载或已经无效。
+ * @brief 获取可安全作为 Pal 蓝图工具函数世界上下文的本地玩家控制器。
+ * @return 找到时返回本地 `PlayerController` 的非拥有观察指针。
+ * @retval nullptr 本地控制器或 `IsLocalPlayerController` 反射函数不可用。
  * @warning 只能在游戏线程调用，返回值不能跨帧缓存。
  */
 [[nodiscard]] inline auto get_world_context() -> UObject* {
-    auto* const worldContext = UObjectGlobals::FindFirstOf(kInventoryClassName);
-    return is_valid(worldContext) ? worldContext : nullptr;
+    auto* const isLocalFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Engine.Controller:IsLocalPlayerController"));
+    if (isLocalFunction == nullptr) {
+        return nullptr;
+    }
+
+    std::vector<UObject*> controllers;
+    UObjectGlobals::FindAllOf(STR("PlayerController"), controllers);
+    const auto selected = skill_editor::find_local_candidate(
+        controllers, [](UObject* candidate) { return is_valid(candidate); },
+        [isLocalFunction](UObject* candidate) {
+            /** @brief `Controller:IsLocalPlayerController` 的反射返回布局。 */
+            struct Params {
+                bool ReturnValue{}; /**< 游戏写回的本地控制器判定。 */
+            } params;
+            candidate->ProcessEvent(isLocalFunction, &params);
+            return params.ReturnValue;
+        });
+    return selected.value_or(nullptr);
 }
 
 /**
@@ -59,25 +79,38 @@ struct SelectedPalTarget {
     /** @brief 当前帕鲁的个体参数对象；解析失败时为空。 */
     UObject* parameter{};
 
-    /** @brief 帕鲁 `CharacterID` 的 UTF-8 表示。 */
-    std::string characterId;
+    /** @brief 跨线程发布所需的纯值个体 GUID 与 CharacterID。 */
+    skill_editor::SelectedTargetObservation observation;
+
+    /** @brief 当前反射解析链的终止状态。 */
+    skill_editor::SelectedTargetResolutionStatus status{
+        skill_editor::SelectedTargetResolutionStatus::worldContextUnavailable};
 };
 
 /**
  * @brief 解析 Q/E 当前选中的下一只待出战帕鲁。
- * @return 参数对象与 `CharacterID`；任一步骤失败时返回空结果。
- * @details 从稳定的 `PalPlayerInventoryData` 世界上下文开始，依次取得 Otomo holder、
- *          当前选中槽位、个体 handle 和个体 parameter，不缓存任何中间裸指针。
+ * @return 当前帧参数对象、纯值个体身份和分步解析状态。
+ * @details 从本地 `PlayerController` 世界上下文开始，依次取得 Otomo holder、当前选中槽位、
+ *          个体 handle、个体 parameter、`FPalInstanceID.InstanceId` 和 CharacterID。
  * @warning 只能在游戏线程调用；返回的参数对象只允许在当前帧使用。
  */
 [[nodiscard]] inline auto resolve_selected_otomo() -> SelectedPalTarget {
+    using enum skill_editor::SelectedTargetResolutionStatus;
     auto* const worldContext = get_world_context();
+    if (worldContext == nullptr) {
+        return {.status = worldContextUnavailable};
+    }
+
     auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
         nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    if (utility == nullptr) {
+        return {.status = palUtilityUnavailable};
+    }
+
     auto* const getHolderFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalUtility:GetOtomoHolderComponent"));
-    if (worldContext == nullptr || utility == nullptr || getHolderFunction == nullptr) {
-        return {};
+    if (getHolderFunction == nullptr) {
+        return {.status = getHolderFunctionUnavailable};
     }
 
     /** @brief `PalUtility:GetOtomoHolderComponent` 的反射参数布局。 */
@@ -88,13 +121,13 @@ struct SelectedPalTarget {
     utility->ProcessEvent(getHolderFunction, &getHolderParams);
     auto* const holder = getHolderParams.ReturnValue;
     if (!is_valid(holder)) {
-        return {};
+        return {.status = holderUnavailable};
     }
 
     auto* const getSelectedFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetSelectedOtomoID"));
     if (getSelectedFunction == nullptr) {
-        return {};
+        return {.status = getSelectedFunctionUnavailable};
     }
     /** @brief `PalOtomoHolderComponentBase:GetSelectedOtomoID` 的返回参数布局。 */
     struct GetSelectedParams {
@@ -102,13 +135,13 @@ struct SelectedPalTarget {
     } getSelectedParams;
     holder->ProcessEvent(getSelectedFunction, &getSelectedParams);
     if (getSelectedParams.ReturnValue < 0) {
-        return {};
+        return {.status = selectedSlotUnavailable};
     }
 
     auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
     if (getHandleFunction == nullptr) {
-        return {};
+        return {.status = getHandleFunctionUnavailable};
     }
     /** @brief `PalOtomoHolderComponentBase:GetOtomoIndividualHandle` 的反射参数布局。 */
     struct GetHandleParams {
@@ -118,14 +151,14 @@ struct SelectedPalTarget {
     holder->ProcessEvent(getHandleFunction, &getHandleParams);
     auto* const handle = getHandleParams.ReturnValue;
     if (!is_valid(handle)) {
-        return {};
+        return {.status = handleUnavailable};
     }
 
     auto* const getParameterFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr,
         STR("/Script/Pal.PalIndividualCharacterHandle:TryGetIndividualParameter"));
     if (getParameterFunction == nullptr) {
-        return {};
+        return {.status = getParameterFunctionUnavailable};
     }
     /** @brief `PalIndividualCharacterHandle:TryGetIndividualParameter` 的返回参数布局。 */
     struct GetParameterParams {
@@ -134,19 +167,40 @@ struct SelectedPalTarget {
     handle->ProcessEvent(getParameterFunction, &getParameterParams);
     auto* const parameter = getParameterParams.ReturnValue;
     if (!is_valid(parameter)) {
-        return {};
+        return {.status = parameterUnavailable};
     }
 
     auto* const expectedClass = UObjectGlobals::StaticFindObject<UClass*>(
         nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter"));
     if (expectedClass == nullptr || !parameter->GetClassPrivate()->IsChildOf(expectedClass)) {
-        return {};
+        return {.status = parameterClassUnavailable};
+    }
+
+    auto* const getPalIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetPalId"));
+    if (getPalIdFunction == nullptr) {
+        return {.status = getPalIdFunctionUnavailable};
+    }
+    /** @brief 与 Palworld `FPalInstanceID` 的 UHT 字段顺序一致的返回值布局。 */
+    struct PalInstanceId {
+        FGuid PlayerUId;   /**< 帕鲁所属玩家的 GUID。 */
+        FGuid InstanceId;  /**< 唯一标识该帕鲁个体的 GUID。 */
+        FString DebugName; /**< 游戏内部调试名称；本 mod 不使用。 */
+    };
+    /** @brief `PalIndividualCharacterParameter:GetPalId` 的反射返回布局。 */
+    struct GetPalIdParams {
+        PalInstanceId ReturnValue; /**< 游戏写回的完整个体 ID。 */
+    } getPalIdParams;
+    parameter->ProcessEvent(getPalIdFunction, &getPalIdParams);
+    const auto& instanceId = getPalIdParams.ReturnValue.InstanceId;
+    if (!instanceId.is_valid()) {
+        return {.status = individualIdUnavailable};
     }
 
     auto* const getCharacterIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetCharacterID"));
     if (getCharacterIdFunction == nullptr) {
-        return {};
+        return {.status = getCharacterIdFunctionUnavailable};
     }
     /** @brief `PalIndividualCharacterParameter:GetCharacterID` 的返回参数布局。 */
     struct GetCharacterIdParams {
@@ -156,7 +210,15 @@ struct SelectedPalTarget {
 
     return {
         .parameter = parameter,
-        .characterId = text_encoding::to_utf8(getCharacterIdParams.ReturnValue.ToString()),
+        .observation =
+            {
+                .identity =
+                    {
+                        .instanceId = {instanceId.A, instanceId.B, instanceId.C, instanceId.D},
+                    },
+                .name = text_encoding::to_utf8(getCharacterIdParams.ReturnValue.ToString()),
+            },
+        .status = success,
     };
 }
 
