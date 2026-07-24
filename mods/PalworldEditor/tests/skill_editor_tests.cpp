@@ -399,24 +399,80 @@ void test_qe_change_invalidates_even_for_same_character_id() {
 }
 
 void test_resolution_status_has_actionable_message() {
-    CHECK(skill_editor::resolution_status_message(
-              skill_editor::SelectedTargetResolutionStatus::worldContextUnavailable) ==
-          "未找到本地 PlayerController");
-    CHECK(skill_editor::resolution_status_message(
-              skill_editor::SelectedTargetResolutionStatus::holderUnavailable) ==
-          "未取得当前玩家的 Otomo Holder");
-    CHECK(skill_editor::resolution_status_message(
-              skill_editor::SelectedTargetResolutionStatus::success)
-              .empty());
+    using enum skill_editor::SelectedTargetResolutionStatus;
+    CHECK(skill_editor::resolution_status_message(holderCandidatesUnavailable) ==
+          "未发现队伍 Holder");
+    CHECK(skill_editor::resolution_status_message(holderOwnerPawnUnavailable) ==
+          "未取得队伍 Holder 的所属玩家角色");
+    CHECK(skill_editor::resolution_status_message(holderOwnerControllerUnavailable) ==
+          "未取得队伍 Holder 的所属控制器");
+    CHECK(skill_editor::resolution_status_message(localHolderUnavailable) ==
+          "未找到本地玩家的队伍 Holder");
+    CHECK(skill_editor::resolution_status_message(localHolderAmbiguous) ==
+          "发现多个本地玩家队伍 Holder，已拒绝猜测");
+    CHECK(skill_editor::resolution_status_message(getSelectedFunctionUnavailable) ==
+          "实际 Holder 类未实现 GetSelectedOtomoID");
+    CHECK(skill_editor::resolution_status_message(selectedSlotUnavailable) ==
+          "当前高亮队伍槽位没有有效帕鲁");
+    CHECK(skill_editor::resolution_status_message(success).empty());
 }
 
-void test_first_valid_local_candidate_is_selected() {
-    const std::array candidates{1, 2, 3, 4};
-    const auto selected = skill_editor::find_local_candidate(
-        candidates, [](const int value) { return value != 1; },
-        [](const int value) { return value == 3 || value == 4; });
-    CHECK(selected.has_value());
-    CHECK(*selected == 3);
+struct LocalCandidateProbe {
+    bool valid{true};
+    bool hasOwnerPawn{true};
+    bool hasController{true};
+    bool local{};
+};
+
+auto select_local_candidate(const std::vector<LocalCandidateProbe*>& candidates) {
+    return skill_editor::find_unique_local_candidate(
+        candidates,
+        [](const LocalCandidateProbe* candidate) { return candidate != nullptr && candidate->valid; },
+        [](LocalCandidateProbe* candidate) {
+            return candidate->hasOwnerPawn ? candidate : nullptr;
+        },
+        [](LocalCandidateProbe* pawn) { return pawn->hasController ? pawn : nullptr; },
+        [](const LocalCandidateProbe* controller) { return controller->local; });
+}
+
+void test_unique_local_candidate_is_selected() {
+    LocalCandidateProbe remote{.local = false};
+    LocalCandidateProbe local{.local = true};
+    const auto selection = select_local_candidate({&remote, &local});
+
+    CHECK(selection.status == skill_editor::LocalCandidateSelectionStatus::success);
+    CHECK(selection.candidate.has_value());
+    CHECK(*selection.candidate == &local);
+    CHECK(selection.candidateCount == 2);
+    CHECK(selection.localCandidateCount == 1);
+}
+
+void test_local_candidate_selection_reports_each_unavailable_stage() {
+    CHECK(select_local_candidate({}).status ==
+          skill_editor::LocalCandidateSelectionStatus::noCandidates);
+
+    LocalCandidateProbe noPawn{.hasOwnerPawn = false};
+    CHECK(select_local_candidate({&noPawn}).status ==
+          skill_editor::LocalCandidateSelectionStatus::ownerPawnUnavailable);
+
+    LocalCandidateProbe noController{.hasController = false};
+    CHECK(select_local_candidate({&noController}).status ==
+          skill_editor::LocalCandidateSelectionStatus::ownerControllerUnavailable);
+
+    LocalCandidateProbe remote{.local = false};
+    CHECK(select_local_candidate({&remote}).status ==
+          skill_editor::LocalCandidateSelectionStatus::localCandidateUnavailable);
+}
+
+void test_multiple_local_candidates_are_rejected() {
+    LocalCandidateProbe first{.local = true};
+    LocalCandidateProbe second{.local = true};
+    const auto selection = select_local_candidate({&first, &second});
+
+    CHECK(selection.status ==
+          skill_editor::LocalCandidateSelectionStatus::ambiguousLocalCandidates);
+    CHECK(!selection.candidate.has_value());
+    CHECK(selection.localCandidateCount == 2);
 }
 
 void test_stale_generation_never_reaches_apply_callback() {
@@ -467,7 +523,9 @@ auto main() -> int {
     test_target_requires_explicit_confirmation();
     test_qe_change_invalidates_even_for_same_character_id();
     test_resolution_status_has_actionable_message();
-    test_first_valid_local_candidate_is_selected();
+    test_unique_local_candidate_is_selected();
+    test_local_candidate_selection_reports_each_unavailable_stage();
+    test_multiple_local_candidates_are_rejected();
     test_stale_generation_never_reaches_apply_callback();
     return failures == 0 ? 0 : 1;
 }

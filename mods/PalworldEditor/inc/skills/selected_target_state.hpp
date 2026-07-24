@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -63,6 +64,11 @@ struct SelectedTargetObservation {
  */
 enum class SelectedTargetResolutionStatus {
     success,                           /**< 已取得参数对象、个体 GUID 和 CharacterID。 */
+    holderCandidatesUnavailable,       /**< 未发现有效的 Otomo Holder 候选。 */
+    holderOwnerPawnUnavailable,        /**< Holder 候选没有可用的所属玩家角色。 */
+    holderOwnerControllerUnavailable,  /**< Holder 所属玩家角色没有可用控制器。 */
+    localHolderUnavailable,            /**< 未找到由本地玩家控制的 Otomo Holder。 */
+    localHolderAmbiguous,              /**< 发现多个由本地玩家控制的 Otomo Holder。 */
     worldContextUnavailable,           /**< 未找到本地 PlayerController。 */
     palUtilityUnavailable,             /**< 未找到 PalUtility 默认对象。 */
     getHolderFunctionUnavailable,      /**< 未找到 GetOtomoHolderComponent。 */
@@ -90,6 +96,16 @@ enum class SelectedTargetResolutionStatus {
     switch (status) {
         case success:
             return {};
+        case holderCandidatesUnavailable:
+            return "未发现队伍 Holder";
+        case holderOwnerPawnUnavailable:
+            return "未取得队伍 Holder 的所属玩家角色";
+        case holderOwnerControllerUnavailable:
+            return "未取得队伍 Holder 的所属控制器";
+        case localHolderUnavailable:
+            return "未找到本地玩家的队伍 Holder";
+        case localHolderAmbiguous:
+            return "发现多个本地玩家队伍 Holder，已拒绝猜测";
         case worldContextUnavailable:
             return "未找到本地 PlayerController";
         case palUtilityUnavailable:
@@ -99,9 +115,9 @@ enum class SelectedTargetResolutionStatus {
         case holderUnavailable:
             return "未取得当前玩家的 Otomo Holder";
         case getSelectedFunctionUnavailable:
-            return "未找到 GetSelectedOtomoID";
+            return "实际 Holder 类未实现 GetSelectedOtomoID";
         case selectedSlotUnavailable:
-            return "当前 Q/E 槽位没有有效帕鲁";
+            return "当前高亮队伍槽位没有有效帕鲁";
         case getHandleFunctionUnavailable:
             return "未找到 GetOtomoIndividualHandle";
         case handleUnavailable:
@@ -132,16 +148,81 @@ enum class SelectedTargetResolutionStatus {
  * @param[in] isLocal 本地玩家谓词。
  * @return 第一个同时满足两个谓词的候选；不存在时返回 std::nullopt。
  */
-template <std::ranges::input_range Range, typename IsValid, typename IsLocal>
-[[nodiscard]] auto find_local_candidate(const Range& candidates, IsValid&& isValid,
-                                        IsLocal&& isLocal)
-    -> std::optional<std::ranges::range_value_t<Range>> {
+enum class LocalCandidateSelectionStatus {
+    success,
+    noCandidates,
+    ownerPawnUnavailable,
+    ownerControllerUnavailable,
+    localCandidateUnavailable,
+    ambiguousLocalCandidates,
+};
+
+template <typename Candidate>
+struct LocalCandidateSelection {
+    std::optional<Candidate> candidate;
+    LocalCandidateSelectionStatus status{LocalCandidateSelectionStatus::noCandidates};
+    std::size_t candidateCount{};
+    std::size_t localCandidateCount{};
+};
+
+template <std::ranges::input_range Range, typename IsValid, typename ResolveOwnerPawn,
+          typename ResolveController, typename IsLocal>
+[[nodiscard]] auto find_unique_local_candidate(const Range& candidates, IsValid&& isValid,
+                                               ResolveOwnerPawn&& resolveOwnerPawn,
+                                               ResolveController&& resolveController,
+                                               IsLocal&& isLocal)
+    -> LocalCandidateSelection<std::ranges::range_value_t<Range>> {
+    using Candidate = std::ranges::range_value_t<Range>;
+
+    LocalCandidateSelection<Candidate> result;
+    bool foundOwnerPawn{};
+    bool foundController{};
+
     for (const auto& candidate : candidates) {
-        if (std::invoke(isValid, candidate) && std::invoke(isLocal, candidate)) {
-            return candidate;
+        if (!std::invoke(isValid, candidate)) {
+            continue;
+        }
+
+        ++result.candidateCount;
+        const auto ownerPawn = std::invoke(resolveOwnerPawn, candidate);
+        if (!ownerPawn) {
+            continue;
+        }
+        foundOwnerPawn = true;
+
+        const auto controller = std::invoke(resolveController, ownerPawn);
+        if (!controller) {
+            continue;
+        }
+        foundController = true;
+
+        if (!std::invoke(isLocal, controller)) {
+            continue;
+        }
+
+        ++result.localCandidateCount;
+        if (result.localCandidateCount == 1) {
+            result.candidate = candidate;
+        } else {
+            result.candidate.reset();
         }
     }
-    return std::nullopt;
+
+    if (result.candidateCount == 0) {
+        result.status = LocalCandidateSelectionStatus::noCandidates;
+    } else if (!foundOwnerPawn) {
+        result.status = LocalCandidateSelectionStatus::ownerPawnUnavailable;
+    } else if (!foundController) {
+        result.status = LocalCandidateSelectionStatus::ownerControllerUnavailable;
+    } else if (result.localCandidateCount == 0) {
+        result.status = LocalCandidateSelectionStatus::localCandidateUnavailable;
+    } else if (result.localCandidateCount > 1) {
+        result.status = LocalCandidateSelectionStatus::ambiguousLocalCandidates;
+    } else {
+        result.status = LocalCandidateSelectionStatus::success;
+    }
+
+    return result;
 }
 
 /**
