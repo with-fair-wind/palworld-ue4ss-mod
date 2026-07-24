@@ -2,91 +2,100 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-> 本文件为 Claude Code 在本仓库中工作时提供指引。
+> 本文件为 Claude Code 在本仓库中工作时提供指引。详细的用户文档以 `README.md` 为准。
 
-## 这是什么
+## 项目概览
 
-一个 **UE4SS C++ mod**（C++23 / CMake / Ninja）面向 **Palworld 1.0**。它是一个**游戏内物品/帕鲁/词条编辑器**，通过 UE4SS GUI 的浮动 ImGui 窗口操作。构建产物是 `MyPalMod.dll`（v1.3.1）。
+这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.1），通过
+UE4SS GUI 提供：
 
-mod DLL 在构建期**硬编码了 Palworld API**（`/Script/Pal.*` 函数路径、`PalPlayerInventoryData`、`PalIndividualCharacterParameter` 等），不再与具体游戏无关——构建脚手架（CMake/RE-UE4SS 链接）仍然通用，但 mod 本体专门针对 Palworld。
+- 运行时物品目录和当前语言名称搜索；
+- 给予物品、读取主背包和修改槽位数量；
+- 每帧识别 Q/E 当前选中的下一只待出战帕鲁；
+- 被动技能新增、替换、删除；
+- 三个 `EquipWaza` 主动技能槽位的装备、替换和清空。
 
-Palworld 1.0 需要 UE4SS **experimental** 运行时（Steam Workshop "UE4SS Experimental (Palworld)" + PalSchema，含 `MemberVariableLayout.ini`）。F10 控制台在 Palworld 上不可用（ConsoleManager 签名歧义），因此所有交互通过 UE4SS GUI 窗口进行。
+mod 本体通过 `/Script/Pal.*` 路径和 Palworld 类型进行反射调用，因此是 Palworld 专用实现。Palworld 1.0
+需要 UE4SS Experimental (Palworld) + PalSchema（含 `MemberVariableLayout.ini`）。F10 游戏控制台不可用，
+所有用户交互通过 UE4SS GUI 的 `PalworldEditor` 页签完成。
 
-## 前置依赖
+## 前置依赖与命令
 
-- **Visual Studio 2022**（最新版），*"使用 C++ 的桌面开发"* 工作负载（MSVC + Ninja）。
-- **CMake ≥ 3.22**，**Git**。
-- **Rust 不需要**（preset 设 `UE4SS_VERSION_CHECK=OFF`；只构建 mod target，不构建 UVTD）。
-- 所有构建命令必须在 **MSVC 环境**中运行。
-
-## 常用命令
+- Visual Studio 2022 最新版，安装“使用 C++ 的桌面开发”工作负载；
+- CMake ≥ 3.22、Git；
+- Rust stable（`cargo` / `rustc`）；RE-UE4SS 的 `UE4SS` target 会构建 Rust 实现的 PatternSleuth；
+- 所有 CMake 构建命令必须在 VS x64 开发者环境中运行。
 
 ```powershell
-pwsh scripts/setup.ps1                          # 首次：克隆 RE-UE4SS + 子模块
-$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"   # 部署目标（可选）
-cmake --preset ninja-msvc-x64                    # 配置（MSVC dev shell）
-cmake --build --preset ninja-msvc-x64            # 构建 -> build/Game__Shipping__Win64/bin/MyPalMod.dll
-cmake --build --preset ninja-msvc-x64 --target deploy  # 部署到游戏
+pwsh scripts/setup.ps1
+$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"  # 可选；必须在配置前设置
+cmake --preset ninja-msvc-x64
+cmake --build --preset ninja-msvc-x64 --target PalworldEditor
+
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests
+ctest --test-dir build --output-on-failure
+
+cmake --build --preset ninja-msvc-x64 --target deploy
 ```
+
+DLL 输出为 `build/Game__Shipping__Win64/bin/PalworldEditor.dll`；部署目标为
+`Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll`。
 
 ## 架构
 
-### 文件结构
-
-```
-mods/MyPalMod/src/
-├── dllmain.cpp     (510 行) — MyPalMod 类：GUI 渲染、on_update 请求分发、ProcessEvent 钩子
-├── pal_game.hpp    (403 行) — 游戏交互函数（namespace pal_game）：物品/背包/帕鲁/词条/发现
-├── item_database.h (93 行)  — 精选物品 ID 列表（物品浏览器的兜底数据）
-└── CMakeLists.txt
-```
-
-### 线程模型
-
-```
-ImGui GUI 线程                    游戏线程 (on_update)
-─────────────                    ──────────────────
-register_tab 回调                 on_update() 每帧调用
-  ↓                               ↓
-  读/写 UI 状态                   读请求标志 (atomic<bool>)
-  写 atomic 标志 (want_*)     →   执行 pal_game::* 函数
-  写 mutex 保护参数 (req_mutex_)  写 mutex 保护缓存 (inv_mutex_)
-  读 mutex 保护缓存 (inv_mutex_)  ← 结果回流到 UI
+```text
+mods/PalworldEditor/
+├── inc/
+│   ├── game/pal_game.hpp
+│   ├── items/item_catalog.hpp
+│   ├── skills/pal_skills.hpp
+│   ├── skills/selected_target_state.hpp
+│   ├── skills/skill_catalog.hpp
+│   ├── skills/skill_editor_service.hpp
+│   └── support/text_encoding.hpp
+├── src/
+│   ├── dllmain.cpp
+│   └── pal_skills.cpp
+└── tests/
+    └── skill_editor_tests.cpp
 ```
 
-所有 UE 反射调用（ProcessEvent、GetPropertyByNameInChain、ForEachUObject）**只在游戏线程**执行。ImGui 线程只做 UI + 标志/缓存读写。
+- `pal_game.hpp`：背包、物品定义、当前待出战帕鲁和诊断扫描的反射访问；
+- `item_catalog.hpp`：物品标签、搜索、去重、排序和 Raw ID 索引；
+- `skill_catalog.hpp`：主动/被动技能目录的纯逻辑；
+- `skill_editor_service.hpp`：编辑校验、FIFO 请求、操作后重读和失败回滚；
+- `selected_target_state.hpp`：当前目标切换检测和过期编辑请求保护；
+- `pal_skills.*`：领域接口到 Palworld UFunction 的适配；
+- `dllmain.cpp`：`PalworldEditorMod` 生命周期、ImGui 和线程间请求交接。
 
-### 关键 API（从 UHTHeaderDump 发现）
+ImGui 回调只读写标准库 UI 状态、原子请求标志以及互斥锁保护的快照/参数。所有 UObject 反射读取和修改都在
+`on_update()` 所在游戏线程执行。当前目标每帧从 `PalPlayerInventoryData` 世界上下文解析，扫描结果中的
+UObject 指针不会跨帧缓存，也不再依赖帕鲁详情页 Hook。
 
+物品和技能界面显示 `本地化名称 [RawId]`，但游戏调用始终使用 Raw ID；背包修改使用槽位索引。主动技能通过
+`ClearEquipWaza()` 后按顺序调用 `AddEquipWaza()` 重写完整装备列表，失败时由领域服务尝试恢复原状态。
+
+## 工具链与验证
+
+clangd 读取 `build/compile_commands.json`；`.clang-format`、`.clang-tidy`、`.clangd`、`.editorconfig` 和
+`.gitattributes` 位于仓库根目录。常用手动 target：
+
+```powershell
+cmake --build --preset ninja-msvc-x64 --target format
+cmake --build --preset ninja-msvc-x64 --target format-check
+cmake --build --preset ninja-msvc-x64 --target tidy
+cmake --build --preset ninja-msvc-x64 --target tidy-check
 ```
-物品：  UPalPlayerInventoryData::AddItem_ServerInternal(FName, int32, bool, float, bool) -> enum
-        UPalPlayerInventoryData::TryGetContainerFromInventoryType(uint8, UPalItemContainer*&)
-        UPalItemContainer::Num() / Get(i) -> UPalItemSlot { StackCount:int32, ItemId.StaticId:FName }
-帕鲁：  UPalIndividualCharacterParameter::AddPassiveSkill(FName, FName)
-        UPalIndividualCharacterParameter::RemovePassiveSkill(FName)
-        UPalIndividualCharacterParameter:GetPassiveSkillList -> TArray<FName>
-钩子：  Hook::RegisterProcessEventPreCallback — 监听 GetPassiveSkillList 调用以追踪"当前查看的帕鲁"
-GUI：   CppUserModBase::register_tab + UE4SS_ENABLE_IMGUI + ImGui::Begin (浮动窗口)
+
+Windows 下 `tidy-check` 会用单进程解析所有 `mods/` 翻译单元及其 RE-UE4SS/Unreal 依赖，可能长时间没有输出。
+提交前至少执行：
+
+```powershell
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests
+ctest --test-dir build --output-on-failure
+git diff --check
 ```
 
-### Mod 入口点契约
-
-`start_mod()` 构造 `MyPalMod`，`uninstall_mod()` 析构。生命周期钩子：
-- `MyPalMod()` — 设置元数据 + `register_tab`（注册 GUI 标签）
-- `on_unreal_init()` — 注册 ProcessEvent 钩子（PalViewTracker）
-- `on_update()` — 每帧：检查请求标志 → 执行游戏函数 → 更新缓存
-
-## 工具链（clangd / clang-tidy / clang-format）
-
-`.clangd`、`.clang-tidy`、`.clang-format`、`.editorconfig`、`.gitattributes` 配置编辑器分析与格式化；行尾 LF。clangd 读取 `build/compile_commands.json`（preset `CMAKE_EXPORT_COMPILE_COMMANDS=ON`）。项目用 MSVC 构建，clangd 自动翻译为 clang-cl 前端。
-
-## 验证一次改动
-
-构建+部署后启动 Palworld（装好 UE4SS experimental）。UE4SS Console 中看到 `MyPalMod loaded (v1.3.1)`。打开 UE4SS GUI → MyPalMod 标签 → 浮动窗口。各功能的结果打印到 Console 标签。
-
-## 权威参考资料
-
-- RE-UE4SS：https://github.com/UE4SS-RE/RE-UE4SS
-- 创建 C++ mod：https://docs.ue4ss.com/guides/creating-a-c++-mod.html
-- UHTHeaderDump（本地，`UHTHeaderDump/`）：Palworld 的类/字段/函数定义（gitignored）
-- Palworld 运行时：https://steamcommunity.com/workshop/filedetails/?id=3625223587
+游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.1)`；打开 `PalworldEditor` 页签后验证物品、
+背包、Q/E 当前待出战帕鲁识别，以及主动/被动技能编辑。反射签名和 UFunction 参数布局来自 Palworld 1.0，游戏更新后可能
+需要结合本地 `UHTHeaderDump/` 重新核对。

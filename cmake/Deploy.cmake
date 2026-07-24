@@ -3,7 +3,7 @@
 #
 # Usage (from a mod's CMakeLists.txt):
 #   include(${CMAKE_SOURCE_DIR}/cmake/Deploy.cmake)
-#   palworld_add_deploy_target(MyPalMod)
+#   palworld_add_deploy_target(PalworldEditor)
 #
 # The game install path is taken from the PALWORLD_INSTALL_DIR cache variable, which
 # can be set via -DPALWORLD_INSTALL_DIR=<path> or the PALWORLD_INSTALL_DIR env var.
@@ -44,7 +44,7 @@ function(palworld_add_deploy_target MOD_TARGET)
         # 2. Copy the freshly built DLL as main.dll (UE4SS also accepts <ModName>.dll).
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll_src}" "${_dll_dest}"
         # 3. Enable the mod. enabled.txt is simplest; alternatively add a
-        #    'MyPalMod : 1' line above 'Keybinds' in ${_mods_root}/mods.txt.
+        #    'PalworldEditor : 1' line above 'Keybinds' in ${_mods_root}/mods.txt.
         COMMAND ${CMAKE_COMMAND} -E touch "${_mod_dir}/enabled.txt"
         # 4. Report.
         COMMAND ${CMAKE_COMMAND} -E echo "已部署 ${_mod_name} -> ${_dll_dest}"

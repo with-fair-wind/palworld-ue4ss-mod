@@ -28,11 +28,11 @@ Hover:
 
 # The vendored RE-UE4SS/ headers target MSVC and are third-party. Silence clangd
 # diagnostics inside them so the editor stays focused on the mod's own code.
-# (Requires clangd >= 17 for Suppress regex; harmless on older versions.)
+# (Requires clangd >= 17 for the Suppress wildcard; harmless on older versions.)
 ---
 If:
   PathMatch: 'RE-UE4SS[/\\].*'
 Diagnostics:
-  Suppress: ['.*']
+  Suppress: ['*']
   UnusedIncludes: None
 ...

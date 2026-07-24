@@ -23,3 +23,5 @@ compile_commands.json
 
 # Claude Code per-user local settings (shared settings.json may be committed)
 /.claude/settings.local.json
+
+/UHTHeaderDump/
