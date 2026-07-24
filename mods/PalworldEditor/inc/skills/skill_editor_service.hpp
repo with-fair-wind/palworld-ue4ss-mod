@@ -68,6 +68,8 @@ enum class SkillEditOperation {
 struct SkillEditRequest {
     /** @brief 待编辑 Pal 的临时句柄；执行前必须校验。 */
     SkillTarget target{};
+    /** @brief GUI 提交请求时观察到的已确认目标代数。 */
+    std::uint64_t targetGeneration{};
     /** @brief 决定请求操作被动列表还是主动槽位。 */
     SkillKind kind{};
     /** @brief 决定新增、替换或移除的编辑语义。 */
@@ -146,17 +148,14 @@ public:
     }
 
     /**
-     * @brief 加锁后检查是否已有请求指向给定目标。
-     *
-     * @param[in] target 要查找的临时目标句柄。
-     * @retval true 队列中至少有一个请求指向 `target`。
-     * @retval false 队列中没有请求指向 `target`。
+     * @brief 加锁后丢弃全部待处理请求。
+     * @return 被丢弃的请求数量。
      */
-    [[nodiscard]] auto contains_target(const SkillTarget target) const -> bool {
+    auto clear() -> std::size_t {
         const std::lock_guard lock(mutex_);
-        return std::ranges::any_of(requests_, [target](const SkillEditRequest& request) {
-            return request.target == target;
-        });
+        const auto discarded = requests_.size();
+        requests_.clear();
+        return discarded;
     }
 
 private:
