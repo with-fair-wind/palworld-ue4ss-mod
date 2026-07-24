@@ -401,20 +401,18 @@ void test_stale_request_never_reaches_apply_callback() {
         };
     };
 
-    const auto accepted = skill_editor::apply_if_target_is_current(
-        {.target = 0x2000}, current, apply);
+    const auto accepted =
+        skill_editor::apply_if_target_is_current({.target = 0x2000}, current, apply);
     CHECK(accepted.has_value());
     CHECK(applyCalls == 1);
 
-    const auto stale = skill_editor::apply_if_target_is_current(
-        {.target = 0x1000}, current, apply);
+    const auto stale = skill_editor::apply_if_target_is_current({.target = 0x1000}, current, apply);
     CHECK(!stale.has_value());
     CHECK(applyCalls == 1);
 
     const auto emptyRequest = skill_editor::apply_if_target_is_current({}, current, apply);
     CHECK(!emptyRequest.has_value());
-    const auto noCurrent = skill_editor::apply_if_target_is_current(
-        {.target = 0x2000}, {}, apply);
+    const auto noCurrent = skill_editor::apply_if_target_is_current({.target = 0x2000}, {}, apply);
     CHECK(!noCurrent.has_value());
     CHECK(applyCalls == 1);
 }

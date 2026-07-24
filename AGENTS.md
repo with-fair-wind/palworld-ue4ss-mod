@@ -7,9 +7,10 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.4.0），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.4.1），构建产物是 `PalworldEditor.dll`。
 
-该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及当前查看或手动选择帕鲁的主动/被动技能编辑。
+该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及 Q/E 当前选中的下一只待出战帕鲁的
+主动/被动技能编辑。
 mod 本体通过 `/Script/Pal.*` 函数路径和 Palworld 类型进行反射调用，因此是 Palworld 专用实现；只有根目录的
 CMake/RE-UE4SS super-build 脚手架适合扩展其他 mod。
 
@@ -83,8 +84,9 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 - `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和索引；
 - `inc/skills/skill_catalog.hpp`：可搜索的主动/被动技能目录；
 - `inc/skills/skill_editor_service.hpp`：编辑校验、FIFO 请求、重读和回滚；
+- `inc/skills/selected_target_state.hpp`：当前目标切换检测和过期编辑请求保护；
 - `inc/skills/pal_skills.hpp` + `src/pal_skills.cpp`：领域服务到 Palworld UFunction 的适配；
-- `src/dllmain.cpp`：mod 生命周期、ImGui、线程间请求交接和当前查看目标钩子。
+- `src/dllmain.cpp`：mod 生命周期、ImGui 和线程间请求交接。
 
 **Mod 入口点契约**（`mods/PalworldEditor/src/dllmain.cpp`）：`PalworldEditorMod` 继承
 `RC::CppUserModBase`，设置元数据并重写 `on_update`、`on_unreal_init`；DLL 导出 `start_mod()`（构造实例）
@@ -93,8 +95,8 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 宽度）。Unreal API（`RC::Unreal::*`、`UObjectGlobals` 等）只能在 `on_unreal_init()` 内部及之后使用。
 
 ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的请求参数和原子请求标志。所有 UObject 指针都视为
-非拥有句柄；业务数据的反射读取和修改只在 `on_update()` 所在游戏线程执行，`on_unreal_init()` 仅负责
-初始化期对象查询和钩子注册。
+非拥有句柄；业务数据的反射读取和修改只在 `on_update()` 所在游戏线程执行。当前技能目标每帧从稳定的
+`PalPlayerInventoryData` 世界上下文解析，不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -127,9 +129,9 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.0)`；打开 UE4SS GUI 的
-`PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、帕鲁目标识别、被动技能
-新增/替换/删除，以及主动技能装备/替换/清空。若 mod 未加载，检查安装路径、`dlls/main.dll` 命名，以及
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.1)`；打开 UE4SS GUI 的
+`PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、Q/E 切换待出战目标、
+被动技能新增/替换/删除，以及主动技能装备/替换/清空。若 mod 未加载，检查安装路径、`dlls/main.dll` 命名，以及
 `enabled.txt`/`mods.txt`。
 
 ## 权威参考资料

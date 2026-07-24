@@ -163,7 +163,7 @@ private:
 - [ ] **Step 4：重新运行测试，确认通过**
 
 ```powershell
-$cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests && ctest --test-dir build -R PalworldEditorTests --output-on-failure' -f $vcvarsPath
+$cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests && ctest --test-dir build -R PalworldEditor.SkillEditor --output-on-failure' -f $vcvarsPath
 & cmd.exe /d /s /c $cmdLine
 ```
 
@@ -255,7 +255,7 @@ struct SelectedPalTarget
 
 ```cpp
 [[nodiscard]] auto load_catalog(skill_editor::SkillTarget contextTarget)
-    -> skill_editor::SkillCatalogLoadResult;
+    -> skill_editor::SkillCatalogSnapshot;
 ```
 
 改为：
@@ -266,7 +266,7 @@ struct SelectedPalTarget
  *
  * 本方法自行获取稳定的玩家背包世界上下文，不依赖当前帕鲁参数对象。
  */
-[[nodiscard]] auto load_catalog() -> skill_editor::SkillCatalogLoadResult;
+[[nodiscard]] auto load_catalog() -> skill_editor::SkillCatalogSnapshot;
 ```
 
 在 `pal_skills.cpp` 中删除 `contextTarget` 到 `UObject*` 的转换，改用：
@@ -436,7 +436,7 @@ const bool targetChanged = selectedTarget_.update(observation);
 - [ ] **Step 7：运行测试和完整构建**
 
 ```powershell
-$cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests && ctest --test-dir build -R PalworldEditorTests --output-on-failure && cmake --build --preset ninja-msvc-x64 --target PalworldEditor' -f $vcvarsPath
+$cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests && ctest --test-dir build -R PalworldEditor.SkillEditor --output-on-failure && cmake --build --preset ninja-msvc-x64 --target PalworldEditor' -f $vcvarsPath
 & cmd.exe /d /s /c $cmdLine
 ```
 
@@ -486,7 +486,7 @@ $cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target fo
 - [ ] **Step 3：执行最终自动化验证**
 
 ```powershell
-$cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests && ctest --test-dir build -R PalworldEditorTests --output-on-failure && cmake --build --preset ninja-msvc-x64 --target PalworldEditor' -f $vcvarsPath
+$cmdLine = 'call "{0}" >nul && cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests && ctest --test-dir build -R PalworldEditor.SkillEditor --output-on-failure && cmake --build --preset ninja-msvc-x64 --target PalworldEditor' -f $vcvarsPath
 & cmd.exe /d /s /c $cmdLine
 git diff --check
 git status --short

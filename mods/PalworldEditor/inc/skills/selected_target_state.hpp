@@ -4,12 +4,12 @@
  */
 #pragma once
 
-#include <skills/skill_editor_service.hpp>
-
 #include <functional>
 #include <optional>
 #include <string>
 #include <utility>
+
+#include <skills/skill_editor_service.hpp>
 
 /** @brief 提供当前待出战帕鲁目标的纯 C++ 状态管理。 */
 namespace skill_editor {
@@ -60,8 +60,9 @@ private:
  * @param[in] current 当前选中目标。
  * @return 两者目标均有效且句柄相同时返回 `true`。
  */
-[[nodiscard]] inline auto request_targets_current(
-    const SkillEditRequest& request, const SelectedTargetObservation& current) -> bool {
+[[nodiscard]] inline auto request_targets_current(const SkillEditRequest& request,
+                                                  const SelectedTargetObservation& current)
+    -> bool {
     return current.target != 0 && request.target == current.target;
 }
 
@@ -74,9 +75,9 @@ private:
  * @return 目标一致时返回回调结果；目标已切换或为空时返回 `std::nullopt`。
  */
 template <typename Apply>
-[[nodiscard]] auto apply_if_target_is_current(
-    const SkillEditRequest& request, const SelectedTargetObservation& current,
-    Apply&& apply) -> std::optional<SkillEditResult> {
+[[nodiscard]] auto apply_if_target_is_current(const SkillEditRequest& request,
+                                              const SelectedTargetObservation& current,
+                                              Apply&& apply) -> std::optional<SkillEditResult> {
     if (!request_targets_current(request, current)) {
         return std::nullopt;
     }

@@ -92,8 +92,7 @@ struct SelectedPalTarget {
     }
 
     auto* const getSelectedFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr,
-        STR("/Script/Pal.PalOtomoHolderComponentBase:GetSelectedOtomoID"));
+        nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetSelectedOtomoID"));
     if (getSelectedFunction == nullptr) {
         return {};
     }
@@ -107,14 +106,13 @@ struct SelectedPalTarget {
     }
 
     auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr,
-        STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
+        nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
     if (getHandleFunction == nullptr) {
         return {};
     }
     /** @brief `PalOtomoHolderComponentBase:GetOtomoIndividualHandle` 的反射参数布局。 */
     struct GetHandleParams {
-        int32_t SlotIndex{};     /**< 要解析的当前选中槽位。 */
+        int32_t SlotIndex{};    /**< 要解析的当前选中槽位。 */
         UObject* ReturnValue{}; /**< 游戏写回的非拥有个体 handle。 */
     } getHandleParams{.SlotIndex = getSelectedParams.ReturnValue};
     holder->ProcessEvent(getHandleFunction, &getHandleParams);
@@ -146,8 +144,7 @@ struct SelectedPalTarget {
     }
 
     auto* const getCharacterIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr,
-        STR("/Script/Pal.PalIndividualCharacterParameter:GetCharacterID"));
+        nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetCharacterID"));
     if (getCharacterIdFunction == nullptr) {
         return {};
     }

@@ -44,17 +44,17 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.4.0");
+        ModVersion = STR("1.4.1");
         ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.0)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.1)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.4.0", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.4.1", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -153,8 +153,7 @@ public:
 
         const auto selectedPal = pal_game::resolve_selected_otomo();
         const skill_editor::SelectedTargetObservation targetObservation{
-            .target =
-                reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter),
+            .target = reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter),
             .name = selectedPal.characterId,
         };
         const bool targetChanged = selectedTarget_.update(targetObservation);
@@ -180,23 +179,21 @@ public:
 
         std::optional<skill_editor::SkillCatalogSnapshot> refreshedCatalog;
         const bool refreshRequested =
-            selectedTarget_.current().target != 0 &&
-            wantRefreshSkillCatalog_.exchange(false);
+            selectedTarget_.current().target != 0 && wantRefreshSkillCatalog_.exchange(false);
         if (refreshRequested) {
             skill_editor::SkillCatalogSnapshot previous;
             {
                 const std::lock_guard lock(skillSnapshotMutex_);
                 previous = skillSnapshot_.catalog;
             }
-            refreshedCatalog = skill_editor::with_catalog_fallback(
-                previous, skillGateway_.load_catalog());
+            refreshedCatalog =
+                skill_editor::with_catalog_fallback(previous, skillGateway_.load_catalog());
         }
 
         std::optional<skill_editor::SkillState> refreshedState;
         if (selectedTarget_.current().target != 0 &&
             (targetChanged || refreshRequested || editResult.has_value())) {
-            refreshedState =
-                skillGateway_.read_state(selectedTarget_.current().target);
+            refreshedState = skillGateway_.read_state(selectedTarget_.current().target);
         }
 
         {
@@ -616,12 +613,10 @@ private:
         }
 
         if (snapshot.target != 0) {
-            ImGui::TextColored(
-                ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
-                snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
+            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
+                               snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
         } else {
-            ImGui::TextDisabled(
-                "尚未解析到待出战帕鲁；请确认队伍中有帕鲁，并使用 Q/E 选择。");
+            ImGui::TextDisabled("尚未解析到待出战帕鲁；请确认队伍中有帕鲁，并使用 Q/E 选择。");
         }
         const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
         ImGui::SameLine();
