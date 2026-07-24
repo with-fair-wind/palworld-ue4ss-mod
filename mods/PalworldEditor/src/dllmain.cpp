@@ -18,22 +18,18 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
 #include <Mod/CppUserModBase.hpp>
-#include <UE4SSProgram.hpp>                           // UE4SS_ENABLE_IMGUI
-#include <Unreal/CoreUObject/UObject/UnrealType.hpp>  // FProperty (for viewed-Pal name read)
-#include <Unreal/Hooks/Hooks.hpp>
-#include <Unreal/NameTypes.hpp>
+#include <UE4SSProgram.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <game/pal_game.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
 #include <skills/pal_skills.hpp>
-#include <support/text_encoding.hpp>
+#include <skills/selected_target_state.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;
 using pal_game::InvEntry;
-using pal_game::PalEntry;
 
 /**
  * @brief PalworldEditor 的 UE4SS mod 实例与全部运行时状态容器。
@@ -82,9 +78,8 @@ public:
     ~PalworldEditorMod() override = default;
 
     /**
-     * @brief 在 UE4SS 完成 Unreal 初始化后建立对象探测和查看帕鲁追踪。
-     * @details 注册 `GetPassiveSkillList` 的 `ProcessEvent` 前置回调；外部游戏调用该函数时，
-     *          回调把 Context 作为非拥有目标句柄记录到 lastViewedPal_。最后请求首次物品扫描。
+     * @brief 在 UE4SS 完成 Unreal 初始化后输出对象探测信息并请求首次物品扫描。
+     * @details 当前待出战帕鲁由 on_update() 每帧主动解析，不注册全局 ProcessEvent Hook。
      * @warning 由 UE4SS 在游戏线程调用。
      */
     auto on_unreal_init() -> void override {
@@ -93,54 +88,16 @@ public:
             Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
         }
 
-        // Track which Pal the player is viewing (GetPassiveSkillList hook).
-        fnGetPSL_ = UObjectGlobals::StaticFindObject<UFunction*>(
-            nullptr, nullptr,
-            STR("/Script/Pal.PalIndividualCharacterParameter:GetPassiveSkillList"));
-        if (fnGetPSL_ != nullptr) {
-            Hook::RegisterProcessEventPreCallback(
-                [this](auto& /*info*/, UObject* Context, UFunction* Function, void* /*Params*/) {
-                    if (Function == fnGetPSL_ && Context != nullptr &&
-                        !suppressViewTracking_.load()) {
-                        lastViewedPal_.store(reinterpret_cast<uintptr_t>(Context));
-                    }
-                },
-                Hook::FCallbackOptions{.OwnerModName = STR("PalworldEditor"),
-                                       .HookName = STR("PalViewTracker")});
-            Output::send<LogLevel::Verbose>(
-                STR("PalworldEditor: PalViewTracker hook registered\n"));
-        }
-
         want_scan_items_.store(true);
     }
 
     /**
      * @brief 在游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
-     * @details 单次更新依次处理查看目标名称、给予物品、背包数量修改、背包/物品/帕鲁扫描、
+     * @details 单次更新依次处理给予物品、背包数量修改、背包/物品扫描、当前待出战帕鲁解析、
      *          技能编辑 FIFO 队列、技能目录/状态刷新和诊断扫描。共享结果在相应互斥量保护下写回。
      * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口，由 UE4SS 在游戏线程调用。
      */
     auto on_update() -> void override {
-        // Cache the viewed Pal's species name when pointer changes.
-        const uintptr_t viewed = lastViewedPal_.load();
-        if (viewed != lastCachedPal_) {
-            lastCachedPal_ = viewed;
-            std::string name;
-            if (skillGateway_.is_valid(viewed)) {
-                UObject* pal = reinterpret_cast<UObject*>(viewed);
-                if (FProperty* spProp = pal->GetPropertyByNameInChain(STR("SaveParameter"))) {
-                    if (FName* charId = spProp->ContainerPtrToValuePtr<FName>(pal)) {
-                        const std::wstring w = charId->ToString();
-                        name = text_encoding::to_utf8(w);
-                    }
-                }
-            }
-            {
-                const std::lock_guard lock(inv_mutex_);
-                viewedPalName_ = std::move(name);
-            }
-        }
-
         // Give items
         std::string item;
         int count = 0;
@@ -194,15 +151,13 @@ public:
             item_db_cache_ = std::move(fresh);
         }
 
-        // Scan pals
-        if (want_scan_pals_.exchange(false)) {
-            auto fresh = pal_game::scan_pals();
-            const std::lock_guard lock(inv_mutex_);
-            if (pal_selected_ >= static_cast<int>(fresh.size())) {
-                pal_selected_ = -1;
-            }
-            pal_cache_ = std::move(fresh);
-        }
+        const auto selectedPal = pal_game::resolve_selected_otomo();
+        const skill_editor::SelectedTargetObservation targetObservation{
+            .target =
+                reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter),
+            .name = selectedPal.characterId,
+        };
+        const bool targetChanged = selectedTarget_.update(targetObservation);
 
         std::optional<skill_editor::SkillEditResult> editResult;
         if (auto request = skillQueue_.try_pop()) {
@@ -210,44 +165,55 @@ public:
                 const std::lock_guard lock(skillSnapshotMutex_);
                 skillSnapshot_.pending = true;
             }
-            ViewTrackingGuard guard(suppressViewTracking_);
-            editResult = skill_editor::execute_skill_edit(skillGateway_, *request);
+            editResult = skill_editor::apply_if_target_is_current(
+                *request, selectedTarget_.current(),
+                [this](const skill_editor::SkillEditRequest& currentRequest) {
+                    return skill_editor::execute_skill_edit(skillGateway_, currentRequest);
+                });
+            if (!editResult.has_value()) {
+                editResult = skill_editor::SkillEditResult{
+                    .status = skill_editor::SkillEditStatus::rejected,
+                    .message = "目标已切换，请在当前待出战帕鲁上重新提交修改。",
+                };
+            }
         }
 
-        const auto resolved = resolve_skill_target();
-        const bool targetChanged = resolved.target != lastSkillTarget_;
-        lastSkillTarget_ = resolved.target;
-
         std::optional<skill_editor::SkillCatalogSnapshot> refreshedCatalog;
-        if (resolved.target != 0 && wantRefreshSkillCatalog_.exchange(false)) {
+        const bool refreshRequested =
+            selectedTarget_.current().target != 0 &&
+            wantRefreshSkillCatalog_.exchange(false);
+        if (refreshRequested) {
             skill_editor::SkillCatalogSnapshot previous;
             {
                 const std::lock_guard lock(skillSnapshotMutex_);
                 previous = skillSnapshot_.catalog;
             }
-            ViewTrackingGuard guard(suppressViewTracking_);
             refreshedCatalog = skill_editor::with_catalog_fallback(
                 previous, skillGateway_.load_catalog());
         }
 
         std::optional<skill_editor::SkillState> refreshedState;
-        if (resolved.target != 0 && (targetChanged || editResult.has_value())) {
-            ViewTrackingGuard guard(suppressViewTracking_);
-            refreshedState = skillGateway_.read_state(resolved.target);
+        if (selectedTarget_.current().target != 0 &&
+            (targetChanged || refreshRequested || editResult.has_value())) {
+            refreshedState =
+                skillGateway_.read_state(selectedTarget_.current().target);
         }
 
         {
             const std::lock_guard lock(skillSnapshotMutex_);
-            skillSnapshot_.target = resolved.target;
-            skillSnapshot_.source = resolved.source;
-            skillSnapshot_.palName = resolved.name;
+            skillSnapshot_.target = selectedTarget_.current().target;
+            skillSnapshot_.palName = selectedTarget_.current().name;
             skillSnapshot_.pending = skillQueue_.size() != 0;
+            if (targetChanged) {
+                skillSnapshot_.state = {};
+                skillSnapshot_.lastResult.clear();
+            }
             if (refreshedCatalog.has_value()) {
                 skillSnapshot_.catalog = std::move(*refreshedCatalog);
             }
             if (refreshedState.has_value()) {
                 skillSnapshot_.state = std::move(*refreshedState);
-            } else if (resolved.target == 0) {
+            } else if (selectedTarget_.current().target == 0) {
                 skillSnapshot_.state = {};
             }
             if (editResult.has_value()) {
@@ -262,66 +228,17 @@ public:
     }
 
 private:
-    /** @brief 描述当前技能编辑目标的解析来源。 */
-    enum class SkillTargetSource {
-        none,     /**< 当前没有有效技能目标。 */
-        viewed,   /**< 目标来自 `GetPassiveSkillList` Hook 捕获的当前查看帕鲁。 */
-        selected, /**< 目标来自扫描列表中的手动选择。 */
-    };
-
-    /** @brief 一次技能目标解析得到的非拥有目标句柄、来源和展示名称。 */
-    struct ResolvedSkillTarget {
-        skill_editor::SkillTarget target{}; /**< 非拥有帕鲁句柄；为 0 时表示没有有效目标。 */
-        SkillTargetSource source{SkillTargetSource::none}; /**< 目标解析来源。 */
-        std::string name; /**< 用于 GUI 展示的帕鲁名称；尚未读取时可为空。 */
-    };
-
     /**
      * @brief 游戏线程发布给 GUI 的完整技能编辑快照。
      * @details 此结构按值复制，避免 GUI 在持锁期间执行复杂渲染逻辑。
      */
     struct SkillEditorSnapshot {
-        skill_editor::SkillTarget target{};                /**< 当前非拥有技能目标句柄。 */
-        SkillTargetSource source{SkillTargetSource::none}; /**< 当前目标的解析来源。 */
-        std::string palName;                               /**< 当前目标的 GUI 展示名称。 */
+        skill_editor::SkillTarget target{};         /**< 当前非拥有技能目标句柄。 */
+        std::string palName;                        /**< 当前目标的 GUI 展示名称。 */
         skill_editor::SkillState state;             /**< 最近一次从游戏重读的实际技能状态。 */
         skill_editor::SkillCatalogSnapshot catalog; /**< 最近一份可用的运行时技能目录。 */
         std::string lastResult;                     /**< 最近一次技能编辑结果的面向用户消息。 */
         bool pending{}; /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
-    };
-
-    /**
-     * @brief 在本 mod 主动调用技能读取反射时临时抑制查看目标追踪。
-     * @details 构造时把共享原子标志设为 `true`，析构时恢复为 `false`，防止本 mod 的
-     *          `GetPassiveSkillList` 调用被 Hook 误判为玩家正在查看新的帕鲁。
-     */
-    class ViewTrackingGuard {
-    public:
-        /**
-         * @brief 开始抑制查看目标追踪。
-         * @param[in,out] flag 生命周期长于本守卫的共享原子标志；守卫不拥有该对象。
-         */
-        explicit ViewTrackingGuard(std::atomic<bool>& flag) : flag_(flag) {
-            flag_.store(true);
-        }
-
-        /** @brief 结束抑制并恢复查看目标追踪。 */
-        ~ViewTrackingGuard() {
-            flag_.store(false);
-        }
-
-        /** @brief 禁止复制，避免多个守卫重复恢复同一标志。 */
-        ViewTrackingGuard(const ViewTrackingGuard&) = delete;
-
-        /**
-         * @brief 禁止复制赋值，保证恢复动作只有一个责任对象。
-         * @return 不会返回；该操作在编译期被删除。
-         */
-        auto operator=(const ViewTrackingGuard&) -> ViewTrackingGuard& = delete;
-
-    private:
-        /** @brief 被临时置位的非拥有原子标志引用。 */
-        std::atomic<bool>& flag_;
     };
 
     /**
@@ -333,41 +250,6 @@ private:
      */
     static auto clamp(int v, int lo, int hi) -> int {
         return v < lo ? lo : (v > hi ? hi : v);
-    }
-
-    /**
-     * @brief 解析当前技能编辑目标，优先使用正在查看的帕鲁。
-     * @return 已解析目标；查看目标无效时退回扫描列表手动选择，两者均无效时返回空结构。
-     * @details 读取手动选择和名称时持有 inv_mutex_，返回的目标句柄仍是非拥有值。
-     * @warning 由游戏线程调用，并在返回前通过 skillGateway_ 重新校验目标。
-     */
-    auto resolve_skill_target() -> ResolvedSkillTarget {
-        const auto viewed = lastViewedPal_.load();
-        if (skillGateway_.is_valid(viewed)) {
-            std::string name;
-            {
-                const std::lock_guard lock(inv_mutex_);
-                name = viewedPalName_;
-            }
-            return {.target = viewed, .source = SkillTargetSource::viewed, .name = std::move(name)};
-        }
-
-        UObject* selected = nullptr;
-        std::string name;
-        {
-            const std::lock_guard lock(inv_mutex_);
-            if (pal_selected_ >= 0 && pal_selected_ < static_cast<int>(pal_cache_.size())) {
-                selected = pal_cache_[pal_selected_].ptr;
-                name = pal_cache_[pal_selected_].name;
-            }
-        }
-        const auto selectedTarget = reinterpret_cast<skill_editor::SkillTarget>(selected);
-        if (skillGateway_.is_valid(selectedTarget)) {
-            return {.target = selectedTarget,
-                    .source = SkillTargetSource::selected,
-                    .name = std::move(name)};
-        }
-        return {};
     }
 
     /**
@@ -712,10 +594,10 @@ private:
     }
 
     /**
-     * @brief 渲染帕鲁目标选择、技能目录状态和主动/被动技能编辑区域。
+     * @brief 渲染当前待出战帕鲁、技能目录状态和主动/被动技能编辑区域。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
-     * @details 优先展示 Hook 自动发现的查看目标；没有有效查看目标时允许从 pal_cache_
-     *          手动选择。渲染前复制 skillSnapshot_，目标变化时重置临时 UI 状态。
+     * @details 目标来自游戏线程每帧解析的 Q/E 当前选择。渲染前复制 skillSnapshot_，
+     *          目标变化时重置临时 UI 状态。
      * @warning 只在 GUI 线程调用。
      */
     static void render_pal_editor(PalworldEditorMod* self) {
@@ -734,13 +616,12 @@ private:
         }
 
         if (snapshot.target != 0) {
-            const char* source =
-                snapshot.source == SkillTargetSource::viewed ? "当前查看" : "手动选择";
-            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "目标：%s（%s）",
-                               snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str(),
-                               source);
+            ImGui::TextColored(
+                ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
+                snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
         } else {
-            ImGui::TextDisabled("请在游戏中查看一只帕鲁，或从下方扫描列表中手动选择。");
+            ImGui::TextDisabled(
+                "尚未解析到待出战帕鲁；请确认队伍中有帕鲁，并使用 Q/E 选择。");
         }
         const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
         ImGui::SameLine();
@@ -760,28 +641,6 @@ private:
                                snapshot.catalog.error.c_str());
         }
         ImGui::Separator();
-
-        // Pal list (manual selection fallback)
-        if (ImGui::Button("Scan Pals")) {
-            self->want_scan_pals_.store(true);
-        }
-        ImGui::SameLine();
-        {
-            const std::lock_guard lock(self->inv_mutex_);
-            ImGui::TextDisabled("(%d pals)", static_cast<int>(self->pal_cache_.size()));
-        }
-        ImGui::BeginChild("pallist", ImVec2(380, 140), true);
-        {
-            const std::lock_guard lock(self->inv_mutex_);
-            for (int i = 0; i < static_cast<int>(self->pal_cache_.size()); ++i) {
-                const std::string palLabel =
-                    self->pal_cache_[i].name + " ##pal" + std::to_string(i);
-                if (ImGui::Selectable(palLabel.c_str(), self->pal_selected_ == i)) {
-                    self->pal_selected_ = i;
-                }
-            }
-        }
-        ImGui::EndChild();
 
         if (snapshot.target == 0) {
             return;
@@ -823,7 +682,7 @@ private:
     std::atomic<bool> modify_requested_{false};
 
     /**
-     * @brief 保护背包、物品目录、帕鲁扫描缓存及查看目标名称。
+     * @brief 保护背包和物品目录值快照。
      * @details 游戏线程写入这些快照，GUI 线程读取并更新对应选择索引。
      */
     std::mutex inv_mutex_;
@@ -839,32 +698,10 @@ private:
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
     std::atomic<bool> want_scan_items_{false};
 
-    /** @brief GUI 手动选择的 pal_cache_ 索引；`-1` 表示未选择，由 inv_mutex_ 保护。 */
-    int pal_selected_ = -1;
-    /** @brief 最近一次游戏线程扫描的已加载帕鲁快照；由 inv_mutex_ 保护。 */
-    std::vector<PalEntry> pal_cache_;
-    /** @brief 请求游戏线程在下一次更新中重新扫描帕鲁对象。 */
-    std::atomic<bool> want_scan_pals_{false};
-
-    /**
-     * @brief Hook 最近捕获的查看帕鲁非拥有句柄。
-     * @details ProcessEvent 回调写入，游戏线程和 GUI 目标解析流程读取；0 表示未知。
-     */
-    std::atomic<uintptr_t> lastViewedPal_{0};
-    /** @brief 临时禁止本 mod 自身反射读取更新 lastViewedPal_ 的原子标志。 */
-    std::atomic<bool> suppressViewTracking_{false};
-    /**
-     * @brief `GetPassiveSkillList` 的非拥有 UFunction 观察指针。
-     * @details 在 on_unreal_init() 中解析，供 ProcessEvent Hook 比较函数身份。
-     */
-    UFunction* fnGetPSL_{};
-    /** @brief lastViewedPal_ 对应的 Raw 物种名称；由 inv_mutex_ 保护。 */
-    std::string viewedPalName_;
-    /** @brief 游戏线程上一次已生成名称缓存的查看目标句柄。 */
-    uintptr_t lastCachedPal_{0};
-
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
+    /** @brief 游戏线程每帧更新的当前 Q/E 待出战帕鲁目标状态。 */
+    skill_editor::SelectedTargetState selectedTarget_;
     /** @brief GUI 生产、游戏线程 FIFO 消费的线程安全技能编辑请求队列。 */
     skill_editor::SkillEditQueue skillQueue_;
     /** @brief 保护游戏线程发布、GUI 线程复制的 skillSnapshot_。 */
@@ -873,9 +710,6 @@ private:
     SkillEditorSnapshot skillSnapshot_;
     /** @brief 请求游戏线程重新加载运行时技能目录；初始值触发首次加载。 */
     std::atomic<bool> wantRefreshSkillCatalog_{true};
-    /** @brief 游戏线程上一帧解析到的技能目标，用于检测目标变化。 */
-    skill_editor::SkillTarget lastSkillTarget_{};
-
     /** @brief 被动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */
     char passiveSearch_[96]{};
     /** @brief 主动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */

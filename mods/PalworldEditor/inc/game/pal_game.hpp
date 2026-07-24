@@ -7,7 +7,6 @@
  */
 #pragma once
 
-#include <algorithm>
 #include <map>
 #include <string>
 #include <string_view>
@@ -177,15 +176,6 @@ struct InvEntry {
     std::string item_id; /**< 传给游戏接口的物品 Raw ID，不是本地化展示名称。 */
     int count;           /**< 扫描时读取到的堆叠数量。 */
     int32_t slot_index;  /**< 容器槽位索引；修改数量时使用此值，而不是 `item_id`。 */
-};
-
-/**
- * @brief 表示当前已加载的一只帕鲁及其非拥有对象指针。
- * @warning `ptr` 依赖游戏对象生命周期，跨帧使用前必须重新调用 is_valid()。
- */
-struct PalEntry {
-    std::string name; /**< Raw 物种名及 `[boxed]`/`[active]` 状态后缀。 */
-    UObject* ptr;     /**< 指向 `PalIndividualCharacterParameter` 的非拥有观察指针。 */
 };
 
 /**
@@ -472,50 +462,6 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
     Output::send<LogLevel::Warning>(STR("scan_all_items: found {} item definitions\n"),
                                     static_cast<int32>(catalog.items.size()));
     return catalog;
-}
-
-/**
- * @brief 扫描当前已加载的帕鲁个体参数对象。
- * @return 按展示名称排序的帕鲁快照列表。
- * @details 只收集类名为 `PalIndividualCharacterParameter` 的对象，从 `SaveParameter`
- *          读取 Raw 物种名，并根据 `IndividualActor` 是否存在追加 `[active]` 或 `[boxed]`。
- * @warning 返回的 `PalEntry::ptr` 是非拥有观察指针，跨帧使用前必须重新校验。
- * @warning 只能在游戏线程调用。
- */
-inline auto scan_pals() -> std::vector<PalEntry> {
-    std::vector<PalEntry> pals;
-    UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
-        UClass* cls = obj->GetClassPrivate();
-        if (cls == nullptr) {
-            return LoopAction::Continue;
-        }
-        if (cls->GetName() != STR("PalIndividualCharacterParameter")) {
-            return LoopAction::Continue;
-        }
-        std::string name;
-        if (FProperty* spProp = obj->GetPropertyByNameInChain(STR("SaveParameter"))) {
-            if (FName* charId = spProp->ContainerPtrToValuePtr<FName>(obj)) {
-                const std::wstring w = charId->ToString();
-                name = text_encoding::to_utf8(w);
-            }
-        }
-        if (!name.empty()) {
-            bool isBoxed = true;
-            if (FProperty* iaProp = obj->GetPropertyByNameInChain(STR("IndividualActor"))) {
-                if (void** actorPtr = iaProp->ContainerPtrToValuePtr<void*>(obj)) {
-                    isBoxed = (*actorPtr == nullptr);
-                }
-            }
-            name += isBoxed ? " [boxed]" : " [active]";
-            pals.push_back({name, obj});
-        }
-        return LoopAction::Continue;
-    });
-    std::sort(pals.begin(), pals.end(),
-              [](const PalEntry& a, const PalEntry& b) { return a.name < b.name; });
-    Output::send<LogLevel::Warning>(STR("scan_pals: found {} pals\n"),
-                                    static_cast<int32>(pals.size()));
-    return pals;
 }
 
 /**

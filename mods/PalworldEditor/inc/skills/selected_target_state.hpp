@@ -6,6 +6,8 @@
 
 #include <skills/skill_editor_service.hpp>
 
+#include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -61,6 +63,25 @@ private:
 [[nodiscard]] inline auto request_targets_current(
     const SkillEditRequest& request, const SelectedTargetObservation& current) -> bool {
     return current.target != 0 && request.target == current.target;
+}
+
+/**
+ * @brief 仅在排队请求仍指向当前待出战帕鲁时调用写入回调。
+ * @tparam Apply 接受 `const SkillEditRequest&` 并返回 `SkillEditResult` 的可调用类型。
+ * @param[in] request 待执行的排队请求。
+ * @param[in] current 执行时重新观测到的当前目标。
+ * @param[in] apply 真正执行技能写入的回调。
+ * @return 目标一致时返回回调结果；目标已切换或为空时返回 `std::nullopt`。
+ */
+template <typename Apply>
+[[nodiscard]] auto apply_if_target_is_current(
+    const SkillEditRequest& request, const SelectedTargetObservation& current,
+    Apply&& apply) -> std::optional<SkillEditResult> {
+    if (!request_targets_current(request, current)) {
+        return std::nullopt;
+    }
+
+    return std::invoke(std::forward<Apply>(apply), request);
 }
 
 }  // namespace skill_editor
