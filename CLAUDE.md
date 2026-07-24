@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.3），通过
+这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.4），通过
 UE4SS GUI 提供：
 
 - 运行时物品目录和当前语言名称搜索；
@@ -48,6 +48,7 @@ mods/PalworldEditor/
 ├── inc/
 │   ├── game/pal_game.hpp
 │   ├── items/item_catalog.hpp
+│   ├── skills/active_skill_definitions.hpp
 │   ├── skills/pal_skills.hpp
 │   ├── skills/selected_target_state.hpp
 │   ├── skills/skill_catalog.hpp
@@ -62,6 +63,7 @@ mods/PalworldEditor/
 
 - `pal_game.hpp`：背包、物品定义、当前待出战帕鲁和诊断扫描的反射访问；
 - `item_catalog.hpp`：物品标签、搜索、去重、排序和 Raw ID 索引；
+- `active_skill_definitions.hpp`：从 Palworld 1.0 UHT dump 生成的主动技能数值/Raw ID 表；
 - `skill_catalog.hpp`：主动/被动技能目录的纯逻辑；
 - `skill_editor_service.hpp`：编辑校验、FIFO 请求、操作后重读和失败回滚；
 - `selected_target_state.hpp`：当前目标切换检测和过期编辑请求保护；
@@ -75,6 +77,9 @@ ImGui 回调只读写标准库 UI 状态、原子请求标志以及互斥锁保�
 
 物品和技能界面显示 `本地化名称 [RawId]`，但游戏调用始终使用 Raw ID；背包修改使用槽位索引。主动技能通过
 `ClearEquipWaza()` 后按顺序调用 `AddEquipWaza()` 重写完整装备列表，失败时由领域服务尝试恢复原状态。
+主动技能目录不读取运行时 `UEnum` 内存布局；名称通过 `PalUIUtility` 跟随游戏当前语言，
+`PalPlayerInventoryData` 只提供当帧本地化上下文。本地化失败时回退为 Raw ID，主动和被动目录分别保留
+可用状态和刷新错误。更新 UHT dump 后运行 `scripts/generate-active-skill-definitions.ps1` 更新定义表。
 
 ## 工具链与验证
 
@@ -97,7 +102,8 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.3)`；打开 `PalworldEditor` 页签后验证物品、
-背包、数字键高亮队伍帕鲁后点击“选择当前帕鲁”、切换目标后编辑失效，以及主动/被动技能编辑。场景中有野生帕鲁
-时，目标仍必须是下一次按 E 会召唤的队伍帕鲁。反射签名和 UFunction 参数布局来自 Palworld 1.0，游戏更新后
-可能需要结合本地 `UHTHeaderDump/` 重新核对。
+游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.4)`；打开 `PalworldEditor` 页签后验证物品、
+背包、刷新技能目录不崩溃、主动/被动下拉框可选择且名称跟随游戏语言、装备数值显示为技能标签、数字键高亮
+队伍帕鲁后点击“选择当前帕鲁”、切换目标后编辑失效，以及主动/被动技能写入。场景中有野生帕鲁时，目标仍必须
+是下一次按 E 会召唤的队伍帕鲁。反射签名和 UFunction 参数布局来自 Palworld 1.0，游戏更新后可能需要结合本地
+`UHTHeaderDump/` 重新核对并重新生成主动技能定义表。

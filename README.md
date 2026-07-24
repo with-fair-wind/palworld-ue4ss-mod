@@ -1,4 +1,4 @@
-# PalworldEditor 1.4.3 — Palworld 物品与帕鲁技能编辑器
+# PalworldEditor 1.4.4 — Palworld 物品与帕鲁技能编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
 提供游戏内物品编辑，以及当前选中帕鲁的主动/被动技能编辑。所有操作都在 UE4SS GUI 的 ImGui
@@ -15,8 +15,8 @@
 | **目标帕鲁** | 用数字键高亮下一次按 E 会召唤的队伍帕鲁，再点击“选择当前帕鲁”确认 |
 | **被动技能** | 最多 4 个；支持新增、替换、删除 |
 | **主动技能** | 编辑 3 个 `EquipWaza` 槽位；支持装备、替换、清空 |
-| **技能目录** | 运行时加载全部可分配被动与 `EPalWazaID` 主动技能 |
-| **中文搜索** | 物品与技能均显示 `中文名 [RawId]`，可按中文名或原始 ID 搜索 |
+| **技能目录** | 独立加载可分配被动技能与 Palworld 1.0 主动技能 ID 表；一类失败不禁用另一类 |
+| **本地化搜索** | 物品与技能均显示 `当前语言名称 [RawId]`，可按名称或原始 ID 搜索 |
 | **安全修改** | 以个体 GUID + 目标代数校验 FIFO 请求；数字键切换队伍目标后立即取消选择并丢弃旧请求 |
 | **类名发现** | 扫描 UObject 直方图（调试用） |
 
@@ -105,14 +105,17 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 4. 主动技能区域固定显示 3 个 `EquipWaza` 槽位：
    - 已装备槽位可替换或清空；
    - 第一个空槽可选择并装备新技能。
-5. 点击“刷新技能列表”可重新加载运行时技能目录。
+5. 点击“刷新技能列表”可重新加载技能目录及当前游戏语言名称。
 
 下拉框只在点击确认时提交修改；选择候选本身不会立刻写入游戏。已经拥有/装备的技能会从候选中隐藏。
 每次修改都在游戏线程执行并重读实际状态；替换未生效时会尝试恢复完整原状态。
 如果玩家用数字键切换队伍高亮目标，当前确认会立刻失效、编辑区清空，所有尚未处理的请求都会被丢弃；
 必须再次点击“选择当前帕鲁”才能继续。目标从唯一属于本地控制器的队伍 Holder 解析，并以
 `FPalInstanceID.InstanceId` 区分同种帕鲁；GUI 与游戏线程之间不传递或缓存 `UObject*`。
-技能目录本地化复用同一个本地队伍 Holder 作为世界上下文。
+主动技能数值与 Raw ID 来自生成的 Palworld 1.0 定义表，不读取运行时 `UEnum` 内存布局；名称由
+`PalUIUtility` 按游戏当前语言查询，并使用 `PalPlayerInventoryData` 作为当帧世界上下文。本地化暂不可用时
+目录仍以 Raw ID 可选择，再次刷新可恢复当前语言名称。主动和被动目录分别保留可用状态和最近错误，一类刷新失败
+不会禁用或清空另一类目录。
 
 游戏内验证时可在场景中保留一只野生帕鲁，同时让队伍 UI 高亮另一只队伍帕鲁。点击
 “选择当前帕鲁”后，目标必须是下一次按 E 会召唤的队伍帕鲁，而不是场景中的野生帕鲁。
@@ -135,6 +138,7 @@ mods/PalworldEditor/
 │   ├── items/
 │   │   └── item_catalog.hpp          物品标签、搜索、去重、排序与索引
 │   ├── skills/
+│   │   ├── active_skill_definitions.hpp Palworld 1.0 主动技能数值/Raw ID 生成表
 │   │   ├── pal_skills.hpp           Palworld 技能目录适配层
 │   │   ├── selected_target_state.hpp 当前目标状态与过期请求保护
 │   │   ├── skill_catalog.hpp        可搜索技能目录纯逻辑
@@ -154,7 +158,7 @@ mods/PalworldEditor/
 ├── CMakeLists.txt       Super-build：add_subdirectory(RE-UE4SS) + add_subdirectory(mods)
 ├── CMakePresets.json    Ninja + MSVC x64 preset
 ├── cmake/Deploy.cmake   deploy target -> 游戏 Mods 目录
-└── scripts/             setup.ps1 / build.ps1 / deploy.ps1
+└── scripts/             setup/build/deploy + 主动技能定义生成脚本
 ```
 
 ## 已知限制
@@ -165,9 +169,13 @@ mods/PalworldEditor/
 - 主动技能只修改 `EquipWaza`，不会解锁或修改 `MasteredWaza`，也不编辑伙伴技能。
 - 技能数组通过 UE4SS 的真实 `TArray<T>` 读取；仍依赖 Palworld 1.0 的 UFunction 参数布局，
   游戏更新后可能需要同步 UHT 签名。
+- 游戏版本更新并替换 `UHTHeaderDump/` 后，需要运行
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-active-skill-definitions.ps1`
+  更新主动技能定义表。
 - 是否持久化由游戏公开函数和存档流程决定；修改后请正常保存，并在重载存档后确认。
 
 ## 参考
 
 - [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) · [创建 C++ mod](https://docs.ue4ss.com/guides/creating-a-c++-mod.html)
 - [pwmodding.wiki](https://pwmodding.wiki) · [ItemIDs](https://github.com/KURAMAAA0/PalModding/blob/main/ItemIDs.txt)
+- [PalSchema](https://github.com/Okaetsu/PalSchema) · [PalworldSaveTools](https://github.com/deafdudecomputers/PalworldSaveTools)

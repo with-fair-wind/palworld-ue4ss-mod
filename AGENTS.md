@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.4.3），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.4.4），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑。
@@ -82,6 +82,7 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 
 - `inc/game/pal_game.hpp`：背包、物品和帕鲁 UObject 反射访问；
 - `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和索引；
+- `inc/skills/active_skill_definitions.hpp`：生成的 Palworld 1.0 主动技能数值/Raw ID 表；
 - `inc/skills/skill_catalog.hpp`：可搜索的主动/被动技能目录；
 - `inc/skills/skill_editor_service.hpp`：编辑校验、FIFO 请求、重读和回滚；
 - `inc/skills/selected_target_state.hpp`：当前目标切换检测和过期编辑请求保护；
@@ -98,6 +99,12 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 非拥有句柄；业务数据的反射读取和修改只在 `on_update()` 所在游戏线程执行。当前技能目标从唯一属于本地
 控制器的队伍 Holder 解析，用户点击“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数确认；
 数字键切换队伍高亮目标会取消选择并清空旧请求。不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。
+
+主动技能目录不读取运行时 `UEnum` 内存布局，而是使用
+`scripts/generate-active-skill-definitions.ps1` 从 Palworld 1.0 UHT dump 生成的数值/Raw ID 表。
+主动和被动名称由 `PalUIUtility` 按游戏当前语言查询，`PalPlayerInventoryData` 只作为当帧本地化世界上下文；
+上下文暂不可用时目录回退为 Raw ID。两个目录区段分别维护可用状态、错误和旧目录回退，一类失败不禁用另一类。
+更新 Palworld/UHT dump 后必须重新运行生成脚本。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -130,10 +137,11 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.3)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.4)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
-“选择当前帕鲁”、切换高亮目标时编辑区失效、被动技能新增/替换/删除，以及主动技能装备/替换/清空。场景中保留
-一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
+“选择当前帕鲁”、切换高亮目标时编辑区失效、点击“刷新技能列表”不崩溃、两个技能下拉框都可选择、
+主动/被动名称跟随游戏语言、已装备主动技能数值可映射为标签、被动技能新增/替换/删除，以及主动技能
+装备/替换/清空。场景中保留一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
 检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。
 
 ## 权威参考资料
