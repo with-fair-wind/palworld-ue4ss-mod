@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -65,6 +66,61 @@ struct SkillCatalogSection {
 struct SkillCatalogSnapshot {
     SkillCatalogSection passive; /**< 被动技能目录区段。 */
     SkillCatalogSection active;  /**< 主动技能目录区段。 */
+    bool runtimeReady{};         /**< 游戏技能与本地化运行时已完成一次完整加载。 */
+};
+
+/**
+ * @brief 判断完整技能目录是否已验证为可安全编辑。
+ * @param[in] catalog 当前技能目录快照。
+ * @return 两类目录及游戏运行时都已就绪时返回 `true`。
+ */
+[[nodiscard]] inline auto catalog_is_ready_for_editing(const SkillCatalogSnapshot& catalog) noexcept
+    -> bool {
+    return catalog.runtimeReady && catalog.passive.ready && catalog.active.ready;
+}
+
+/**
+ * @brief 对启动阶段的技能目录自动刷新进行节流。
+ * @details 手动刷新始终立即通过；运行时就绪后停止自动刷新。
+ */
+class SkillCatalogRefreshScheduler {
+public:
+    using clock = std::chrono::steady_clock;
+    using time_point = clock::time_point;
+
+    /**
+     * @brief 建立指定自动重试间隔的调度器。
+     * @param[in] retryInterval 两次自动刷新之间的最短时间。
+     */
+    explicit SkillCatalogRefreshScheduler(const clock::duration retryInterval)
+        : retryInterval_(retryInterval) {}
+
+    /**
+     * @brief 判断当前更新是否应执行完整目录刷新。
+     * @param[in] manual 是否由用户手动请求刷新。
+     * @param[in] ready 技能运行时是否已完成一次完整加载。
+     * @param[in] now 当前稳定时钟时间点。
+     * @return 本次更新应执行刷新时返回 `true`。
+     */
+    [[nodiscard]] auto should_refresh(const bool manual, const bool ready, const time_point now)
+        -> bool {
+        if (manual) {
+            nextAutomaticRefresh_ = now + retryInterval_;
+            return true;
+        }
+        if (ready || (hasAttempted_ && now < nextAutomaticRefresh_)) {
+            return false;
+        }
+
+        hasAttempted_ = true;
+        nextAutomaticRefresh_ = now + retryInterval_;
+        return true;
+    }
+
+private:
+    clock::duration retryInterval_;   /**< 自动刷新之间的最短间隔。 */
+    time_point nextAutomaticRefresh_; /**< 下一次允许自动刷新的时间点。 */
+    bool hasAttempted_{};             /**< 是否已经执行过首次自动刷新。 */
 };
 
 /**
@@ -97,6 +153,7 @@ struct SkillCatalogSnapshot {
     return {
         .passive = with_section_fallback(previous.passive, refreshed.passive),
         .active = with_section_fallback(previous.active, refreshed.active),
+        .runtimeReady = previous.runtimeReady || refreshed.runtimeReady,
     };
 }
 

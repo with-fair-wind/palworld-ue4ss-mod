@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -45,17 +46,17 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.4.4");
+        ModVersion = STR("1.4.5");
         ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.4)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.5)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.4.4", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.4.5", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -170,12 +171,7 @@ public:
             lastResolutionStatus_ = selectedPal.status;
         }
 
-        const bool targetInvalidated = selectedTarget_.invalidate_if_changed(targetObservation);
         std::string lifecycleResult;
-        if (targetInvalidated) {
-            skillQueue_.clear();
-            lifecycleResult = "当前帕鲁已变化，已取消待处理的技能修改。";
-        }
 
         std::optional<skill_editor::SkillState> refreshedState;
         bool targetConfirmed = false;
@@ -187,12 +183,14 @@ public:
                 targetConfirmed = true;
                 lifecycleResult.clear();
             } else {
-                selectedTarget_.invalidate();
                 const auto reason = skill_editor::resolution_status_message(selectedPal.status);
                 lifecycleResult = "选择失败：";
                 lifecycleResult.append(reason.data(), reason.size());
             }
         }
+
+        const bool targetMatchesCurrent =
+            targetResolved && selectedTarget_.matches_current(targetObservation);
 
         std::optional<skill_editor::SkillEditResult> editResult;
         if (auto request = skillQueue_.try_pop()) {
@@ -208,11 +206,10 @@ public:
                     return skill_editor::execute_skill_edit(skillGateway_, executableRequest);
                 });
             if (!editResult.has_value()) {
-                selectedTarget_.invalidate();
                 skillQueue_.clear();
                 editResult = skill_editor::SkillEditResult{
                     .status = skill_editor::SkillEditStatus::rejected,
-                    .message = "当前帕鲁已变化，请重新点击“选择当前帕鲁”。",
+                    .message = "当前高亮帕鲁与已选择目标不一致或暂时无法确认；本次修改未执行。",
                 };
             } else {
                 refreshedState = editResult->state;
@@ -220,7 +217,15 @@ public:
         }
 
         std::optional<skill_editor::SkillCatalogSnapshot> refreshedCatalog;
-        const bool refreshRequested = wantRefreshSkillCatalog_.exchange(false);
+        const bool manualRefreshRequested = wantRefreshSkillCatalog_.exchange(false);
+        bool catalogReady = false;
+        {
+            const std::lock_guard lock(skillSnapshotMutex_);
+            catalogReady = skill_editor::catalog_is_ready_for_editing(skillSnapshot_.catalog);
+        }
+        const bool refreshRequested = skillCatalogRefreshScheduler_.should_refresh(
+            manualRefreshRequested, catalogReady,
+            skill_editor::SkillCatalogRefreshScheduler::clock::now());
         if (refreshRequested) {
             skill_editor::SkillCatalogSnapshot previous;
             {
@@ -235,11 +240,12 @@ public:
             const std::lock_guard lock(skillSnapshotMutex_);
             skillSnapshot_.targetGeneration = selectedTarget_.generation();
             skillSnapshot_.targetSelected = selectedTarget_.is_selected();
+            skillSnapshot_.targetMatchesCurrent = targetMatchesCurrent;
             skillSnapshot_.palName =
                 selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
             skillSnapshot_.resolutionStatus = selectedPal.status;
             skillSnapshot_.pending = skillQueue_.size() != 0;
-            if (targetInvalidated || !selectedTarget_.is_selected()) {
+            if (!selectedTarget_.is_selected()) {
                 skillSnapshot_.state = {};
             }
             if (refreshedCatalog.has_value()) {
@@ -280,6 +286,7 @@ private:
             skill_editor::SelectedTargetResolutionStatus::
                 holderCandidatesUnavailable}; /**< 当前解析状态。 */
         bool targetSelected{};                /**< 是否存在用户显式确认的技能目标。 */
+        bool targetMatchesCurrent{};          /**< 当前高亮目标是否与显式确认的 GUID 相同。 */
         bool pending{};                       /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
     };
 
@@ -463,17 +470,17 @@ private:
      * @brief 渲染被动技能列表及新增、替换、删除工作流。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
      * @param[in] snapshot 当前技能目标、目录和实际状态的值快照。
-     * @param[in] pending 是否存在尚未处理完成的技能编辑请求。
+     * @param[in] mutationsDisabled 是否应禁用全部被动技能修改入口。
      * @details 删除请求立即进入 FIFO；新增和替换先进入选择状态，确认后使用 Raw ID 提交。
      * @warning 只在 GUI 线程调用。
      */
     static void render_passive_skills(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
-                                      const bool pending) {
+                                      const bool mutationsDisabled) {
         ImGui::Text("被动技能 (%d/4)", static_cast<int>(snapshot.state.passiveIds.size()));
         std::unordered_set<std::string> excluded(snapshot.state.passiveIds.begin(),
                                                  snapshot.state.passiveIds.end());
 
-        ImGui::BeginDisabled(pending);
+        ImGui::BeginDisabled(mutationsDisabled);
         for (std::size_t index = 0; index < snapshot.state.passiveIds.size(); ++index) {
             const auto& id = snapshot.state.passiveIds[index];
             const auto label = find_skill_label(snapshot.catalog.passive.skills, id);
@@ -513,7 +520,7 @@ private:
 
         const bool replacing = self->passiveEditIndex_ >= 0;
         ImGui::TextUnformatted(replacing ? "选择替换后的被动技能：" : "选择要新增的被动技能：");
-        ImGui::BeginDisabled(pending || !snapshot.catalog.passive.ready);
+        ImGui::BeginDisabled(mutationsDisabled || !snapshot.catalog.passive.ready);
         render_skill_picker("##passive-picker", snapshot.catalog.passive.skills, excluded,
                             self->passiveSearch_, sizeof(self->passiveSearch_),
                             self->passiveChoice_);
@@ -551,19 +558,19 @@ private:
      * @brief 渲染三个 `EquipWaza` 主动技能槽及装备、替换、清空工作流。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
      * @param[in] snapshot 当前技能目标、目录和实际状态的值快照。
-     * @param[in] pending 是否存在尚未处理完成的技能编辑请求。
+     * @param[in] mutationsDisabled 是否应禁用全部主动技能修改入口。
      * @details 新技能只能追加到第一个尾部空槽；提交时同时携带 Raw ID 和 `EPalWazaID` 数值。
      * @warning 只在 GUI 线程调用。
      */
     static void render_active_skills(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
-                                     const bool pending) {
+                                     const bool mutationsDisabled) {
         ImGui::TextUnformatted("主动技能（EquipWaza）");
         std::unordered_set<std::string> excluded;
         for (const auto& skill : snapshot.state.activeSkills) {
             excluded.insert(skill.id);
         }
 
-        ImGui::BeginDisabled(pending);
+        ImGui::BeginDisabled(mutationsDisabled);
         for (std::size_t slot = 0; slot < 3; ++slot) {
             if (slot < snapshot.state.activeSkills.size()) {
                 const auto& skill = snapshot.state.activeSkills[slot];
@@ -608,7 +615,7 @@ private:
         const auto slot = static_cast<std::size_t>(self->activeEditSlot_);
         const bool replacing = slot < snapshot.state.activeSkills.size();
         ImGui::Text("为槽位 %d 选择主动技能：", self->activeEditSlot_ + 1);
-        ImGui::BeginDisabled(pending || !snapshot.catalog.active.ready);
+        ImGui::BeginDisabled(mutationsDisabled || !snapshot.catalog.active.ready);
         render_skill_picker("##active-picker", snapshot.catalog.active.skills, excluded,
                             self->activeSearch_, sizeof(self->activeSearch_), self->activeChoice_);
         const bool canConfirm =
@@ -672,6 +679,8 @@ private:
         }
 
         const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
+        const bool catalogReady = skill_editor::catalog_is_ready_for_editing(snapshot.catalog);
+        const bool editingReady = snapshot.targetMatchesCurrent && catalogReady;
         ImGui::BeginDisabled(pending);
         if (ImGui::Button("选择当前帕鲁")) {
             self->wantSelectCurrentPal_.store(true);
@@ -685,7 +694,7 @@ private:
         ImGui::EndDisabled();
 
         if (snapshot.targetSelected) {
-            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
+            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前已选择帕鲁：%s",
                                snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
         } else {
             ImGui::TextDisabled(
@@ -695,6 +704,18 @@ private:
             const auto message = skill_editor::resolution_status_message(snapshot.resolutionStatus);
             ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "解析状态：%.*s",
                                static_cast<int>(message.size()), message.data());
+        }
+        if (!catalogReady) {
+            ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
+                               "技能目录正在等待游戏初始化，将每 2 秒自动重试；"
+                               "就绪前仅可查看技能。");
+        }
+        if (snapshot.targetSelected && !snapshot.targetMatchesCurrent) {
+            const char* const message =
+                snapshot.resolutionStatus == skill_editor::SelectedTargetResolutionStatus::success
+                    ? "当前数字键高亮帕鲁与已选择目标不同；点击“选择当前帕鲁”后才会切换。"
+                    : "暂时无法确认当前高亮目标；已保留选择并暂停技能修改。";
+            ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "%s", message);
         }
         if (pending) {
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "技能修改处理中...");
@@ -717,9 +738,9 @@ private:
         }
 
         ImGui::Separator();
-        render_passive_skills(self, snapshot, pending);
+        render_passive_skills(self, snapshot, pending || !editingReady);
         ImGui::Separator();
-        render_active_skills(self, snapshot, pending);
+        render_active_skills(self, snapshot, pending || !editingReady);
     }
 
     /** @brief 给予物品输入框中的 ASCII Raw ID；只由 GUI 线程访问。 */
@@ -782,8 +803,11 @@ private:
     SkillEditorSnapshot skillSnapshot_;
     /** @brief 请求游戏线程显式确认当前高亮队伍帕鲁为技能编辑目标。 */
     std::atomic<bool> wantSelectCurrentPal_{false};
-    /** @brief 请求游戏线程重新加载运行时技能目录；初始值触发首次加载。 */
-    std::atomic<bool> wantRefreshSkillCatalog_{true};
+    /** @brief 请求游戏线程立即重新加载完整技能目录。 */
+    std::atomic<bool> wantRefreshSkillCatalog_{false};
+    /** @brief 启动阶段每两秒重试一次完整技能目录加载。 */
+    skill_editor::SkillCatalogRefreshScheduler skillCatalogRefreshScheduler_{
+        std::chrono::seconds{2}};
     /** @brief 被动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */
     char passiveSearch_[96]{};
     /** @brief 主动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */

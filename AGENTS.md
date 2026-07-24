@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.4.4），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.4.5），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑。
@@ -85,7 +85,7 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 - `inc/skills/active_skill_definitions.hpp`：生成的 Palworld 1.0 主动技能数值/Raw ID 表；
 - `inc/skills/skill_catalog.hpp`：可搜索的主动/被动技能目录；
 - `inc/skills/skill_editor_service.hpp`：编辑校验、FIFO 请求、重读和回滚；
-- `inc/skills/selected_target_state.hpp`：当前目标切换检测和过期编辑请求保护；
+- `inc/skills/selected_target_state.hpp`：显式锁定目标的一致性检测和过期编辑请求保护；
 - `inc/skills/pal_skills.hpp` + `src/pal_skills.cpp`：领域服务到 Palworld UFunction 的适配；
 - `src/dllmain.cpp`：mod 生命周期、ImGui 和线程间请求交接。
 
@@ -97,8 +97,9 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 
 ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的请求参数和原子请求标志。所有 UObject 指针都视为
 非拥有句柄；业务数据的反射读取和修改只在 `on_update()` 所在游戏线程执行。当前技能目标从唯一属于本地
-控制器的队伍 Holder 解析，用户点击“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数确认；
-数字键切换队伍高亮目标会取消选择并清空旧请求。不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。
+控制器的队伍 Holder 解析，用户点击“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数锁定；
+只有再次点击该按钮才会切换编辑目标。数字键切换或瞬时解析失败只暂停写入，不自动清空选择；消费请求时仍会
+重新校验当前 GUID。不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。
 
 主动技能目录不读取运行时 `UEnum` 内存布局，而是使用
 `scripts/generate-active-skill-definitions.ps1` 从 Palworld 1.0 UHT dump 生成的数值/Raw ID 表。
@@ -137,9 +138,10 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.4)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.5)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
-“选择当前帕鲁”、切换高亮目标时编辑区失效、点击“刷新技能列表”不崩溃、两个技能下拉框都可选择、
+“选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
+不崩溃、两个技能下拉框都可选择、
 主动/被动名称跟随游戏语言、已装备主动技能数值可映射为标签、被动技能新增/替换/删除，以及主动技能
 装备/替换/清空。场景中保留一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
 检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。

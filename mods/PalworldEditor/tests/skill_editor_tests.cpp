@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <iostream>
@@ -157,6 +158,74 @@ void test_skill_catalog_first_partial_load_keeps_available_section() {
     CHECK(!merged.active.ready);
     CHECK(merged.active.skills.empty());
     CHECK(merged.active.error == "active unavailable");
+}
+
+void test_partial_catalog_is_not_ready_for_editing() {
+    skill_editor::SkillCatalogSnapshot catalog{
+        .passive =
+            {
+                .skills = {{.id = "PAL_rude"}},
+                .ready = false,
+            },
+        .active =
+            {
+                .skills = {{.id = "Unique_Boar_Tackle", .activeValue = std::uint16_t{15}}},
+                .ready = true,
+            },
+        .runtimeReady = false,
+    };
+
+    CHECK(!skill_editor::catalog_is_ready_for_editing(catalog));
+    catalog.passive.ready = true;
+    CHECK(!skill_editor::catalog_is_ready_for_editing(catalog));
+    catalog.runtimeReady = true;
+    CHECK(skill_editor::catalog_is_ready_for_editing(catalog));
+}
+
+void test_catalog_fallback_preserves_established_runtime_readiness() {
+    const skill_editor::SkillCatalogSnapshot previous{
+        .passive =
+            {
+                .skills = {{.id = "PAL_rude"}},
+                .ready = true,
+            },
+        .active =
+            {
+                .skills = {{.id = "Unique_Boar_Tackle", .activeValue = std::uint16_t{15}}},
+                .ready = true,
+            },
+        .runtimeReady = true,
+    };
+    const skill_editor::SkillCatalogSnapshot failed{
+        .passive = {.error = "passive unavailable"},
+        .active = {.error = "active unavailable"},
+        .runtimeReady = false,
+    };
+
+    const auto merged = skill_editor::with_catalog_fallback(previous, failed);
+    CHECK(merged.runtimeReady);
+    CHECK(skill_editor::catalog_is_ready_for_editing(merged));
+}
+
+void test_catalog_refresh_scheduler_throttles_automatic_retries() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+
+    CHECK(scheduler.should_refresh(false, false, start));
+    CHECK(!scheduler.should_refresh(false, false, start + 1s));
+    CHECK(scheduler.should_refresh(false, false, start + 2s));
+    CHECK(!scheduler.should_refresh(false, true, start + 4s));
+}
+
+void test_catalog_refresh_scheduler_honors_manual_refresh_immediately() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+
+    CHECK(scheduler.should_refresh(false, false, start));
+    CHECK(scheduler.should_refresh(true, false, start + 100ms));
+    CHECK(scheduler.should_refresh(true, true, start + 200ms));
 }
 
 void test_item_catalog_labels_and_search() {
@@ -456,25 +525,29 @@ void test_target_requires_explicit_confirmation() {
     };
 
     CHECK(!state.is_selected());
-    CHECK(!state.invalidate_if_changed(observed));
+    CHECK(!state.matches_current(observed));
     CHECK(!state.is_selected());
 
     CHECK(state.confirm(observed));
     CHECK(state.is_selected());
+    CHECK(state.matches_current(observed));
     CHECK(state.current().identity == observed.identity);
     CHECK(state.current().name == "Boar");
     CHECK(state.generation() == 1);
 }
 
-void test_qe_change_invalidates_even_for_same_character_id() {
+void test_observations_do_not_replace_or_clear_explicit_target() {
     skill_editor::SelectedTargetState state;
     CHECK(state.confirm({.identity = identity(10), .name = "Boar"}));
     const auto selectedGeneration = state.generation();
 
-    CHECK(state.invalidate_if_changed({.identity = identity(20), .name = "Boar"}));
-    CHECK(!state.is_selected());
-    CHECK(state.generation() == selectedGeneration + 1);
-    CHECK(!state.current().is_valid());
+    CHECK(state.matches_current({.identity = identity(10), .name = "Boar"}));
+    CHECK(!state.matches_current({}));
+    CHECK(!state.matches_current({.identity = identity(20), .name = "SheepBall"}));
+    CHECK(state.is_selected());
+    CHECK(state.current().identity == identity(10));
+    CHECK(state.current().name == "Boar");
+    CHECK(state.generation() == selectedGeneration);
 }
 
 void test_resolution_status_has_actionable_message() {
@@ -594,6 +667,10 @@ auto main() -> int {
     test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
     test_skill_catalog_refresh_merges_sections_independently();
     test_skill_catalog_first_partial_load_keeps_available_section();
+    test_partial_catalog_is_not_ready_for_editing();
+    test_catalog_fallback_preserves_established_runtime_readiness();
+    test_catalog_refresh_scheduler_throttles_automatic_retries();
+    test_catalog_refresh_scheduler_honors_manual_refresh_immediately();
     test_item_catalog_labels_and_search();
     test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();
@@ -605,7 +682,7 @@ auto main() -> int {
     test_skill_edit_queue_is_fifo();
     test_skill_edit_queue_can_discard_all_pending_requests();
     test_target_requires_explicit_confirmation();
-    test_qe_change_invalidates_even_for_same_character_id();
+    test_observations_do_not_replace_or_clear_explicit_target();
     test_resolution_status_has_actionable_message();
     test_unique_local_candidate_is_selected();
     test_local_candidate_selection_reports_each_unavailable_stage();

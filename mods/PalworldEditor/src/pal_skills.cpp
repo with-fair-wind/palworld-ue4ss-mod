@@ -329,6 +329,10 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
         (!localizationContextReady || activeNameFunction == nullptr || !activeHasLocalizedNames)) {
         catalog.active.error = "Skill localization is unavailable; showing Raw IDs until refresh";
     }
+    catalog.runtimeReady =
+        manager != nullptr && passiveListFunction != nullptr && localizationContextReady &&
+        passiveNameFunction != nullptr && activeNameFunction != nullptr && catalog.passive.ready &&
+        catalog.active.ready && passiveHasLocalizedNames && activeHasLocalizedNames;
     return catalog;
 }
 }  // namespace pal_skills

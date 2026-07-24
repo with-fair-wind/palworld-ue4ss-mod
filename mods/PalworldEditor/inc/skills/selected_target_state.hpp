@@ -245,38 +245,6 @@ public:
     }
 
     /**
-     * @brief 在已确认目标与当前高亮队伍帕鲁观测不同时取消选择。
-     * @param[in] observation 当前帧的纯值目标观测。
-     * @retval true 已确认目标失效并被清空。
-     * @retval false 尚未选择目标，或当前观测仍指向同一个体。
-     */
-    [[nodiscard]] auto invalidate_if_changed(const SelectedTargetObservation& observation) -> bool {
-        if (!selected_) {
-            return false;
-        }
-        if (!observation.is_valid() || current_.identity != observation.identity) {
-            invalidate();
-            return true;
-        }
-
-        current_.name = observation.name;
-        return false;
-    }
-
-    /**
-     * @brief 取消当前确认目标。
-     * @details 仅当当前确有目标时增加代数，避免重复空状态产生无意义变化。
-     */
-    auto invalidate() -> void {
-        if (!selected_) {
-            return;
-        }
-        current_ = {};
-        selected_ = false;
-        ++generation_;
-    }
-
-    /**
      * @brief 查询是否已有用户显式确认的目标。
      * @return 当前选择状态。
      */
@@ -285,8 +253,19 @@ public:
     }
 
     /**
+     * @brief 判断当前运行时观察是否仍指向用户显式确认的目标。
+     * @param[in] observation 当前帧解析得到的纯值目标观察。
+     * @return 已选择目标且观察有效、个体 GUID 相同时返回 `true`。
+     * @details 本函数不改变选择；空观察和其他 GUID 都只表示当前不可安全编辑。
+     */
+    [[nodiscard]] auto matches_current(const SelectedTargetObservation& observation) const noexcept
+        -> bool {
+        return selected_ && observation.is_valid() && current_.identity == observation.identity;
+    }
+
+    /**
      * @brief 获取当前目标代数。
-     * @return 每次确认或失效时递增的代数。
+     * @return 每次显式确认目标时递增的代数。
      */
     [[nodiscard]] auto generation() const -> std::uint64_t {
         return generation_;
@@ -308,13 +287,12 @@ public:
      */
     [[nodiscard]] auto matches(const std::uint64_t generation,
                                const SelectedTargetObservation& observation) const -> bool {
-        return selected_ && generation == generation_ && observation.is_valid() &&
-               current_.identity == observation.identity;
+        return generation == generation_ && matches_current(observation);
     }
 
 private:
     SelectedTargetObservation current_; /**< 当前显式确认的纯值目标。 */
-    std::uint64_t generation_{};        /**< 确认或失效时递增的请求防护代数。 */
+    std::uint64_t generation_{};        /**< 每次显式确认时递增的请求防护代数。 */
     bool selected_{};                   /**< 是否存在用户显式确认的目标。 */
 };
 

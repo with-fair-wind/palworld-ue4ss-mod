@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概览
 
-这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.4），通过
+这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.5），通过
 UE4SS GUI 提供：
 
 - 运行时物品目录和当前语言名称搜索；
@@ -66,13 +66,14 @@ mods/PalworldEditor/
 - `active_skill_definitions.hpp`：从 Palworld 1.0 UHT dump 生成的主动技能数值/Raw ID 表；
 - `skill_catalog.hpp`：主动/被动技能目录的纯逻辑；
 - `skill_editor_service.hpp`：编辑校验、FIFO 请求、操作后重读和失败回滚；
-- `selected_target_state.hpp`：当前目标切换检测和过期编辑请求保护；
+- `selected_target_state.hpp`：显式锁定目标的一致性检测和过期编辑请求保护；
 - `pal_skills.*`：领域接口到 Palworld UFunction 的适配；
 - `dllmain.cpp`：`PalworldEditorMod` 生命周期、ImGui 和线程间请求交接。
 
 ImGui 回调只读写标准库 UI 状态、原子请求标志以及互斥锁保护的快照/参数。所有 UObject 反射读取和修改都在
 `on_update()` 所在游戏线程执行。当前目标从唯一属于本地控制器的队伍 Holder 解析；用户点击
-“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数确认，数字键切换队伍高亮目标会取消选择并清空旧请求。
+“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数锁定；只有再次点击按钮才切换编辑目标。
+数字键切换或瞬时解析失败只暂停写入，不自动清空选择，消费请求时仍重新校验当前 GUID。
 扫描结果中的 UObject 指针不会跨帧缓存，也不再依赖帕鲁详情页 Hook。
 
 物品和技能界面显示 `本地化名称 [RawId]`，但游戏调用始终使用 Raw ID；背包修改使用槽位索引。主动技能通过
@@ -102,8 +103,9 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.4)`；打开 `PalworldEditor` 页签后验证物品、
-背包、刷新技能目录不崩溃、主动/被动下拉框可选择且名称跟随游戏语言、装备数值显示为技能标签、数字键高亮
-队伍帕鲁后点击“选择当前帕鲁”、切换目标后编辑失效，以及主动/被动技能写入。场景中有野生帕鲁时，目标仍必须
+游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.5)`；打开 `PalworldEditor` 页签后验证物品、
+背包、启动后自动重试完整技能目录、刷新技能目录不崩溃、主动/被动下拉框可选择且名称跟随游戏语言、
+装备数值显示为技能标签、数字键高亮队伍帕鲁后点击“选择当前帕鲁”、切换目标后保持锁定但暂停写入，
+以及主动/被动技能写入。场景中有野生帕鲁时，目标仍必须
 是下一次按 E 会召唤的队伍帕鲁。反射签名和 UFunction 参数布局来自 Palworld 1.0，游戏更新后可能需要结合本地
 `UHTHeaderDump/` 重新核对并重新生成主动技能定义表。
