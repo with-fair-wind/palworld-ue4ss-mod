@@ -8,6 +8,7 @@
  */
 
 #include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <mutex>
 #include <optional>
@@ -44,17 +45,17 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.4.1");
+        ModVersion = STR("1.4.2");
         ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.1)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.2)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.4.1", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.4.2", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -152,11 +153,42 @@ public:
         }
 
         const auto selectedPal = pal_game::resolve_selected_otomo();
-        const skill_editor::SelectedTargetObservation targetObservation{
-            .target = reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter),
-            .name = selectedPal.characterId,
-        };
-        const bool targetChanged = selectedTarget_.update(targetObservation);
+        const bool targetResolved =
+            selectedPal.status == skill_editor::SelectedTargetResolutionStatus::success &&
+            selectedPal.observation.is_valid() && pal_game::is_valid(selectedPal.parameter);
+        const auto targetObservation =
+            targetResolved ? selectedPal.observation : skill_editor::SelectedTargetObservation{};
+
+        if (!lastResolutionStatus_.has_value() || *lastResolutionStatus_ != selectedPal.status) {
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: selected Pal resolution status={}\n"),
+                static_cast<int32>(selectedPal.status));
+            lastResolutionStatus_ = selectedPal.status;
+        }
+
+        const bool targetInvalidated = selectedTarget_.invalidate_if_changed(targetObservation);
+        std::string lifecycleResult;
+        if (targetInvalidated) {
+            skillQueue_.clear();
+            lifecycleResult = "当前帕鲁已变化，已取消待处理的技能修改。";
+        }
+
+        std::optional<skill_editor::SkillState> refreshedState;
+        bool targetConfirmed = false;
+        if (wantSelectCurrentPal_.exchange(false)) {
+            skillQueue_.clear();
+            if (targetResolved && selectedTarget_.confirm(targetObservation)) {
+                refreshedState = skillGateway_.read_state(
+                    reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter));
+                targetConfirmed = true;
+                lifecycleResult.clear();
+            } else {
+                selectedTarget_.invalidate();
+                const auto reason = skill_editor::resolution_status_message(selectedPal.status);
+                lifecycleResult = "选择失败：";
+                lifecycleResult.append(reason.data(), reason.size());
+            }
+        }
 
         std::optional<skill_editor::SkillEditResult> editResult;
         if (auto request = skillQueue_.try_pop()) {
@@ -165,21 +197,26 @@ public:
                 skillSnapshot_.pending = true;
             }
             editResult = skill_editor::apply_if_target_is_current(
-                *request, selectedTarget_.current(),
-                [this](const skill_editor::SkillEditRequest& currentRequest) {
-                    return skill_editor::execute_skill_edit(skillGateway_, currentRequest);
+                *request, selectedTarget_, targetObservation,
+                targetResolved ? reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter)
+                               : skill_editor::SkillTarget{},
+                [this](const skill_editor::SkillEditRequest& executableRequest) {
+                    return skill_editor::execute_skill_edit(skillGateway_, executableRequest);
                 });
             if (!editResult.has_value()) {
+                selectedTarget_.invalidate();
+                skillQueue_.clear();
                 editResult = skill_editor::SkillEditResult{
                     .status = skill_editor::SkillEditStatus::rejected,
-                    .message = "目标已切换，请在当前待出战帕鲁上重新提交修改。",
+                    .message = "当前帕鲁已变化，请重新点击“选择当前帕鲁”。",
                 };
+            } else {
+                refreshedState = editResult->state;
             }
         }
 
         std::optional<skill_editor::SkillCatalogSnapshot> refreshedCatalog;
-        const bool refreshRequested =
-            selectedTarget_.current().target != 0 && wantRefreshSkillCatalog_.exchange(false);
+        const bool refreshRequested = wantRefreshSkillCatalog_.exchange(false);
         if (refreshRequested) {
             skill_editor::SkillCatalogSnapshot previous;
             {
@@ -190,28 +227,28 @@ public:
                 skill_editor::with_catalog_fallback(previous, skillGateway_.load_catalog());
         }
 
-        std::optional<skill_editor::SkillState> refreshedState;
-        if (selectedTarget_.current().target != 0 &&
-            (targetChanged || refreshRequested || editResult.has_value())) {
-            refreshedState = skillGateway_.read_state(selectedTarget_.current().target);
-        }
-
         {
             const std::lock_guard lock(skillSnapshotMutex_);
-            skillSnapshot_.target = selectedTarget_.current().target;
-            skillSnapshot_.palName = selectedTarget_.current().name;
+            skillSnapshot_.targetGeneration = selectedTarget_.generation();
+            skillSnapshot_.targetSelected = selectedTarget_.is_selected();
+            skillSnapshot_.palName =
+                selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
+            skillSnapshot_.resolutionStatus = selectedPal.status;
             skillSnapshot_.pending = skillQueue_.size() != 0;
-            if (targetChanged) {
+            if (targetInvalidated || !selectedTarget_.is_selected()) {
                 skillSnapshot_.state = {};
-                skillSnapshot_.lastResult.clear();
             }
             if (refreshedCatalog.has_value()) {
                 skillSnapshot_.catalog = std::move(*refreshedCatalog);
             }
             if (refreshedState.has_value()) {
                 skillSnapshot_.state = std::move(*refreshedState);
-            } else if (selectedTarget_.current().target == 0) {
-                skillSnapshot_.state = {};
+            }
+            if (targetConfirmed) {
+                skillSnapshot_.lastResult.clear();
+            }
+            if (!lifecycleResult.empty()) {
+                skillSnapshot_.lastResult = std::move(lifecycleResult);
             }
             if (editResult.has_value()) {
                 skillSnapshot_.lastResult = editResult->message;
@@ -230,12 +267,16 @@ private:
      * @details 此结构按值复制，避免 GUI 在持锁期间执行复杂渲染逻辑。
      */
     struct SkillEditorSnapshot {
-        skill_editor::SkillTarget target{};         /**< 当前非拥有技能目标句柄。 */
-        std::string palName;                        /**< 当前目标的 GUI 展示名称。 */
+        std::uint64_t targetGeneration{};           /**< GUI 提交请求时使用的纯值目标代数。 */
+        std::string palName;                        /**< 当前显式确认目标的 GUI 展示名称。 */
         skill_editor::SkillState state;             /**< 最近一次从游戏重读的实际技能状态。 */
         skill_editor::SkillCatalogSnapshot catalog; /**< 最近一份可用的运行时技能目录。 */
         std::string lastResult;                     /**< 最近一次技能编辑结果的面向用户消息。 */
-        bool pending{}; /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
+        skill_editor::SelectedTargetResolutionStatus resolutionStatus{
+            skill_editor::SelectedTargetResolutionStatus::
+                worldContextUnavailable}; /**< 当前解析状态。 */
+        bool targetSelected{};            /**< 是否存在用户显式确认的技能目标。 */
+        bool pending{};                   /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
     };
 
     /**
@@ -443,7 +484,7 @@ private:
             ImGui::SameLine();
             const auto removeId = "删除##passive-" + std::to_string(index);
             if (ImGui::Button(removeId.c_str())) {
-                self->skillQueue_.push({.target = snapshot.target,
+                self->skillQueue_.push({.targetGeneration = snapshot.targetGeneration,
                                         .kind = skill_editor::SkillKind::passive,
                                         .operation = skill_editor::SkillEditOperation::remove,
                                         .oldPassiveId = id});
@@ -479,7 +520,7 @@ private:
         ImGui::BeginDisabled(!canConfirm);
         if (ImGui::Button("确认被动技能修改")) {
             skill_editor::SkillEditRequest request{
-                .target = snapshot.target,
+                .targetGeneration = snapshot.targetGeneration,
                 .kind = skill_editor::SkillKind::passive,
                 .operation = replacing ? skill_editor::SkillEditOperation::replace
                                        : skill_editor::SkillEditOperation::add,
@@ -534,7 +575,7 @@ private:
                 ImGui::SameLine();
                 const auto clearId = "清空##active-" + std::to_string(slot);
                 if (ImGui::Button(clearId.c_str())) {
-                    self->skillQueue_.push({.target = snapshot.target,
+                    self->skillQueue_.push({.targetGeneration = snapshot.targetGeneration,
                                             .kind = skill_editor::SkillKind::active,
                                             .operation = skill_editor::SkillEditOperation::remove,
                                             .activeSlot = slot});
@@ -571,7 +612,7 @@ private:
         ImGui::BeginDisabled(!canConfirm);
         if (ImGui::Button("确认主动技能修改")) {
             self->skillQueue_.push(
-                {.target = snapshot.target,
+                {.targetGeneration = snapshot.targetGeneration,
                  .kind = skill_editor::SkillKind::active,
                  .operation = replacing ? skill_editor::SkillEditOperation::replace
                                         : skill_editor::SkillEditOperation::add,
@@ -593,8 +634,8 @@ private:
     /**
      * @brief 渲染当前待出战帕鲁、技能目录状态和主动/被动技能编辑区域。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
-     * @details 目标来自游戏线程每帧解析的 Q/E 当前选择。渲染前复制 skillSnapshot_，
-     *          目标变化时重置临时 UI 状态。
+     * @details 每帧解析只检测 Q/E 目标变化；用户点击“选择当前帕鲁”后才显示编辑区。
+     *          GUI 请求只携带目标代数，不传递 Unreal 对象地址。
      * @warning 只在 GUI 线程调用。
      */
     static void render_pal_editor(PalworldEditorMod* self) {
@@ -607,24 +648,35 @@ private:
             const std::lock_guard lock(self->skillSnapshotMutex_);
             snapshot = self->skillSnapshot_;
         }
-        if (self->skillUiTarget_ != snapshot.target) {
-            self->skillUiTarget_ = snapshot.target;
+        if (self->skillUiGeneration_ != snapshot.targetGeneration) {
+            self->skillUiGeneration_ = snapshot.targetGeneration;
             reset_skill_editor_ui(self);
         }
 
-        if (snapshot.target != 0) {
-            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
-                               snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
-        } else {
-            ImGui::TextDisabled("尚未解析到待出战帕鲁；请确认队伍中有帕鲁，并使用 Q/E 选择。");
-        }
         const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
+        ImGui::BeginDisabled(pending);
+        if (ImGui::Button("选择当前帕鲁")) {
+            self->wantSelectCurrentPal_.store(true);
+        }
+        ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(pending || snapshot.target == 0);
+        ImGui::BeginDisabled(pending);
         if (ImGui::Button("刷新技能列表")) {
             self->wantRefreshSkillCatalog_.store(true);
         }
         ImGui::EndDisabled();
+
+        if (snapshot.targetSelected) {
+            ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前待出战帕鲁：%s",
+                               snapshot.palName.empty() ? "(读取中...)" : snapshot.palName.c_str());
+        } else {
+            ImGui::TextDisabled("请在游戏中用 Q/E 选择帕鲁，然后点击“选择当前帕鲁”。");
+        }
+        if (snapshot.resolutionStatus != skill_editor::SelectedTargetResolutionStatus::success) {
+            const auto message = skill_editor::resolution_status_message(snapshot.resolutionStatus);
+            ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "解析状态：%.*s",
+                               static_cast<int>(message.size()), message.data());
+        }
         if (pending) {
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "技能修改处理中...");
         }
@@ -637,7 +689,7 @@ private:
         }
         ImGui::Separator();
 
-        if (snapshot.target == 0) {
+        if (!snapshot.targetSelected) {
             return;
         }
 
@@ -695,14 +747,18 @@ private:
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
-    /** @brief 游戏线程每帧更新的当前 Q/E 待出战帕鲁目标状态。 */
+    /** @brief 游戏线程保存的、由用户显式确认的当前 Q/E 帕鲁纯值目标状态。 */
     skill_editor::SelectedTargetState selectedTarget_;
+    /** @brief 最近一次输出日志的目标解析状态；仅由游戏线程访问。 */
+    std::optional<skill_editor::SelectedTargetResolutionStatus> lastResolutionStatus_;
     /** @brief GUI 生产、游戏线程 FIFO 消费的线程安全技能编辑请求队列。 */
     skill_editor::SkillEditQueue skillQueue_;
     /** @brief 保护游戏线程发布、GUI 线程复制的 skillSnapshot_。 */
     std::mutex skillSnapshotMutex_;
     /** @brief 最近一次发布给 GUI 的完整技能编辑快照；由 skillSnapshotMutex_ 保护。 */
     SkillEditorSnapshot skillSnapshot_;
+    /** @brief 请求游戏线程显式确认当前 Q/E 帕鲁为技能编辑目标。 */
+    std::atomic<bool> wantSelectCurrentPal_{false};
     /** @brief 请求游戏线程重新加载运行时技能目录；初始值触发首次加载。 */
     std::atomic<bool> wantRefreshSkillCatalog_{true};
     /** @brief 被动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */
@@ -720,8 +776,8 @@ private:
     std::optional<skill_editor::SkillOption> passiveChoice_;
     /** @brief 主动技能下拉框当前选择的目录值；只由 GUI 线程访问。 */
     std::optional<skill_editor::SkillOption> activeChoice_;
-    /** @brief GUI 上一次渲染的技能目标；变化时用于触发临时编辑状态重置。 */
-    skill_editor::SkillTarget skillUiTarget_{};
+    /** @brief GUI 上一次渲染的目标代数；变化时重置临时编辑状态。 */
+    std::uint64_t skillUiGeneration_{};
 };
 
 /** @brief 把 UE4SS 所需入口符号导出到 Windows DLL。 */

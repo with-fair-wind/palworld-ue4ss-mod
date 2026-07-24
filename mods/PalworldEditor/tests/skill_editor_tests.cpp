@@ -1,4 +1,6 @@
 #include <algorithm>
+#include <array>
+#include <cstdint>
 #include <deque>
 #include <iostream>
 #include <span>
@@ -341,8 +343,6 @@ void test_skill_edit_queue_is_fifo() {
     queue.push({.target = 3});
 
     CHECK(queue.size() == 3);
-    CHECK(queue.contains_target(2));
-    CHECK(!queue.contains_target(9));
 
     const auto first = queue.try_pop();
     const auto second = queue.try_pop();
@@ -354,66 +354,99 @@ void test_skill_edit_queue_is_fifo() {
     CHECK(queue.size() == 0);
 }
 
-void test_selected_target_state_tracks_identity_changes() {
+void test_skill_edit_queue_can_discard_all_pending_requests() {
+    skill_editor::SkillEditQueue queue;
+    queue.push({.targetGeneration = 1});
+    queue.push({.targetGeneration = 1});
+    queue.push({.targetGeneration = 1});
+
+    CHECK(queue.clear() == 3);
+    CHECK(queue.size() == 0);
+    CHECK(!queue.try_pop().has_value());
+}
+
+auto identity(const std::uint32_t value) -> skill_editor::TargetIdentity {
+    return {.instanceId = {value, value + 1, value + 2, value + 3}};
+}
+
+void test_target_requires_explicit_confirmation() {
     skill_editor::SelectedTargetState state;
+    const skill_editor::SelectedTargetObservation observed{
+        .identity = identity(10),
+        .name = "Boar",
+    };
 
-    CHECK(!state.update({}));
-    CHECK(state.update({.target = 0x1000, .name = "Boar"}));
-    CHECK(state.current().target == 0x1000);
+    CHECK(!state.is_selected());
+    CHECK(!state.invalidate_if_changed(observed));
+    CHECK(!state.is_selected());
+
+    CHECK(state.confirm(observed));
+    CHECK(state.is_selected());
+    CHECK(state.current().identity == observed.identity);
     CHECK(state.current().name == "Boar");
-
-    CHECK(!state.update({.target = 0x1000, .name = "Wild Boar"}));
-    CHECK(state.current().name == "Wild Boar");
-
-    CHECK(state.update({.target = 0x2000, .name = "Chicken"}));
-    CHECK(state.update({}));
-    CHECK(state.current().target == 0);
+    CHECK(state.generation() == 1);
 }
 
-void test_edit_request_must_still_target_current_selection() {
-    const skill_editor::SelectedTargetObservation current{
-        .target = 0x2000,
-        .name = "Chicken",
-    };
-    const skill_editor::SkillEditRequest currentRequest{
-        .target = 0x2000,
-    };
-    const skill_editor::SkillEditRequest staleRequest{
-        .target = 0x1000,
-    };
+void test_qe_change_invalidates_even_for_same_character_id() {
+    skill_editor::SelectedTargetState state;
+    CHECK(state.confirm({.identity = identity(10), .name = "Boar"}));
+    const auto selectedGeneration = state.generation();
 
-    CHECK(skill_editor::request_targets_current(currentRequest, current));
-    CHECK(!skill_editor::request_targets_current(staleRequest, current));
-    CHECK(!skill_editor::request_targets_current({}, current));
-    CHECK(!skill_editor::request_targets_current(currentRequest, {}));
+    CHECK(state.invalidate_if_changed({.identity = identity(20), .name = "Boar"}));
+    CHECK(!state.is_selected());
+    CHECK(state.generation() == selectedGeneration + 1);
+    CHECK(!state.current().is_valid());
 }
 
-void test_stale_request_never_reaches_apply_callback() {
-    const skill_editor::SelectedTargetObservation current{
-        .target = 0x2000,
-        .name = "Chicken",
+void test_resolution_status_has_actionable_message() {
+    CHECK(skill_editor::resolution_status_message(
+              skill_editor::SelectedTargetResolutionStatus::worldContextUnavailable) ==
+          "未找到本地 PlayerController");
+    CHECK(skill_editor::resolution_status_message(
+              skill_editor::SelectedTargetResolutionStatus::holderUnavailable) ==
+          "未取得当前玩家的 Otomo Holder");
+    CHECK(skill_editor::resolution_status_message(
+              skill_editor::SelectedTargetResolutionStatus::success)
+              .empty());
+}
+
+void test_first_valid_local_candidate_is_selected() {
+    const std::array candidates{1, 2, 3, 4};
+    const auto selected = skill_editor::find_local_candidate(
+        candidates, [](const int value) { return value != 1; },
+        [](const int value) { return value == 3 || value == 4; });
+    CHECK(selected.has_value());
+    CHECK(*selected == 3);
+}
+
+void test_stale_generation_never_reaches_apply_callback() {
+    skill_editor::SelectedTargetState state;
+    const skill_editor::SelectedTargetObservation observed{
+        .identity = identity(10),
+        .name = "Boar",
     };
+    CHECK(state.confirm(observed));
+
     int applyCalls = 0;
-    const auto apply = [&applyCalls](const skill_editor::SkillEditRequest&) {
+    skill_editor::SkillTarget appliedTarget = 0;
+    const auto apply = [&applyCalls,
+                        &appliedTarget](const skill_editor::SkillEditRequest& request) {
         ++applyCalls;
+        appliedTarget = request.target;
         return skill_editor::SkillEditResult{
             .status = skill_editor::SkillEditStatus::succeeded,
         };
     };
 
-    const auto accepted =
-        skill_editor::apply_if_target_is_current({.target = 0x2000}, current, apply);
+    const auto accepted = skill_editor::apply_if_target_is_current(
+        {.targetGeneration = state.generation()}, state, observed, 0x2000, apply);
     CHECK(accepted.has_value());
     CHECK(applyCalls == 1);
+    CHECK(appliedTarget == 0x2000);
 
-    const auto stale = skill_editor::apply_if_target_is_current({.target = 0x1000}, current, apply);
+    const auto stale = skill_editor::apply_if_target_is_current(
+        {.targetGeneration = state.generation() + 1}, state, observed, 0x2000, apply);
     CHECK(!stale.has_value());
-    CHECK(applyCalls == 1);
-
-    const auto emptyRequest = skill_editor::apply_if_target_is_current({}, current, apply);
-    CHECK(!emptyRequest.has_value());
-    const auto noCurrent = skill_editor::apply_if_target_is_current({.target = 0x2000}, {}, apply);
-    CHECK(!noCurrent.has_value());
     CHECK(applyCalls == 1);
 }
 
@@ -430,8 +463,11 @@ auto main() -> int {
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();
     test_skill_edit_queue_is_fifo();
-    test_selected_target_state_tracks_identity_changes();
-    test_edit_request_must_still_target_current_selection();
-    test_stale_request_never_reaches_apply_callback();
+    test_skill_edit_queue_can_discard_all_pending_requests();
+    test_target_requires_explicit_confirmation();
+    test_qe_change_invalidates_even_for_same_character_id();
+    test_resolution_status_has_actionable_message();
+    test_first_valid_local_candidate_is_selected();
+    test_stale_generation_never_reaches_apply_callback();
     return failures == 0 ? 0 : 1;
 }

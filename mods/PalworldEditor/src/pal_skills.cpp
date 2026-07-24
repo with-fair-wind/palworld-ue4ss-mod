@@ -288,7 +288,7 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     skill_editor::SkillCatalogSnapshot catalog;
     auto* const worldContext = pal_game::get_world_context();
     if (worldContext == nullptr) {
-        catalog.error = "PalPlayerInventoryData world context is unavailable";
+        catalog.error = "Local PlayerController world context is unavailable";
         return catalog;
     }
     auto* utility = ui_utility();
