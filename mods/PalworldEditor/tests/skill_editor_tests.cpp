@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <items/item_catalog.hpp>
+#include <skills/selected_target_state.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
 
@@ -353,6 +354,69 @@ void test_skill_edit_queue_is_fifo() {
     CHECK(queue.size() == 0);
 }
 
+void test_selected_target_state_tracks_identity_changes() {
+    skill_editor::SelectedTargetState state;
+
+    CHECK(!state.update({}));
+    CHECK(state.update({.target = 0x1000, .name = "Boar"}));
+    CHECK(state.current().target == 0x1000);
+    CHECK(state.current().name == "Boar");
+
+    CHECK(!state.update({.target = 0x1000, .name = "Wild Boar"}));
+    CHECK(state.current().name == "Wild Boar");
+
+    CHECK(state.update({.target = 0x2000, .name = "Chicken"}));
+    CHECK(state.update({}));
+    CHECK(state.current().target == 0);
+}
+
+void test_edit_request_must_still_target_current_selection() {
+    const skill_editor::SelectedTargetObservation current{
+        .target = 0x2000,
+        .name = "Chicken",
+    };
+    const skill_editor::SkillEditRequest currentRequest{
+        .target = 0x2000,
+    };
+    const skill_editor::SkillEditRequest staleRequest{
+        .target = 0x1000,
+    };
+
+    CHECK(skill_editor::request_targets_current(currentRequest, current));
+    CHECK(!skill_editor::request_targets_current(staleRequest, current));
+    CHECK(!skill_editor::request_targets_current({}, current));
+    CHECK(!skill_editor::request_targets_current(currentRequest, {}));
+}
+
+void test_stale_request_never_reaches_apply_callback() {
+    const skill_editor::SelectedTargetObservation current{
+        .target = 0x2000,
+        .name = "Chicken",
+    };
+    int applyCalls = 0;
+    const auto apply = [&applyCalls](const skill_editor::SkillEditRequest&) {
+        ++applyCalls;
+        return skill_editor::SkillEditResult{
+            .status = skill_editor::SkillEditStatus::succeeded,
+        };
+    };
+
+    const auto accepted =
+        skill_editor::apply_if_target_is_current({.target = 0x2000}, current, apply);
+    CHECK(accepted.has_value());
+    CHECK(applyCalls == 1);
+
+    const auto stale = skill_editor::apply_if_target_is_current({.target = 0x1000}, current, apply);
+    CHECK(!stale.has_value());
+    CHECK(applyCalls == 1);
+
+    const auto emptyRequest = skill_editor::apply_if_target_is_current({}, current, apply);
+    CHECK(!emptyRequest.has_value());
+    const auto noCurrent = skill_editor::apply_if_target_is_current({.target = 0x2000}, {}, apply);
+    CHECK(!noCurrent.has_value());
+    CHECK(applyCalls == 1);
+}
+
 auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
@@ -366,5 +430,8 @@ auto main() -> int {
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();
     test_skill_edit_queue_is_fifo();
+    test_selected_target_state_tracks_identity_changes();
+    test_edit_request_must_still_target_current_selection();
+    test_stale_request_never_reaches_apply_callback();
     return failures == 0 ? 0 : 1;
 }
