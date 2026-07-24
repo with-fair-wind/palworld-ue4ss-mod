@@ -7,9 +7,11 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <map>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
@@ -44,32 +46,125 @@ inline auto is_valid(UObject* obj) -> bool {
     return obj != nullptr && obj->GetClassPrivate() != nullptr;
 }
 
+/** @brief 本地玩家队伍 Holder 的运行时解析结果与诊断信息。 */
+struct LocalOtomoHolderResolution {
+    UObject* holder{}; /**< 唯一的本地玩家 Holder；解析失败时为空。 */
+    skill_editor::SelectedTargetResolutionStatus status{
+        skill_editor::SelectedTargetResolutionStatus::holderCandidatesUnavailable};
+    std::size_t candidateCount{};      /**< 有效 Holder 候选数量。 */
+    std::size_t localCandidateCount{}; /**< 由本地控制器拥有的 Holder 数量。 */
+    std::wstring candidateClasses;     /**< 用于状态变化日志的候选实际类名。 */
+};
+
 /**
- * @brief 获取可安全作为 Pal 蓝图工具函数世界上下文的本地玩家控制器。
- * @return 找到时返回本地 `PlayerController` 的非拥有观察指针。
- * @retval nullptr 本地控制器或 `IsLocalPlayerController` 反射函数不可用。
+ * @brief 从对象实际类链调用一个无参数、返回 UObject 派生指针的函数。
+ * @param[in] object 非拥有调用目标。
+ * @param[in] functionName 要从实际类开始查找的函数名。
+ * @return 有效返回对象；目标、函数或返回值不可用时返回 nullptr。
+ */
+[[nodiscard]] inline auto invoke_object_return(UObject* object, const TCHAR* functionName)
+    -> UObject* {
+    if (!is_valid(object)) {
+        return nullptr;
+    }
+    auto* const function = object->GetFunctionByNameInChain(functionName);
+    if (function == nullptr) {
+        return nullptr;
+    }
+    struct Params {
+        UObject* ReturnValue{};
+    } params;
+    object->ProcessEvent(function, &params);
+    return is_valid(params.ReturnValue) ? params.ReturnValue : nullptr;
+}
+
+/**
+ * @brief 从对象实际类链调用一个无参数、返回 bool 的函数。
+ * @param[in] object 非拥有调用目标。
+ * @param[in] functionName 要从实际类开始查找的函数名。
+ * @return 函数返回值；目标或函数不可用时返回 false。
+ */
+[[nodiscard]] inline auto invoke_bool_return(UObject* object, const TCHAR* functionName) -> bool {
+    if (!is_valid(object)) {
+        return false;
+    }
+    auto* const function = object->GetFunctionByNameInChain(functionName);
+    if (function == nullptr) {
+        return false;
+    }
+    struct Params {
+        bool ReturnValue{};
+    } params;
+    object->ProcessEvent(function, &params);
+    return params.ReturnValue;
+}
+
+/**
+ * @brief 从所有 Otomo Holder 中解析唯一属于本地玩家队伍的实例。
+ * @return Holder 观察指针、分阶段状态和候选诊断；不会选择第一个候选作为回退。
+ * @warning 只能在游戏线程调用，返回的 Holder 不能跨帧缓存。
+ */
+[[nodiscard]] inline auto resolve_local_otomo_holder() -> LocalOtomoHolderResolution {
+    std::vector<UObject*> holders;
+    UObjectGlobals::FindAllOf(STR("PalOtomoHolderComponentBase"), holders);
+
+    std::wstring candidateClasses;
+    for (auto* const holder : holders) {
+        if (!is_valid(holder)) {
+            continue;
+        }
+        if (!candidateClasses.empty()) {
+            candidateClasses.append(STR(", "));
+        }
+        candidateClasses.append(holder->GetClassPrivate()->GetName());
+    }
+
+    const auto selection = skill_editor::find_unique_local_candidate(
+        holders, [](UObject* holder) { return is_valid(holder); },
+        [](UObject* holder) {
+            return invoke_object_return(holder, STR("TryGetOwnerControlledPawn"));
+        },
+        [](UObject* pawn) { return invoke_object_return(pawn, STR("GetController")); },
+        [](UObject* controller) {
+            return invoke_bool_return(controller, STR("IsLocalPlayerController"));
+        });
+
+    using SelectionStatus = skill_editor::LocalCandidateSelectionStatus;
+    using ResolutionStatus = skill_editor::SelectedTargetResolutionStatus;
+    const auto status = [&] {
+        switch (selection.status) {
+            case SelectionStatus::success:
+                return ResolutionStatus::success;
+            case SelectionStatus::noCandidates:
+                return ResolutionStatus::holderCandidatesUnavailable;
+            case SelectionStatus::ownerPawnUnavailable:
+                return ResolutionStatus::holderOwnerPawnUnavailable;
+            case SelectionStatus::ownerControllerUnavailable:
+                return ResolutionStatus::holderOwnerControllerUnavailable;
+            case SelectionStatus::localCandidateUnavailable:
+                return ResolutionStatus::localHolderUnavailable;
+            case SelectionStatus::ambiguousLocalCandidates:
+                return ResolutionStatus::localHolderAmbiguous;
+        }
+        return ResolutionStatus::localHolderUnavailable;
+    }();
+
+    return {
+        .holder = selection.candidate.value_or(nullptr),
+        .status = status,
+        .candidateCount = selection.candidateCount,
+        .localCandidateCount = selection.localCandidateCount,
+        .candidateClasses = std::move(candidateClasses),
+    };
+}
+
+/**
+ * @brief 获取可作为 Pal 蓝图工具函数世界上下文的本地玩家队伍 Holder。
+ * @return 唯一本地 Holder 的非拥有观察指针；解析失败时返回 nullptr。
  * @warning 只能在游戏线程调用，返回值不能跨帧缓存。
  */
 [[nodiscard]] inline auto get_world_context() -> UObject* {
-    auto* const isLocalFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Engine.Controller:IsLocalPlayerController"));
-    if (isLocalFunction == nullptr) {
-        return nullptr;
-    }
-
-    std::vector<UObject*> controllers;
-    UObjectGlobals::FindAllOf(STR("PlayerController"), controllers);
-    const auto selected = skill_editor::find_local_candidate(
-        controllers, [](UObject* candidate) { return is_valid(candidate); },
-        [isLocalFunction](UObject* candidate) {
-            /** @brief `Controller:IsLocalPlayerController` 的反射返回布局。 */
-            struct Params {
-                bool ReturnValue{}; /**< 游戏写回的本地控制器判定。 */
-            } params;
-            candidate->ProcessEvent(isLocalFunction, &params);
-            return params.ReturnValue;
-        });
-    return selected.value_or(nullptr);
+    return resolve_local_otomo_holder().holder;
 }
 
 /**
@@ -84,50 +179,47 @@ struct SelectedPalTarget {
 
     /** @brief 当前反射解析链的终止状态。 */
     skill_editor::SelectedTargetResolutionStatus status{
-        skill_editor::SelectedTargetResolutionStatus::worldContextUnavailable};
+        skill_editor::SelectedTargetResolutionStatus::holderCandidatesUnavailable};
+
+    /** @brief 当前帧发现的有效 Holder 候选数量。 */
+    std::size_t holderCandidateCount{};
+
+    /** @brief 当前帧发现的本地玩家 Holder 候选数量。 */
+    std::size_t localHolderCandidateCount{};
+
+    /** @brief 当前帧 Holder 候选的实际类名，用于状态变化日志。 */
+    std::wstring holderCandidateClasses;
 };
 
 /**
- * @brief 解析 Q/E 当前选中的下一只待出战帕鲁。
+ * @brief 解析数字键当前高亮、下一次按 E 召唤的队伍帕鲁。
  * @return 当前帧参数对象、纯值个体身份和分步解析状态。
- * @details 从本地 `PlayerController` 世界上下文开始，依次取得 Otomo holder、当前选中槽位、
- *          个体 handle、个体 parameter、`FPalInstanceID.InstanceId` 和 CharacterID。
+ * @details 从唯一的本地玩家 Otomo Holder 开始，依次取得当前高亮槽位、个体 handle、
+ *          个体 parameter、`FPalInstanceID.InstanceId` 和 CharacterID。
  * @warning 只能在游戏线程调用；返回的参数对象只允许在当前帧使用。
  */
 [[nodiscard]] inline auto resolve_selected_otomo() -> SelectedPalTarget {
     using enum skill_editor::SelectedTargetResolutionStatus;
-    auto* const worldContext = get_world_context();
-    if (worldContext == nullptr) {
-        return {.status = worldContextUnavailable};
-    }
+    auto holderResolution = resolve_local_otomo_holder();
+    const auto failure =
+        [&holderResolution](const skill_editor::SelectedTargetResolutionStatus status) {
+            return SelectedPalTarget{
+                .status = status,
+                .holderCandidateCount = holderResolution.candidateCount,
+                .localHolderCandidateCount = holderResolution.localCandidateCount,
+                .holderCandidateClasses = std::move(holderResolution.candidateClasses),
+            };
+        };
 
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
-    if (utility == nullptr) {
-        return {.status = palUtilityUnavailable};
-    }
-
-    auto* const getHolderFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalUtility:GetOtomoHolderComponent"));
-    if (getHolderFunction == nullptr) {
-        return {.status = getHolderFunctionUnavailable};
-    }
-
-    /** @brief `PalUtility:GetOtomoHolderComponent` 的反射参数布局。 */
-    struct GetHolderParams {
-        UObject* WorldContextObject{}; /**< 非拥有世界上下文对象。 */
-        UObject* ReturnValue{};        /**< 游戏写回的非拥有 holder 对象。 */
-    } getHolderParams{.WorldContextObject = worldContext};
-    utility->ProcessEvent(getHolderFunction, &getHolderParams);
-    auto* const holder = getHolderParams.ReturnValue;
+    auto* const holder = holderResolution.holder;
     if (!is_valid(holder)) {
-        return {.status = holderUnavailable};
+        return failure(holderResolution.status);
     }
 
-    auto* const getSelectedFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetSelectedOtomoID"));
+    auto* const getSelectedFunction =
+        holder->GetFunctionByNameInChain(STR("GetSelectedOtomoID"));
     if (getSelectedFunction == nullptr) {
-        return {.status = getSelectedFunctionUnavailable};
+        return failure(getSelectedFunctionUnavailable);
     }
     /** @brief `PalOtomoHolderComponentBase:GetSelectedOtomoID` 的返回参数布局。 */
     struct GetSelectedParams {
@@ -135,13 +227,13 @@ struct SelectedPalTarget {
     } getSelectedParams;
     holder->ProcessEvent(getSelectedFunction, &getSelectedParams);
     if (getSelectedParams.ReturnValue < 0) {
-        return {.status = selectedSlotUnavailable};
+        return failure(selectedSlotUnavailable);
     }
 
     auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
     if (getHandleFunction == nullptr) {
-        return {.status = getHandleFunctionUnavailable};
+        return failure(getHandleFunctionUnavailable);
     }
     /** @brief `PalOtomoHolderComponentBase:GetOtomoIndividualHandle` 的反射参数布局。 */
     struct GetHandleParams {
@@ -151,14 +243,14 @@ struct SelectedPalTarget {
     holder->ProcessEvent(getHandleFunction, &getHandleParams);
     auto* const handle = getHandleParams.ReturnValue;
     if (!is_valid(handle)) {
-        return {.status = handleUnavailable};
+        return failure(handleUnavailable);
     }
 
     auto* const getParameterFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr,
         STR("/Script/Pal.PalIndividualCharacterHandle:TryGetIndividualParameter"));
     if (getParameterFunction == nullptr) {
-        return {.status = getParameterFunctionUnavailable};
+        return failure(getParameterFunctionUnavailable);
     }
     /** @brief `PalIndividualCharacterHandle:TryGetIndividualParameter` 的返回参数布局。 */
     struct GetParameterParams {
@@ -167,19 +259,19 @@ struct SelectedPalTarget {
     handle->ProcessEvent(getParameterFunction, &getParameterParams);
     auto* const parameter = getParameterParams.ReturnValue;
     if (!is_valid(parameter)) {
-        return {.status = parameterUnavailable};
+        return failure(parameterUnavailable);
     }
 
     auto* const expectedClass = UObjectGlobals::StaticFindObject<UClass*>(
         nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter"));
     if (expectedClass == nullptr || !parameter->GetClassPrivate()->IsChildOf(expectedClass)) {
-        return {.status = parameterClassUnavailable};
+        return failure(parameterClassUnavailable);
     }
 
     auto* const getPalIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetPalId"));
     if (getPalIdFunction == nullptr) {
-        return {.status = getPalIdFunctionUnavailable};
+        return failure(getPalIdFunctionUnavailable);
     }
     /** @brief 与 Palworld `FPalInstanceID` 的 UHT 字段顺序一致的返回值布局。 */
     struct PalInstanceId {
@@ -194,13 +286,13 @@ struct SelectedPalTarget {
     parameter->ProcessEvent(getPalIdFunction, &getPalIdParams);
     const auto& instanceId = getPalIdParams.ReturnValue.InstanceId;
     if (!instanceId.is_valid()) {
-        return {.status = individualIdUnavailable};
+        return failure(individualIdUnavailable);
     }
 
     auto* const getCharacterIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetCharacterID"));
     if (getCharacterIdFunction == nullptr) {
-        return {.status = getCharacterIdFunctionUnavailable};
+        return failure(getCharacterIdFunctionUnavailable);
     }
     /** @brief `PalIndividualCharacterParameter:GetCharacterID` 的返回参数布局。 */
     struct GetCharacterIdParams {
@@ -219,6 +311,9 @@ struct SelectedPalTarget {
                 .name = text_encoding::to_utf8(getCharacterIdParams.ReturnValue.ToString()),
             },
         .status = success,
+        .holderCandidateCount = holderResolution.candidateCount,
+        .localHolderCandidateCount = holderResolution.localCandidateCount,
+        .holderCandidateClasses = std::move(holderResolution.candidateClasses),
     };
 }
 
