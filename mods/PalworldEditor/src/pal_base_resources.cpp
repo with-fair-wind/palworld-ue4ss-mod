@@ -267,6 +267,9 @@ public:
     };
 
     auto set_enabled(const bool enabled) -> void {
+        if (runtime_.enabled() == enabled) {
+            return;
+        }
         bool restored = true;
         if (!enabled && unionActive_) {
             restored = restore_union();
@@ -285,7 +288,10 @@ public:
                 disable_operation(ResourceOperation::crafting, std::string{error});
                 disable_operation(ResourceOperation::building, std::string{error});
             }
+            unregister_resource_hooks();
         }
+        previewCacheGate_.invalidate();
+        snapshotDirty_.mark();
         publish_snapshot();
     }
 
@@ -302,19 +308,22 @@ public:
         buildWindow_.reset();
         synchronousOwner_ = nullptr;
         synchronousDepth_ = 0;
+        unregister_resource_hooks();
         worldDisabledErrors_ = {};
         restorationFailed_ = false;
         runtime_.begin_world_transition(generation);
         baseCount_ = 0;
         containerCount_ = 0;
-        discoveryElapsed_ = 0.0F;
+        previewCacheGate_.invalidate();
+        snapshotDirty_.mark();
         publish_snapshot();
     }
 
     auto on_world_ready(const std::uint64_t generation) -> void {
         runtime_.finish_world_transition(generation);
         publish_capabilities();
-        discoveryElapsed_ = 2.0F;
+        previewCacheGate_.invalidate();
+        snapshotDirty_.mark();
         publish_snapshot();
     }
 
@@ -326,34 +335,21 @@ public:
                 disable_operation(ResourceOperation::building,
                                   "建造资源联合恢复验证失败；本世界已禁用建造共享。");
             }
-        }
-
-        if (runtime_.enabled() && runtime_.accessible() && !unionActive_) {
-            discoveryElapsed_ += std::max(deltaSeconds, 0.0F);
-            if (discoveryElapsed_ >= 2.0F) {
-                discoveryElapsed_ = 0.0F;
-                FGuid guild{};
-                Discovery discovery;
-                auto* worldContext = UObjectGlobals::FindFirstOf(STR("PalPlayerInventoryData"));
-                if (worldContext != nullptr && try_resolve_local_guild(worldContext, guild) &&
-                    discover_guild(to_key(guild), discovery)) {
-                    baseCount_ = discovery.plan.baseCount;
-                    containerCount_ = discovery.plan.ordered.size();
-                    runtimeError_.clear();
-                } else {
-                    baseCount_ = 0;
-                    containerCount_ = 0;
-                    runtimeError_ = discovery.error.empty()
-                                        ? "当前世界尚无法完整解析同公会据点资源容器。"
-                                        : discovery.error;
-                }
-            }
+            snapshotDirty_.mark();
         }
         publish_snapshot();
     }
 
     auto ensure_hooks_registered() -> void {
-        if (!runtime_.accessible()) {
+        if (!resource_hooks_required(runtime_.enabled(), runtime_.accessible())) {
+            if (!hooks_.empty()) {
+                unregister_resource_hooks();
+                publish_snapshot();
+            }
+            return;
+        }
+        if (hooks_.size() == palworld_1_0_1_hook_manifest().size() &&
+            capabilitiesGeneration_ == runtime_.generation()) {
             return;
         }
 
@@ -361,6 +357,7 @@ public:
         if (now < nextHookAttempt_) {
             if (capabilitiesGeneration_ != runtime_.generation()) {
                 publish_capabilities();
+                publish_snapshot();
             }
             return;
         }
@@ -392,10 +389,25 @@ public:
         }
         rebuild_resolutions();
         publish_capabilities();
+        snapshotDirty_.mark();
         publish_snapshot();
     }
 
     auto shutdown_hooks() -> void {
+        unregister_resource_hooks();
+        runtime_.begin_world_transition(runtime_.generation() + 1);
+        previewCacheGate_.invalidate();
+        snapshotDirty_.mark();
+        publish_snapshot();
+    }
+
+    [[nodiscard]] auto snapshot() const -> BaseResourceSharingSnapshot {
+        const std::lock_guard lock(snapshotMutex_);
+        return snapshot_;
+    }
+
+private:
+    auto unregister_resource_hooks() -> void {
         if (unionActive_) {
             static_cast<void>(restore_union());
         }
@@ -406,16 +418,17 @@ public:
         }
         hooks_.clear();
         resolutions_ = all_hook_resolutions(false);
-        runtime_.begin_world_transition(runtime_.generation() + 1);
-        publish_snapshot();
+        capabilitiesGeneration_ = 0;
+        nextHookAttempt_ = {};
+        requestGuard_.reset();
+        buildWindow_.reset();
+        synchronousOwner_ = nullptr;
+        synchronousDepth_ = 0;
+        previewCacheGate_.invalidate();
+        publish_capabilities();
+        snapshotDirty_.mark();
     }
 
-    [[nodiscard]] auto snapshot() const -> BaseResourceSharingSnapshot {
-        const std::lock_guard lock(snapshotMutex_);
-        return snapshot_;
-    }
-
-private:
     [[nodiscard]] auto discover_guild(const GuidKey& guildId, Discovery& output) -> bool {
         output = {};
         output.guildId = guildId;
@@ -634,6 +647,7 @@ private:
 
         baseCount_ = discovery.plan.baseCount;
         containerCount_ = discovery.plan.ordered.size();
+        snapshotDirty_.mark();
         Output::send<LogLevel::Verbose>(STR("PalworldEditor: base resource union opened, bases={}, "
                                             "containers={}, patches={}\n"),
                                         baseCount_, containerCount_, patches_.size());
@@ -722,6 +736,7 @@ private:
                 disable_operation(spec.operation,
                                   "资源联合准备失败且未能验证完整恢复；本世界已禁用该类共享。");
             }
+            snapshotDirty_.mark();
             requestGuard_.leave(spec.operation, runtime_.generation());
             publish_snapshot();
             return;
@@ -755,7 +770,8 @@ private:
         if (!restored) {
             disable_operation(operation, "同步资源联合恢复验证失败；本世界已禁用该类共享。");
         }
-        discoveryElapsed_ = 2.0F;
+        previewCacheGate_.invalidate();
+        snapshotDirty_.mark();
         publish_snapshot();
     }
 
@@ -781,6 +797,7 @@ private:
             runtime_.set_capability(static_cast<ResourceOperation>(index), capabilities[index]);
         }
         capabilitiesGeneration_ = runtime_.generation();
+        snapshotDirty_.mark();
     }
 
     auto disable_operation(const ResourceOperation operation, std::string error) -> void {
@@ -788,9 +805,13 @@ private:
         runtime_.set_capability(
             operation, CapabilityState{.error = worldDisabledErrors_[operation_index(operation)]});
         runtimeError_ = runtime_.capability(operation).error;
+        snapshotDirty_.mark();
     }
 
     auto publish_snapshot() -> void {
+        if (!snapshotDirty_.consume()) {
+            return;
+        }
         BaseResourceSharingSnapshot next;
         next.enabled = runtime_.enabled();
         next.worldAccessible = runtime_.accessible();
@@ -840,9 +861,10 @@ private:
     std::uint64_t capabilitiesGeneration_{};
     std::size_t baseCount_{};
     std::size_t containerCount_{};
-    float discoveryElapsed_{2.0F};
     std::string runtimeError_;
     std::chrono::steady_clock::time_point nextHookAttempt_{};
+    PreviewCacheGate previewCacheGate_;
+    SnapshotDirtyFlag snapshotDirty_;
     mutable std::mutex snapshotMutex_;
     BaseResourceSharingSnapshot snapshot_;
 };

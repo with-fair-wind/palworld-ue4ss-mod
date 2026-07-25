@@ -285,6 +285,15 @@ void test_preview_amounts_merge_duplicates_and_preserve_vanilla() {
     CHECK(!aggregate_amounts(invalid).error.empty());
 }
 
+void test_hook_manifest_contains_only_top_level_preview_and_consume_paths() {
+    using namespace base_resource_sharing;
+
+    const auto hooks = palworld_1_0_1_hook_manifest();
+    CHECK(hooks.size() == 4);
+    CHECK(std::ranges::count(hooks, HookRole::preview, &HookSpec::role) == 2);
+    CHECK(std::ranges::count(hooks, HookRole::consume, &HookSpec::role) == 2);
+}
+
 auto main() -> int {
     test_settings_default_off_and_round_trip();
     test_settings_file_round_trip();
@@ -298,5 +307,6 @@ auto main() -> int {
     test_disabled_resource_sharing_has_no_runtime_work();
     test_preview_cache_expires_at_one_second_and_on_world_change();
     test_preview_amounts_merge_duplicates_and_preserve_vanilla();
+    test_hook_manifest_contains_only_top_level_preview_and_consume_paths();
     return failures == 0 ? 0 : 1;
 }

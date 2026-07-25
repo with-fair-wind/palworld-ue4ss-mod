@@ -9,7 +9,7 @@
 #include <base_resource_sharing/resource_pool.hpp>
 
 namespace base_resource_sharing {
-enum class HookRole : std::uint8_t { preview, consume, uiConsistency };
+enum class HookRole : std::uint8_t { preview, consume };
 
 struct HookSpec {
     ResourceOperation operation;
@@ -31,24 +31,6 @@ inline constexpr std::array kPalworld101HookManifest{
              "/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject"},
     HookSpec{ResourceOperation::building, HookRole::consume,
              "/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer"},
-    HookSpec{ResourceOperation::building, HookRole::uiConsistency,
-             "/Script/Pal.PalBuilderComponent:CollectItemInfoEnableToUseMaterial"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalUIConvertItemModel:CanStartProduction"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalItemContainerMultiHelper:IsExistItems"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalItemContainerMultiHelper:FindByStaticItemIds"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalItemContainerMultiHelper:FindByStaticItemId"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalItemUtility:CountLocalPlayerInsideBaseCampItemNum64"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalItemUtility:CountLocalPlayerAndInsideBaseCampItemNum64"},
-    HookSpec{ResourceOperation::crafting, HookRole::uiConsistency,
-             "/Script/Pal.PalItemUtility:CollectLocalPlayerControllableItemInfos"},
-    HookSpec{ResourceOperation::building, HookRole::uiConsistency,
-             "/Script/Pal.PalItemUtility:CollectLocalPlayerControllableAllItemInfos"},
 };
 
 [[nodiscard]] constexpr auto palworld_1_0_1_hook_manifest() noexcept -> std::span<const HookSpec> {
@@ -84,7 +66,7 @@ inline void mark_resolved(const std::span<HookResolution> resolutions,
             } else if (resolution.spec.role == HookRole::consume) {
                 capability.consumeReady = true;
             }
-        } else if (resolution.spec.role != HookRole::uiConsistency) {
+        } else {
             if (!capability.error.empty()) {
                 capability.error += "\n";
             }
