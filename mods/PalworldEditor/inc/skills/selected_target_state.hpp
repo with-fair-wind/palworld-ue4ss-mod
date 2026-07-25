@@ -16,6 +16,7 @@
 #include <utility>
 
 #include <skills/skill_editor_service.hpp>
+#include <skills/world_session_state.hpp>
 
 /** @brief 提供当前待出战帕鲁目标的纯 C++ 状态管理。 */
 namespace skill_editor {
@@ -310,9 +311,11 @@ template <typename Apply>
 [[nodiscard]] auto apply_if_target_is_current(const SkillEditRequest& request,
                                               const SelectedTargetState& state,
                                               const SelectedTargetObservation& observation,
-                                              const SkillTarget transientTarget, Apply&& apply)
+                                              const SkillTarget transientTarget,
+                                              const WorldSessionState& session, Apply&& apply)
     -> std::optional<SkillEditResult> {
-    if (transientTarget == 0 || !state.matches(request.targetGeneration, observation)) {
+    if (transientTarget == 0 || !session.request_is_current(request.worldGeneration) ||
+        !state.matches(request.targetGeneration, observation)) {
         return std::nullopt;
     }
 

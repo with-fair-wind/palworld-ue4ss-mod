@@ -662,11 +662,13 @@ void test_multiple_local_candidates_are_rejected() {
 
 void test_stale_generation_never_reaches_apply_callback() {
     skill_editor::SelectedTargetState state;
+    skill_editor::WorldSessionState session;
     const skill_editor::SelectedTargetObservation observed{
         .identity = identity(10),
         .name = "Boar",
     };
     CHECK(state.confirm(observed));
+    CHECK(session.confirm_target());
 
     int applyCalls = 0;
     skill_editor::SkillTarget appliedTarget = 0;
@@ -680,14 +682,30 @@ void test_stale_generation_never_reaches_apply_callback() {
     };
 
     const auto accepted = skill_editor::apply_if_target_is_current(
-        {.targetGeneration = state.generation()}, state, observed, 0x2000, apply);
+        {.targetGeneration = state.generation(), .worldGeneration = session.generation()}, state,
+        observed, 0x2000, session, apply);
     CHECK(accepted.has_value());
     CHECK(applyCalls == 1);
     CHECK(appliedTarget == 0x2000);
 
     const auto stale = skill_editor::apply_if_target_is_current(
-        {.targetGeneration = state.generation() + 1}, state, observed, 0x2000, apply);
+        {.targetGeneration = state.generation() + 1, .worldGeneration = session.generation()}, state,
+        observed, 0x2000, session, apply);
     CHECK(!stale.has_value());
+    CHECK(applyCalls == 1);
+
+    session.begin_transition();
+    session.finish_transition();
+    const auto staleWorld = skill_editor::apply_if_target_is_current(
+        {.targetGeneration = state.generation(), .worldGeneration = 0}, state, observed, 0x2000,
+        session, apply);
+    CHECK(!staleWorld.has_value());
+    CHECK(applyCalls == 1);
+
+    const auto unconfirmedWorld = skill_editor::apply_if_target_is_current(
+        {.targetGeneration = state.generation(), .worldGeneration = session.generation()}, state,
+        observed, 0x2000, session, apply);
+    CHECK(!unconfirmedWorld.has_value());
     CHECK(applyCalls == 1);
 }
 

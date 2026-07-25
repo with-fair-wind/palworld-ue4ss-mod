@@ -70,6 +70,8 @@ struct SkillEditRequest {
     SkillTarget target{};
     /** @brief GUI 提交请求时观察到的已确认目标代数。 */
     std::uint64_t targetGeneration{};
+    /** @brief GUI 提交请求时观察到的世界代次。 */
+    std::uint64_t worldGeneration{};
     /** @brief 决定请求操作被动列表还是主动槽位。 */
     SkillKind kind{};
     /** @brief 决定新增、替换或移除的编辑语义。 */
