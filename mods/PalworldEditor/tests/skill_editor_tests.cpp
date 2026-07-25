@@ -16,6 +16,7 @@
 #include <skills/selected_target_state.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
+#include <skills/world_session_state.hpp>
 
 namespace {
 auto failures = 0;
@@ -536,6 +537,36 @@ void test_target_requires_explicit_confirmation() {
     CHECK(state.generation() == 1);
 }
 
+void test_world_session_transition_requires_reconfirmation() {
+    skill_editor::WorldSessionState session;
+    CHECK(session.can_access_unreal());
+    CHECK(session.confirm_target());
+    CHECK(session.is_target_confirmed());
+
+    session.begin_transition();
+    CHECK(session.generation() == 1);
+    CHECK(!session.can_access_unreal());
+    CHECK(!session.is_target_confirmed());
+    CHECK(!session.request_targets_current_world(0));
+    CHECK(!session.request_is_current(0));
+
+    session.finish_transition();
+    CHECK(session.can_access_unreal());
+    CHECK(!session.is_target_confirmed());
+    CHECK(session.request_targets_current_world(1));
+    CHECK(!session.request_is_current(1));
+
+    CHECK(session.confirm_target());
+    CHECK(session.request_is_current(1));
+}
+
+void test_world_session_cannot_confirm_during_transition() {
+    skill_editor::WorldSessionState session;
+    session.begin_transition();
+    CHECK(!session.confirm_target());
+    CHECK(!session.is_target_confirmed());
+}
+
 void test_observations_do_not_replace_or_clear_explicit_target() {
     skill_editor::SelectedTargetState state;
     CHECK(state.confirm({.identity = identity(10), .name = "Boar"}));
@@ -682,6 +713,8 @@ auto main() -> int {
     test_skill_edit_queue_is_fifo();
     test_skill_edit_queue_can_discard_all_pending_requests();
     test_target_requires_explicit_confirmation();
+    test_world_session_transition_requires_reconfirmation();
+    test_world_session_cannot_confirm_during_transition();
     test_observations_do_not_replace_or_clear_explicit_target();
     test_resolution_status_has_actionable_message();
     test_unique_local_candidate_is_selected();
