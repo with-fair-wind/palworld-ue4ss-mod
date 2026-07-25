@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(${TARGET} SHARED
     src/dllmain.cpp
     src/pal_skills.cpp
+    src/base_resource_settings.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
@@ -37,6 +38,20 @@ if(BUILD_TESTING)
         target_compile_options(PalworldEditorTests PRIVATE /utf-8 /W4 /permissive-)
     endif()
     add_test(NAME PalworldEditor.SkillEditor COMMAND PalworldEditorTests)
+
+    add_executable(PalworldEditorBaseResourceSharingTests
+        tests/base_resource_sharing_tests.cpp
+        src/base_resource_settings.cpp
+    )
+    target_include_directories(PalworldEditorBaseResourceSharingTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorBaseResourceSharingTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorBaseResourceSharingTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.BaseResourceSharing
+        COMMAND PalworldEditorBaseResourceSharingTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
