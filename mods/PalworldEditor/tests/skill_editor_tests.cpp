@@ -89,6 +89,27 @@ void test_active_skill_definitions_are_unique_and_known_values_match() {
     CHECK(skill_editor::active_skill_id_or_numeric(65535) == "65535");
 }
 
+void test_internal_active_skill_filter() {
+    CHECK(skill_editor::is_internal_active_skill_id("Human_Punch"));
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_MoonQueen_GYM_Act"));
+    CHECK(skill_editor::is_internal_active_skill_id("RaidCutter"));
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_LilyQueen_LilyHealing_Boss"));
+    CHECK(!skill_editor::is_internal_active_skill_id("SelfDestruct"));
+    CHECK(!skill_editor::is_internal_active_skill_id("MudShot"));
+    CHECK(!skill_editor::is_internal_active_skill_id("Unique_Boar_Tackle"));
+
+    constexpr std::array definitions{
+        skill_editor::ActiveSkillDefinition{.value = 1, .id = "Human_Punch"},
+        skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
+        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
+    };
+    const auto options = skill_editor::make_active_skill_options(
+        definitions, [](const auto&) { return std::string{}; });
+    CHECK(options.size() == 2);
+    CHECK(options[0].id == "Unique_Boar_Tackle");
+    CHECK(options[1].id == "MudShot");
+}
+
 void test_active_skill_options_use_runtime_localization_with_raw_id_fallback() {
     constexpr std::array definitions{
         skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
@@ -713,6 +734,7 @@ auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
     test_active_skill_definitions_are_unique_and_known_values_match();
+    test_internal_active_skill_filter();
     test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
     test_skill_catalog_refresh_merges_sections_independently();
     test_skill_catalog_first_partial_load_keeps_available_section();

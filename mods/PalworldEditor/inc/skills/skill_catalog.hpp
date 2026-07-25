@@ -31,6 +31,14 @@ struct SkillOption {
 };
 
 /**
+ * @brief Returns whether a stable active-skill Raw ID is clearly game-internal.
+ */
+[[nodiscard]] inline auto is_internal_active_skill_id(const std::string_view id) noexcept -> bool {
+    return id.starts_with("Human_") || id.contains("_GYM_") || id.contains("Raid") ||
+           id.contains("Boss");
+}
+
+/**
  * @brief 从稳定的主动技能定义构建带当前语言名称的界面选项。
  * @tparam Localizer 接收 `ActiveSkillDefinition` 并返回 UTF-8 本地化名称的可调用对象。
  * @param[in] definitions 主动技能数值与 Raw ID 定义。
@@ -44,6 +52,10 @@ template <typename Localizer>
     std::vector<SkillOption> options;
     options.reserve(definitions.size());
     for (const auto& definition : definitions) {
+        if (is_internal_active_skill_id(definition.id)) {
+            continue;
+        }
+
         options.push_back({
             .id = std::string(definition.id),
             .localizedName = localize(definition),
