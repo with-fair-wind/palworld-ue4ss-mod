@@ -1,11 +1,10 @@
-#include <base_resource_sharing/settings.hpp>
-
-#include <Windows.h>
-
 #include <cstddef>
 #include <fstream>
 #include <iterator>
 #include <system_error>
+
+#include <Windows.h>
+#include <base_resource_sharing/settings.hpp>
 
 namespace base_resource_sharing {
 namespace {
@@ -19,16 +18,16 @@ auto trim_ascii(const std::string_view text) -> std::string_view {
     return text.substr(first, last - first + 1);
 }
 
-auto equal_ascii_case_insensitive(const std::string_view left, const std::string_view right) -> bool {
+auto equal_ascii_case_insensitive(const std::string_view left, const std::string_view right)
+    -> bool {
     if (left.size() != right.size()) {
         return false;
     }
 
     for (std::size_t index{}; index < left.size(); ++index) {
         const auto lower = [](const char character) {
-            return character >= 'A' && character <= 'Z'
-                       ? static_cast<char>(character - 'A' + 'a')
-                       : character;
+            return character >= 'A' && character <= 'Z' ? static_cast<char>(character - 'A' + 'a')
+                                                        : character;
         };
         if (lower(left[index]) != lower(right[index])) {
             return false;
@@ -54,8 +53,8 @@ auto parse_settings(const std::string_view text) -> SettingsParseResult {
     std::size_t lineStart{};
     while (lineStart < text.size()) {
         const auto lineEnd = text.find('\n', lineStart);
-        const auto count = lineEnd == std::string_view::npos ? text.size() - lineStart
-                                                              : lineEnd - lineStart;
+        const auto count =
+            lineEnd == std::string_view::npos ? text.size() - lineStart : lineEnd - lineStart;
         const auto line = trim_ascii(text.substr(lineStart, count));
         if (line.empty()) {
             return parse_error("配置包含空白行。");
@@ -68,7 +67,8 @@ auto parse_settings(const std::string_view text) -> SettingsParseResult {
             foundSection = true;
         } else {
             const auto equals = line.find('=');
-            if (equals == std::string_view::npos || line.find('=', equals + 1) != std::string_view::npos) {
+            if (equals == std::string_view::npos ||
+                line.find('=', equals + 1) != std::string_view::npos) {
                 return parse_error("配置行格式无效。");
             }
 
@@ -104,7 +104,8 @@ auto parse_settings(const std::string_view text) -> SettingsParseResult {
 }
 
 auto serialize_settings(const Settings& settings) -> std::string {
-    return std::string{"[BaseResourceSharing]\nEnabled="} + (settings.enabled ? "true\n" : "false\n");
+    return std::string{"[BaseResourceSharing]\nEnabled="} +
+           (settings.enabled ? "true\n" : "false\n");
 }
 
 auto load_settings(const std::filesystem::path& path) -> SettingsParseResult {
@@ -156,7 +157,8 @@ auto save_settings(const std::filesystem::path& path, const Settings& settings) 
         }
     }
 
-    if (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    if (!MoveFileExW(temporary.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         const auto moveError = GetLastError();
         return win32_error("无法原子替换配置文件", moveError);
     }

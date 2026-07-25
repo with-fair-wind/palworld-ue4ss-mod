@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -25,6 +26,8 @@
 #include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <base_resource_sharing/pal_base_resources.hpp>
+#include <base_resource_sharing/settings.hpp>
 #include <game/pal_game.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
@@ -49,22 +52,25 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.4.6");
-        ModDescription = STR("In-game item and active/passive Pal skill editor for Palworld 1.0");
+        ModVersion = STR("1.5.0");
+        ModDescription =
+            STR("Item, Pal skill, and same-guild base resource editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.4.6)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.5.0)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.4.6", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.5.0", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
                 ImGui::Separator();
                 render_inventory(self);
+                ImGui::Separator();
+                render_base_resource_sharing(self);
                 ImGui::Separator();
                 render_pal_editor(self);
                 ImGui::Separator();
@@ -78,9 +84,20 @@ public:
 
     /** @brief 注销本实例注册的 UE4SS 全局回调。 */
     ~PalworldEditorMod() override {
+        baseResourceBridge_.shutdown_hooks();
         unregister_callback(engineTickCallbackId_);
         unregister_callback(loadMapPostCallbackId_);
         unregister_callback(loadMapPreCallbackId_);
+    }
+
+    /** @brief 从 mod 配置目录读取默认关闭的跨据点资源共享偏好。 */
+    auto on_program_start() -> void override {
+        configPath_ = std::filesystem::path{UE4SSProgram::get_program().get_mods_directory()} /
+                      "PalworldEditor" / "config.ini";
+        const auto loaded = base_resource_sharing::load_settings(configPath_);
+        requestedBaseSharingEnabled_.store(loaded.settings.enabled);
+        baseSharingSettingDirty_.store(true);
+        baseResourceBridge_.set_config_error(loaded.error);
     }
 
     /**
@@ -120,15 +137,17 @@ public:
             .HookName = STR("GameThreadTick"),
         };
         engineTickCallbackId_ = Hook::RegisterEngineTickPreCallback(
-            [this](Hook::TCallbackIterationData<void>&, UEngine*, float, bool) {
-                game_thread_tick();
+            [this](Hook::TCallbackIterationData<void>&, UEngine*, const float deltaSeconds, bool) {
+                game_thread_tick(deltaSeconds);
             },
             engineTickOptions);
 
         wantProbeObject_.store(true);
         want_scan_items_.store(true);
+        baseResourceBridge_.on_world_ready(worldSession_.generation());
 
         if (engineTickCallbackId_ == Hook::ERROR_ID || !worldLifecycleCallbacksReady_.load()) {
+            baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
             skillQueue_.clear();
             {
                 const std::lock_guard lock(selectionRequestMutex_);
@@ -151,10 +170,16 @@ public:
      *          技能编辑 FIFO 队列、技能目录/状态刷新和诊断扫描。共享结果在相应互斥量保护下写回。
      * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口。
      */
-    auto game_thread_tick() -> void {
+    auto game_thread_tick(const float deltaSeconds) -> void {
         if (!worldSession_.can_access_unreal()) {
             return;
         }
+
+        if (baseSharingSettingDirty_.exchange(false)) {
+            baseResourceBridge_.set_enabled(requestedBaseSharingEnabled_.load());
+        }
+        baseResourceBridge_.ensure_hooks_registered();
+        baseResourceBridge_.tick(deltaSeconds);
 
         if (wantProbeObject_.exchange(false)) {
             if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
@@ -361,6 +386,7 @@ private:
 
     /** @brief Invalidates all work and write authorization before Unreal replaces the world. */
     auto begin_world_transition() -> void {
+        baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
         skillQueue_.clear();
         {
@@ -420,6 +446,7 @@ private:
             worldSession_.begin_transition();
         }
         worldSession_.finish_transition();
+        baseResourceBridge_.on_world_ready(worldSession_.generation());
         want_read_.store(true);
         want_scan_items_.store(true);
         wantRefreshSkillCatalog_.store(true);
@@ -812,6 +839,32 @@ private:
         }
     }
 
+    /** @brief 渲染同公会跨据点制作/建造材料共享开关与运行状态。 */
+    static void render_base_resource_sharing(PalworldEditorMod* self) {
+        if (!ImGui::CollapsingHeader("据点资源共享")) {
+            return;
+        }
+
+        const auto snapshot = self->baseResourceBridge_.snapshot();
+        bool enabled = self->requestedBaseSharingEnabled_.load();
+        if (ImGui::Checkbox("同公会跨据点资源共享", &enabled)) {
+            self->requestedBaseSharingEnabled_.store(enabled);
+            self->baseSharingSettingDirty_.store(true);
+            const auto error =
+                self->configPath_.empty()
+                    ? std::string{"配置路径尚未初始化，设置未持久化。"}
+                    : base_resource_sharing::save_settings(
+                          self->configPath_, base_resource_sharing::Settings{.enabled = enabled});
+            self->baseResourceBridge_.set_config_error(error);
+        }
+
+        ImGui::TextWrapped("%s", snapshot.status.c_str());
+        if (!snapshot.configError.empty()) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s", snapshot.configError.c_str());
+        }
+        ImGui::TextDisabled("仅支持单人世界/本地房主；只影响制作和建造材料消耗，不合并箱子界面。");
+    }
+
     /**
      * @brief 渲染当前待出战帕鲁、技能目录状态和主动/被动技能编辑区域。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
@@ -980,6 +1033,15 @@ private:
     std::atomic<bool> want_scan_items_{false};
     /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
     std::atomic<bool> wantProbeObject_{false};
+
+    /** @brief 游戏线程拥有的跨据点资源反射桥；GUI 只读取其值快照。 */
+    base_resource_sharing::PalBaseResourceBridge baseResourceBridge_;
+    /** @brief `ue4ss/Mods/PalworldEditor/config.ini` 的绝对路径。 */
+    std::filesystem::path configPath_;
+    /** @brief GUI/启动阶段提交给游戏线程的资源共享偏好。 */
+    std::atomic<bool> requestedBaseSharingEnabled_{false};
+    /** @brief 通知 EngineTick 消费最新资源共享偏好。 */
+    std::atomic<bool> baseSharingSettingDirty_{false};
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;

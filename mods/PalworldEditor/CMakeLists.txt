@@ -18,6 +18,7 @@ add_library(${TARGET} SHARED
     src/dllmain.cpp
     src/pal_skills.cpp
     src/base_resource_settings.cpp
+    src/pal_base_resources.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)

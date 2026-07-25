@@ -1,8 +1,8 @@
-# PalworldEditor 1.4.6 — Palworld 物品与帕鲁技能编辑器
+# PalworldEditor 1.5.0 — Palworld 物品、帕鲁技能与据点资源编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
-提供游戏内物品编辑，以及当前选中帕鲁的主动/被动技能编辑。所有操作都在 UE4SS GUI 的 ImGui
-窗口中完成，不依赖游戏 F10 控制台。
+提供游戏内物品编辑、当前选中帕鲁的主动/被动技能编辑，以及可选的同公会跨据点制作/建造材料共享。
+所有操作都在 UE4SS GUI 的 ImGui 窗口中完成，不依赖游戏 F10 控制台。
 
 ## 功能
 
@@ -17,6 +17,7 @@
 | **主动技能** | 编辑 3 个 `EquipWaza` 槽位；支持装备、替换、清空 |
 | **技能目录** | 启动后自动重试完整目录；手动刷新会立即重新加载主动、被动技能和当前语言名称 |
 | **本地化搜索** | 物品与技能均显示 `当前语言名称 [RawId]`，可按名称或原始 ID 搜索 |
+| **据点资源共享** | 默认关闭；单人/本地房主可让制作和建造使用同公会所有已加载普通仓储材料 |
 | **安全修改** | Unreal 访问只在 EngineTick 游戏线程执行；GUID + 目标/世界代次校验，跨世界请求自动失效 |
 | **类名发现** | 扫描 UObject 直方图（调试用） |
 
@@ -43,8 +44,8 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 #    -> build/Game__Shipping__Win64/bin/PalworldEditor.dll
 
-# 4. 运行纯 C++ 技能编辑测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests
+# 4. 运行纯 C++ 技能编辑与据点资源安全契约测试
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests
 ctest --test-dir build --output-on-failure
 
 # 5. 部署到游戏
@@ -126,6 +127,29 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 游戏内验证时可在场景中保留一只野生帕鲁，同时让队伍 UI 高亮另一只队伍帕鲁。点击
 “选择当前帕鲁”后，目标必须是下一次按 E 会召唤的队伍帕鲁，而不是场景中的野生帕鲁。
 
+### 同公会跨据点资源共享
+
+1. 展开“据点资源共享”，勾选“同公会跨据点资源共享”。默认值为关闭，选择会写入
+   `ue4ss/Mods/PalworldEditor/config.ini`。
+2. 进入单人世界或由本机担任房主的世界；状态区会显示已加载的同公会据点和普通资源容器数量。
+3. 在据点 A 发起制作或建造时，可使用据点 B 普通箱子中的材料。箱子界面仍只显示本地箱子，
+   物品不会预先移动，实际扣除、复制和存档仍由 Palworld 完成。
+4. 当前据点/当前资源助手已有的容器保持在队列前部，因此优先遵循原版本地消耗顺序。
+5. 关闭开关或切换世界时，mod 会先恢复并验证所有临时容器引用，再恢复原版行为。
+
+此功能只处理制作与建造材料，不共享食物箱、帕鲁运输、自动生产或箱子 UI。修理材料共享目前明确显示
+“不可用”，因为 Palworld 1.0.1 尚未验证安全的修理检查与扣除入口。不要同时启用 UBIM Lite 或其他会修改
+相同制作/建造资源请求路径的 mod。
+
+配置文件只接受：
+
+```ini
+[BaseResourceSharing]
+Enabled=true
+```
+
+也可把值设为 `false`。配置缺失或无效时安全回退为关闭。
+
 ## 物品 ID
 
 浏览器通过 UE4SS 运行时读取已经加载的 `PalStaticItemData*` UObject 的 `ID`，并调用
@@ -141,6 +165,11 @@ mods/PalworldEditor/
 ├── inc/
 │   ├── game/
 │   │   └── pal_game.hpp             物品/背包与当前待出战帕鲁解析
+│   ├── base_resource_sharing/
+│   │   ├── hook_manifest.hpp         Palworld 1.0.1 Hook 能力清单
+│   │   ├── pal_base_resources.hpp    跨据点资源桥值接口
+│   │   ├── resource_pool.hpp         过滤、排序、恢复账本和生命周期纯逻辑
+│   │   └── settings.hpp              默认关闭的持久化配置
 │   ├── items/
 │   │   └── item_catalog.hpp          物品标签、搜索、去重、排序与索引
 │   ├── skills/
@@ -153,10 +182,13 @@ mods/PalworldEditor/
 │   └── support/
 │       └── text_encoding.hpp        UE 宽字符串到 UTF-8
 ├── src/
-│   ├── dllmain.cpp              Mod 类 + GUI + EngineTick/LoadMap 请求分发
-│   └── pal_skills.cpp           技能目录与游戏函数实现
+│   ├── base_resource_settings.cpp 配置解析与原子保存
+│   ├── dllmain.cpp                Mod 类 + GUI + EngineTick/LoadMap 请求分发
+│   ├── pal_base_resources.cpp     同公会仓储发现、Hook 与可逆临时联合
+│   └── pal_skills.cpp             技能目录与游戏函数实现
 └── tests/
-    └── skill_editor_tests.cpp   不链接 UE4SS 的 CTest 测试
+    ├── base_resource_sharing_tests.cpp 资源共享纯 C++ 安全契约
+    └── skill_editor_tests.cpp          技能编辑纯 C++ 测试
 ```
 
 仓库根目录：
@@ -173,6 +205,9 @@ mods/PalworldEditor/
 - F10 游戏控制台不可用（Palworld ConsoleManager 签名歧义）；所有操作通过 UE4SS GUI。
 - 直接写 `StackCount` 绕过游戏复制/通知逻辑；单机可用，多人不可靠。
 - 技能编辑支持单机和房主/本地主机；普通联机客户端不支持。
+- 据点资源共享同样只支持单人世界/本地房主，且只包含当前已加载的同公会普通仓储容器。
+- 修理材料共享尚不可用；缺少必需 Hook、容器解析不完整或恢复序列不一致时，对应能力会按世界失败关闭。
+- 不要与 UBIM Lite 或其他修改相同制作/建造资源请求路径的 mod 同时运行。
 - 主动技能只修改 `EquipWaza`，不会解锁或修改 `MasteredWaza`，也不编辑伙伴技能。
 - 技能数组通过 UE4SS 的真实 `TArray<T>` 读取；仍依赖 Palworld 1.0 的 UFunction 参数布局，
   游戏更新后可能需要同步 UHT 签名。
