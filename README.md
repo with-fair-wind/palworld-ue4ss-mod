@@ -1,4 +1,4 @@
-# PalworldEditor 1.4.5 — Palworld 物品与帕鲁技能编辑器
+# PalworldEditor 1.4.6 — Palworld 物品与帕鲁技能编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
 提供游戏内物品编辑，以及当前选中帕鲁的主动/被动技能编辑。所有操作都在 UE4SS GUI 的 ImGui
@@ -17,7 +17,7 @@
 | **主动技能** | 编辑 3 个 `EquipWaza` 槽位；支持装备、替换、清空 |
 | **技能目录** | 启动后自动重试完整目录；手动刷新会立即重新加载主动、被动技能和当前语言名称 |
 | **本地化搜索** | 物品与技能均显示 `当前语言名称 [RawId]`，可按名称或原始 ID 搜索 |
-| **安全修改** | 显式锁定选择并用 GUID + 目标代数校验；目录或当前观察未就绪时禁止写入 |
+| **安全修改** | Unreal 访问只在 EngineTick 游戏线程执行；GUID + 目标/世界代次校验，跨世界请求自动失效 |
 | **类名发现** | 扫描 UObject 直方图（调试用） |
 
 ## 前置依赖
@@ -112,12 +112,16 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 每次修改都在游戏线程执行并重读实际状态；替换未生效时会尝试恢复完整原状态。
 点击“选择当前帕鲁”后，目标保持锁定；数字键切换高亮或单帧解析失败不会自动替换、清空该选择。
 当前高亮目标与锁定 GUID 不同时，修改按钮会暂停，必须再次点击“选择当前帕鲁”才会切换编辑目标。
+退出世界、切换地图或重新进入存档时，LoadMap 回调会清空所有待处理物品/技能操作并撤销技能写权限；
+原帕鲁名称和 GUID 仅保留用于显示。进入新世界后必须再次点击“选择当前帕鲁”，旧世界请求不会补执行。
 目标从唯一属于本地控制器的队伍 Holder 解析，并以
 `FPalInstanceID.InstanceId` 区分同种帕鲁；GUI 与游戏线程之间不传递或缓存 `UObject*`。
 主动技能数值与 Raw ID 来自生成的 Palworld 1.0 定义表，不读取运行时 `UEnum` 内存布局；名称由
 `PalUIUtility` 按游戏当前语言查询，并使用 `PalPlayerInventoryData` 作为当帧世界上下文。游戏运行时尚未
 完整就绪时目录可回退显示 Raw ID，但所有技能写入保持禁用；自动重试或手动刷新成功后恢复当前语言名称和编辑。
 主动和被动目录分别保留可用状态和最近错误，一类刷新失败不会清空另一类已经可用的目录。
+主动技能候选会排除稳定 Raw ID 中明确属于游戏内部用途的 `Human_`、`_GYM_`、`Raid` 和 `Boss`
+条目；普通技能、`SelfDestruct` 和正常的 `Unique_*` 帕鲁专属技能仍会保留。
 
 游戏内验证时可在场景中保留一只野生帕鲁，同时让队伍 UI 高亮另一只队伍帕鲁。点击
 “选择当前帕鲁”后，目标必须是下一次按 E 会召唤的队伍帕鲁，而不是场景中的野生帕鲁。
@@ -144,11 +148,12 @@ mods/PalworldEditor/
 │   │   ├── pal_skills.hpp           Palworld 技能目录适配层
 │   │   ├── selected_target_state.hpp 当前目标状态与过期请求保护
 │   │   ├── skill_catalog.hpp        可搜索技能目录纯逻辑
-│   │   └── skill_editor_service.hpp 编辑校验、重读、回滚与 FIFO 队列
+│   │   ├── skill_editor_service.hpp 编辑校验、重读、回滚与 FIFO 队列
+│   │   └── world_session_state.hpp  LoadMap 世界代次与重新确认状态
 │   └── support/
 │       └── text_encoding.hpp        UE 宽字符串到 UTF-8
 ├── src/
-│   ├── dllmain.cpp              Mod 类 + GUI + 游戏线程请求分发
+│   ├── dllmain.cpp              Mod 类 + GUI + EngineTick/LoadMap 请求分发
 │   └── pal_skills.cpp           技能目录与游戏函数实现
 └── tests/
     └── skill_editor_tests.cpp   不链接 UE4SS 的 CTest 测试
