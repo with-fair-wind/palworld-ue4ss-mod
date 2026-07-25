@@ -294,6 +294,17 @@ void test_hook_manifest_contains_only_top_level_preview_and_consume_paths() {
     CHECK(std::ranges::count(hooks, HookRole::consume, &HookSpec::role) == 2);
 }
 
+void test_preview_sources_combine_player_and_base_storage() {
+    using namespace base_resource_sharing;
+
+    const std::array player{ItemAmount{"Ingot", 4}};
+    const std::array bases{ItemAmount{"Ingot", 6}};
+    const auto total = combine_preview_sources(player, bases);
+    const std::array recipe{ItemAmount{"Ingot", 10}};
+    CHECK(total.error.empty());
+    CHECK(max_productable_from_shared_counts(0, recipe, total.amounts) == 1);
+}
+
 auto main() -> int {
     test_settings_default_off_and_round_trip();
     test_settings_file_round_trip();
@@ -308,5 +319,6 @@ auto main() -> int {
     test_preview_cache_expires_at_one_second_and_on_world_change();
     test_preview_amounts_merge_duplicates_and_preserve_vanilla();
     test_hook_manifest_contains_only_top_level_preview_and_consume_paths();
+    test_preview_sources_combine_player_and_base_storage();
     return failures == 0 ? 0 : 1;
 }

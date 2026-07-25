@@ -170,6 +170,16 @@ struct AmountAggregation {
     return result;
 }
 
+[[nodiscard]] inline auto combine_preview_sources(const std::span<const ItemAmount> player,
+                                                  const std::span<const ItemAmount> bases)
+    -> AmountAggregation {
+    std::vector<ItemAmount> combined;
+    combined.reserve(player.size() + bases.size());
+    combined.insert(combined.end(), player.begin(), player.end());
+    combined.insert(combined.end(), bases.begin(), bases.end());
+    return aggregate_amounts(combined);
+}
+
 [[nodiscard]] inline auto shared_requirements_available(
     const std::span<const ItemAmount> requirements,
     const std::map<std::string, std::int64_t>& available) -> bool {
