@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.5.0），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.5.1），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -102,9 +102,9 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 DLL 导出 `start_mod()`（构造实例）
 和 `uninstall_mod()`（销毁实例）。日志用
 `RC::Output::send<LogLevel::Verbose>(STR("...{ }...\n"))`（底层是 std::format；`STR()` 会选择正确的字符
-宽度）。全局 EngineTick/LoadMap Hook 只在 `on_unreal_init()` 注册；资源 UFunction Hook 在首次
-EngineTick 中解析并只注册一次。对象查找、反射读写和 `ProcessEvent` 只允许在 EngineTick/对应 UFunction
-游戏线程回调内执行。
+宽度）。全局 EngineTick/LoadMap Hook 只在 `on_unreal_init()` 注册；资源 UFunction Hook 仅在共享开启且
+世界可访问时按需解析并注册，关闭共享或 LoadMap 前立即注销。对象查找、反射读写和 `ProcessEvent` 只允许在
+EngineTick/对应 UFunction 游戏线程回调内执行。
 
 ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的请求参数和原子请求标志。所有 UObject 指针都视为
 非拥有句柄；业务数据的反射读取和修改只在 EngineTick 游戏线程回调执行。当前技能目标从唯一属于本地
@@ -121,11 +121,14 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 更新 Palworld/UHT dump 后必须重新运行生成脚本。
 
 跨据点资源共享只读取同公会 `PalBaseCampModuleItemStorage.ContainerInfos` 中登记的普通仓储，并要求每个
-容器 GUID 都能解析到已加载 `PalItemContainer`。请求期间只临时追加容器引用，不移动物品、不写
-`ItemSlotArray`/`StackCount`；Palworld 负责真实扣除、复制和持久化。制作/预览在同一 Hook 调用内恢复，
-建造在服务器请求后最多保留 0.75 秒，并在 EngineTick 上验证原始前缀和追加尾部后恢复。关闭开关、LoadMap
-前置和卸载都先恢复活动联合。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。
-配置位于 `ue4ss/Mods/PalworldEditor/config.ini`，仅包含 `[BaseResourceSharing]` 下的 `Enabled=true|false`。
+容器 GUID 都能解析到已加载 `PalItemContainer`。制作/建造预览使用有效期 1 秒的纯数值缓存，合计玩家 Common
+主背包与同公会全部普通仓储；缓存不持有 Unreal 对象或数组地址。实际制作/建造请求总是重新发现实时容器，
+请求期间只临时追加容器引用，不移动物品、不写 `ItemSlotArray`/`StackCount`；Palworld 负责真实扣除、复制和
+持久化。制作在同步消费 Hook 返回时立即恢复，建造在服务器请求后最多保留 0.75 秒，并在 EngineTick 上验证
+原始前缀和追加尾部后恢复。关闭开关、LoadMap 前置和卸载都先恢复活动联合并注销资源 Hook。制作、建造、
+修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志记录预览缓存重建、实时联合准备及
+恢复耗时。配置位于 `ue4ss/Mods/PalworldEditor/config.ini`，仅包含 `[BaseResourceSharing]` 下的
+`Enabled=true|false`。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -158,7 +161,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.5.0)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.5.1)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
@@ -166,9 +169,11 @@ git diff --check
 装备/替换/清空。场景中保留一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
 检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。还应重复退出世界/重进存档，确认
 加载期间请求被清空、原目标仅保留显示、重新选择前无法写入，并且 LoadMap 不再崩溃。资源共享还应验证：
-默认关闭且配置可持久化；制作/建造能消费同公会另一已加载据点的普通箱子材料；材料不足时不扣除；关闭开关与
-LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确显示不可用；日志中每次联合开启
-都有匹配且无错误的恢复记录。不要与 UBIM Lite 等修改相同资源请求路径的 mod 同时测试。
+默认关闭且配置可持久化；关闭时工厂/建造界面性能与未启用资源功能一致；开启后反复打开工厂和建造菜单不再
+持续卡顿，另一据点材料变化可在约 1 秒内反映到预览；制作/建造能消费同公会另一已加载据点的普通箱子材料；
+材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
+显示不可用；日志中预览缓存重建最多每秒一次，每次实时联合都有匹配且无错误的恢复和耗时记录。不要与
+UBIM Lite 等修改相同资源请求路径的 mod 同时测试。
 
 ## 权威参考资料
 
