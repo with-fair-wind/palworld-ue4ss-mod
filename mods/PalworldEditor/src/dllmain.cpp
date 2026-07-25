@@ -1,8 +1,8 @@
 /**
  * @file dllmain.cpp
  * @brief 实现 PalworldEditor mod 生命周期、ImGui 界面、跨线程请求交接和 DLL 导出入口。
- * @details ImGui 回调运行在 GUI 线程，只读取互斥量保护的快照并提交请求；on_update()
- *          运行在游戏线程，是执行 Unreal 反射操作的唯一入口。结果通过互斥量保护的缓存和
+ * @details ImGui 回调运行在 GUI 线程，只读取互斥量保护的快照并提交请求；EngineTick
+ *          回调运行在游戏线程，是执行 Unreal 反射操作的唯一入口。结果通过互斥量保护的缓存和
  *          技能快照返回 GUI。构建使用 `cmake --preset ninja-msvc-x64`，部署使用
  *          `cmake --build --preset ninja-msvc-x64 --target deploy`。
  */
@@ -15,12 +15,14 @@
 #include <optional>
 #include <string>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
 #include <Mod/CppUserModBase.hpp>
 #include <UE4SSProgram.hpp>
+#include <Unreal/Hooks/Hooks.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <game/pal_game.hpp>
@@ -28,6 +30,7 @@
 #include <items/item_catalog.hpp>
 #include <skills/pal_skills.hpp>
 #include <skills/selected_target_state.hpp>
+#include <skills/world_session_state.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -36,7 +39,7 @@ using pal_game::InvEntry;
 /**
  * @brief PalworldEditor 的 UE4SS mod 实例与全部运行时状态容器。
  * @details 类本身拥有 GUI 状态、请求队列和值类型缓存，但不拥有任何 Unreal UObject。
- *          GUI 线程不得直接调用反射接口；游戏线程通过 on_update() 消费请求并发布快照。
+ *          GUI 线程不得直接调用反射接口；游戏线程通过 EngineTick 回调消费请求并发布快照。
  */
 class PalworldEditorMod final : public CppUserModBase {
 public:
@@ -73,33 +76,93 @@ public:
         });
     }
 
-    /**
-     * @brief 销毁 mod 持有的 C++ 状态。
-     * @details 本类不拥有 Unreal 对象或手动资源，因此使用默认析构行为。
-     */
-    ~PalworldEditorMod() override = default;
-
-    /**
-     * @brief 在 UE4SS 完成 Unreal 初始化后输出对象探测信息并请求首次物品扫描。
-     * @details 当前待出战帕鲁由 on_update() 每帧主动解析，不注册全局 ProcessEvent Hook。
-     * @warning 由 UE4SS 在游戏线程调用。
-     */
-    auto on_unreal_init() -> void override {
-        if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
-                nullptr, nullptr, STR("/Script/CoreUObject.Object"))) {
-            Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
-        }
-
-        want_scan_items_.store(true);
+    /** @brief 注销本实例注册的 UE4SS 全局回调。 */
+    ~PalworldEditorMod() override {
+        unregister_callback(engineTickCallbackId_);
+        unregister_callback(loadMapPostCallbackId_);
+        unregister_callback(loadMapPreCallbackId_);
     }
 
     /**
-     * @brief 在游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
+     * @brief 在 UE4SS 完成 Unreal 初始化后注册游戏线程与世界切换回调。
+     * @details 此处只注册回调并发布值请求；对象探测延迟到首次 EngineTick 执行。
+     */
+    auto on_unreal_init() -> void override {
+        const Hook::FCallbackOptions loadMapPreOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("WorldTransitionBegin"),
+        };
+        loadMapPreCallbackId_ = Hook::RegisterLoadMapPreCallback(
+            [this](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&, FURL,
+                   UPendingNetGame*, FString&) { begin_world_transition(); },
+            loadMapPreOptions);
+
+        const Hook::FCallbackOptions loadMapPostOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("WorldTransitionFinish"),
+        };
+        loadMapPostCallbackId_ = Hook::RegisterLoadMapPostCallback(
+            [this](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&, FURL,
+                   UPendingNetGame*, FString&) { finish_world_transition(); },
+            loadMapPostOptions);
+
+        worldLifecycleCallbacksReady_.store(loadMapPreCallbackId_ != Hook::ERROR_ID &&
+                                            loadMapPostCallbackId_ != Hook::ERROR_ID);
+
+        const Hook::FCallbackOptions engineTickOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("GameThreadTick"),
+        };
+        engineTickCallbackId_ = Hook::RegisterEngineTickPreCallback(
+            [this](Hook::TCallbackIterationData<void>&, UEngine*, float, bool) {
+                game_thread_tick();
+            },
+            engineTickOptions);
+
+        wantProbeObject_.store(true);
+        want_scan_items_.store(true);
+
+        if (engineTickCallbackId_ == Hook::ERROR_ID || !worldLifecycleCallbacksReady_.load()) {
+            skillQueue_.clear();
+            {
+                const std::lock_guard lock(selectionRequestMutex_);
+                selectCurrentPalRequest_.reset();
+            }
+            const std::lock_guard lock(skillSnapshotMutex_);
+            skillSnapshot_.lastResult =
+                "UE4SS 游戏线程/世界切换回调注册失败；为避免跨世界写入，技能编辑已停用。";
+        }
+    }
+
+    /**
+     * @brief UE4SS UpdateThread 回调；刻意不访问 Unreal 或运行时请求队列。
+     */
+    auto on_update() -> void override {}
+
+    /**
+     * @brief 在 EngineTick 游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
      * @details 单次更新依次处理给予物品、背包数量修改、背包/物品扫描、当前待出战帕鲁解析、
      *          技能编辑 FIFO 队列、技能目录/状态刷新和诊断扫描。共享结果在相应互斥量保护下写回。
-     * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口，由 UE4SS 在游戏线程调用。
+     * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口。
      */
-    auto on_update() -> void override {
+    auto game_thread_tick() -> void {
+        if (!worldSession_.can_access_unreal()) {
+            return;
+        }
+
+        if (wantProbeObject_.exchange(false)) {
+            if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
+                    nullptr, nullptr, STR("/Script/CoreUObject.Object"))) {
+                Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
+            }
+        }
+
         // Give items
         std::string item;
         int count = 0;
@@ -175,9 +238,17 @@ public:
 
         std::optional<skill_editor::SkillState> refreshedState;
         bool targetConfirmed = false;
-        if (wantSelectCurrentPal_.exchange(false)) {
+        std::optional<skill_editor::WorldBoundRequest> selectCurrentPalRequest;
+        {
+            const std::lock_guard lock(selectionRequestMutex_);
+            selectCurrentPalRequest = std::exchange(selectCurrentPalRequest_, std::nullopt);
+        }
+        if (selectCurrentPalRequest.has_value() &&
+            skill_editor::request_can_run(*selectCurrentPalRequest, worldSession_) &&
+            worldLifecycleCallbacksReady_.load()) {
             skillQueue_.clear();
-            if (targetResolved && selectedTarget_.confirm(targetObservation)) {
+            if (targetResolved && selectedTarget_.confirm(targetObservation) &&
+                worldSession_.confirm_target()) {
                 refreshedState = skillGateway_.read_state(
                     reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter));
                 targetConfirmed = true;
@@ -189,8 +260,8 @@ public:
             }
         }
 
-        const bool targetMatchesCurrent =
-            targetResolved && selectedTarget_.matches_current(targetObservation);
+        const bool targetMatchesCurrent = worldSession_.is_target_confirmed() && targetResolved &&
+                                          selectedTarget_.matches_current(targetObservation);
 
         std::optional<skill_editor::SkillEditResult> editResult;
         if (auto request = skillQueue_.try_pop()) {
@@ -202,7 +273,7 @@ public:
                 *request, selectedTarget_, targetObservation,
                 targetResolved ? reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter)
                                : skill_editor::SkillTarget{},
-                [this](const skill_editor::SkillEditRequest& executableRequest) {
+                worldSession_, [this](const skill_editor::SkillEditRequest& executableRequest) {
                     return skill_editor::execute_skill_edit(skillGateway_, executableRequest);
                 });
             if (!editResult.has_value()) {
@@ -239,6 +310,10 @@ public:
         {
             const std::lock_guard lock(skillSnapshotMutex_);
             skillSnapshot_.targetGeneration = selectedTarget_.generation();
+            skillSnapshot_.worldGeneration = worldSession_.generation();
+            skillSnapshot_.worldAccessible = worldSession_.can_access_unreal();
+            skillSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
+            skillSnapshot_.targetConfirmedForWorld = worldSession_.is_target_confirmed();
             skillSnapshot_.targetSelected = selectedTarget_.is_selected();
             skillSnapshot_.targetMatchesCurrent = targetMatchesCurrent;
             skillSnapshot_.palName =
@@ -272,12 +347,100 @@ public:
     }
 
 private:
+    /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
+    static auto unregister_callback(Hook::GlobalCallbackId& callbackId) -> void {
+        if (callbackId == Hook::ERROR_ID) {
+            return;
+        }
+        if (!Hook::UnregisterCallback(callbackId)) {
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: failed to unregister callback id={}\n"), callbackId);
+        }
+        callbackId = Hook::ERROR_ID;
+    }
+
+    /** @brief Invalidates all work and write authorization before Unreal replaces the world. */
+    auto begin_world_transition() -> void {
+        worldSession_.begin_transition();
+        skillQueue_.clear();
+        {
+            const std::lock_guard lock(selectionRequestMutex_);
+            selectCurrentPalRequest_.reset();
+        }
+
+        give_requested_.store(false);
+        modify_requested_.store(false);
+        want_read_.store(false);
+        want_discover_.store(false);
+        want_scan_items_.store(false);
+        wantRefreshSkillCatalog_.store(false);
+        wantProbeObject_.store(false);
+
+        {
+            const std::lock_guard lock(inv_mutex_);
+            inv_cache_.clear();
+            item_db_cache_ = {};
+            selected_ = -1;
+        }
+
+        lastResolutionStatus_.reset();
+        {
+            const std::lock_guard lock(skillSnapshotMutex_);
+            skillSnapshot_.targetGeneration = selectedTarget_.generation();
+            skillSnapshot_.worldGeneration = worldSession_.generation();
+            skillSnapshot_.palName =
+                selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
+            skillSnapshot_.state = {};
+            skillSnapshot_.catalog = {};
+            skillSnapshot_.lastResult =
+                "世界切换已取消所有待处理操作；进入存档后请重新选择当前帕鲁。";
+            skillSnapshot_.resolutionStatus =
+                skill_editor::SelectedTargetResolutionStatus::holderCandidatesUnavailable;
+            skillSnapshot_.targetSelected = selectedTarget_.is_selected();
+            skillSnapshot_.targetMatchesCurrent = false;
+            skillSnapshot_.pending = false;
+            skillSnapshot_.worldAccessible = false;
+            skillSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
+            skillSnapshot_.targetConfirmedForWorld = false;
+        }
+    }
+
+    /** @brief Re-enables reads after LoadMap without restoring Pal write authorization. */
+    auto finish_world_transition() -> void {
+        skillQueue_.clear();
+        {
+            const std::lock_guard lock(selectionRequestMutex_);
+            selectCurrentPalRequest_.reset();
+        }
+        give_requested_.store(false);
+        modify_requested_.store(false);
+        want_discover_.store(false);
+
+        if (!worldLifecycleCallbacksReady_.load()) {
+            worldSession_.begin_transition();
+        }
+        worldSession_.finish_transition();
+        want_read_.store(true);
+        want_scan_items_.store(true);
+        wantRefreshSkillCatalog_.store(true);
+
+        const std::lock_guard lock(skillSnapshotMutex_);
+        skillSnapshot_.worldGeneration = worldSession_.generation();
+        skillSnapshot_.worldAccessible = true;
+        skillSnapshot_.targetConfirmedForWorld = false;
+        skillSnapshot_.targetMatchesCurrent = false;
+        skillSnapshot_.pending = false;
+        skillSnapshot_.lastResult =
+            "已进入新的世界；原帕鲁选择仅用于显示，请重新点击“选择当前帕鲁”。";
+    }
+
     /**
      * @brief 游戏线程发布给 GUI 的完整技能编辑快照。
      * @details 此结构按值复制，避免 GUI 在持锁期间执行复杂渲染逻辑。
      */
     struct SkillEditorSnapshot {
         std::uint64_t targetGeneration{};           /**< GUI 提交请求时使用的纯值目标代数。 */
+        std::uint64_t worldGeneration{};            /**< GUI 提交请求时使用的世界代次。 */
         std::string palName;                        /**< 当前显式确认目标的 GUI 展示名称。 */
         skill_editor::SkillState state;             /**< 最近一次从游戏重读的实际技能状态。 */
         skill_editor::SkillCatalogSnapshot catalog; /**< 最近一份可用的运行时技能目录。 */
@@ -288,6 +451,9 @@ private:
         bool targetSelected{};                /**< 是否存在用户显式确认的技能目标。 */
         bool targetMatchesCurrent{};          /**< 当前高亮目标是否与显式确认的 GUID 相同。 */
         bool pending{};                       /**< 技能请求队列中是否仍有待游戏线程处理的请求。 */
+        bool worldAccessible{true};           /**< 当前是否不处于 LoadMap 过渡阶段。 */
+        bool worldLifecycleCallbacksReady{};  /**< LoadMap 前后回调是否均已注册。 */
+        bool targetConfirmedForWorld{};       /**< 当前世界是否已由用户重新确认目标。 */
     };
 
     /**
@@ -496,6 +662,7 @@ private:
             const auto removeId = "删除##passive-" + std::to_string(index);
             if (ImGui::Button(removeId.c_str())) {
                 self->skillQueue_.push({.targetGeneration = snapshot.targetGeneration,
+                                        .worldGeneration = snapshot.worldGeneration,
                                         .kind = skill_editor::SkillKind::passive,
                                         .operation = skill_editor::SkillEditOperation::remove,
                                         .oldPassiveId = id});
@@ -532,6 +699,7 @@ private:
         if (ImGui::Button("确认被动技能修改")) {
             skill_editor::SkillEditRequest request{
                 .targetGeneration = snapshot.targetGeneration,
+                .worldGeneration = snapshot.worldGeneration,
                 .kind = skill_editor::SkillKind::passive,
                 .operation = replacing ? skill_editor::SkillEditOperation::replace
                                        : skill_editor::SkillEditOperation::add,
@@ -587,6 +755,7 @@ private:
                 const auto clearId = "清空##active-" + std::to_string(slot);
                 if (ImGui::Button(clearId.c_str())) {
                     self->skillQueue_.push({.targetGeneration = snapshot.targetGeneration,
+                                            .worldGeneration = snapshot.worldGeneration,
                                             .kind = skill_editor::SkillKind::active,
                                             .operation = skill_editor::SkillEditOperation::remove,
                                             .activeSlot = slot});
@@ -624,6 +793,7 @@ private:
         if (ImGui::Button("确认主动技能修改")) {
             self->skillQueue_.push(
                 {.targetGeneration = snapshot.targetGeneration,
+                 .worldGeneration = snapshot.worldGeneration,
                  .kind = skill_editor::SkillKind::active,
                  .operation = replacing ? skill_editor::SkillEditOperation::replace
                                         : skill_editor::SkillEditOperation::add,
@@ -678,16 +848,26 @@ private:
             self->activeChoice_.reset();
         }
 
-        const bool pending = snapshot.pending || self->skillQueue_.size() != 0;
+        bool selectionPending = false;
+        {
+            const std::lock_guard lock(self->selectionRequestMutex_);
+            selectionPending = self->selectCurrentPalRequest_.has_value();
+        }
+        const bool pending = snapshot.pending || self->skillQueue_.size() != 0 || selectionPending;
         const bool catalogReady = skill_editor::catalog_is_ready_for_editing(snapshot.catalog);
-        const bool editingReady = snapshot.targetMatchesCurrent && catalogReady;
-        ImGui::BeginDisabled(pending);
+        const bool lifecycleReady =
+            snapshot.worldAccessible && snapshot.worldLifecycleCallbacksReady;
+        const bool editingReady = lifecycleReady && snapshot.targetMatchesCurrent && catalogReady;
+        ImGui::BeginDisabled(pending || !lifecycleReady);
         if (ImGui::Button("选择当前帕鲁")) {
-            self->wantSelectCurrentPal_.store(true);
+            const std::lock_guard lock(self->selectionRequestMutex_);
+            self->selectCurrentPalRequest_ = skill_editor::WorldBoundRequest{
+                .worldGeneration = snapshot.worldGeneration,
+            };
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        ImGui::BeginDisabled(pending);
+        ImGui::BeginDisabled(pending || !snapshot.worldAccessible);
         if (ImGui::Button("刷新技能列表")) {
             self->wantRefreshSkillCatalog_.store(true);
         }
@@ -711,11 +891,21 @@ private:
                                "就绪前仅可查看技能。");
         }
         if (snapshot.targetSelected && !snapshot.targetMatchesCurrent) {
-            const char* const message =
-                snapshot.resolutionStatus == skill_editor::SelectedTargetResolutionStatus::success
-                    ? "当前数字键高亮帕鲁与已选择目标不同；点击“选择当前帕鲁”后才会切换。"
-                    : "暂时无法确认当前高亮目标；已保留选择并暂停技能修改。";
+            const char* message = "暂时无法确认当前高亮目标；已保留选择并暂停技能修改。";
+            if (!snapshot.targetConfirmedForWorld) {
+                message = "世界已切换；已保留原选择用于显示，请重新点击“选择当前帕鲁”后再修改。";
+            } else if (snapshot.resolutionStatus ==
+                       skill_editor::SelectedTargetResolutionStatus::success) {
+                message = "当前数字键高亮帕鲁与已选择目标不同；点击“选择当前帕鲁”后才会切换。";
+            }
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "%s", message);
+        }
+        if (!snapshot.worldLifecycleCallbacksReady) {
+            ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F),
+                               "UE4SS 世界切换回调不可用；为防止存档/切图崩溃，技能编辑已停用。");
+        } else if (!snapshot.worldAccessible) {
+            ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
+                               "正在切换世界；所有待处理修改均已取消。");
         }
         if (pending) {
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "技能修改处理中...");
@@ -756,7 +946,7 @@ private:
 
     /**
      * @brief 保护给予物品和修改槽位的复合请求参数。
-     * @details GUI 线程写入参数，游戏线程在 on_update() 中复制参数。
+     * @details GUI 线程写入参数，游戏线程在 EngineTick 回调中复制参数。
      */
     std::mutex req_mutex_;
     /** @brief 待给予的物品 Raw ID；由 req_mutex_ 保护。 */
@@ -788,9 +978,13 @@ private:
     std::atomic<bool> want_discover_{false};
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
     std::atomic<bool> want_scan_items_{false};
+    /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
+    std::atomic<bool> wantProbeObject_{false};
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
+    /** @brief 仅由 EngineTick/LoadMap 游戏线程回调访问的世界代次与确认状态。 */
+    skill_editor::WorldSessionState worldSession_;
     /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
     skill_editor::SelectedTargetState selectedTarget_;
     /** @brief 最近一次输出日志的目标解析状态；仅由游戏线程访问。 */
@@ -801,8 +995,10 @@ private:
     std::mutex skillSnapshotMutex_;
     /** @brief 最近一次发布给 GUI 的完整技能编辑快照；由 skillSnapshotMutex_ 保护。 */
     SkillEditorSnapshot skillSnapshot_;
-    /** @brief 请求游戏线程显式确认当前高亮队伍帕鲁为技能编辑目标。 */
-    std::atomic<bool> wantSelectCurrentPal_{false};
+    /** @brief 保护绑定世界代次的“选择当前帕鲁”请求。 */
+    std::mutex selectionRequestMutex_;
+    /** @brief GUI 提交、EngineTick 消费的最新目标选择请求。 */
+    std::optional<skill_editor::WorldBoundRequest> selectCurrentPalRequest_;
     /** @brief 请求游戏线程立即重新加载完整技能目录。 */
     std::atomic<bool> wantRefreshSkillCatalog_{false};
     /** @brief 启动阶段每两秒重试一次完整技能目录加载。 */
@@ -825,6 +1021,15 @@ private:
     std::optional<skill_editor::SkillOption> activeChoice_;
     /** @brief GUI 上一次渲染的目标代数；变化时重置临时编辑状态。 */
     std::uint64_t skillUiGeneration_{};
+
+    /** @brief EngineTick 游戏线程回调 ID。 */
+    Hook::GlobalCallbackId engineTickCallbackId_{Hook::ERROR_ID};
+    /** @brief LoadMap 前置世界失效回调 ID。 */
+    Hook::GlobalCallbackId loadMapPreCallbackId_{Hook::ERROR_ID};
+    /** @brief LoadMap 后置世界恢复回调 ID。 */
+    Hook::GlobalCallbackId loadMapPostCallbackId_{Hook::ERROR_ID};
+    /** @brief 两个 LoadMap 生命周期回调是否均已成功注册。 */
+    std::atomic<bool> worldLifecycleCallbacksReady_{false};
 };
 
 /** @brief 把 UE4SS 所需入口符号导出到 Windows DLL。 */

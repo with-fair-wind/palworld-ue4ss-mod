@@ -588,6 +588,24 @@ void test_world_session_cannot_confirm_during_transition() {
     CHECK(!session.is_target_confirmed());
 }
 
+void test_world_bound_selection_request_expires_across_transition() {
+    skill_editor::WorldSessionState session;
+    const skill_editor::WorldBoundRequest oldRequest{
+        .worldGeneration = session.generation(),
+    };
+    CHECK(skill_editor::request_can_run(oldRequest, session));
+
+    session.begin_transition();
+    session.finish_transition();
+    CHECK(!skill_editor::request_can_run(oldRequest, session));
+
+    const skill_editor::WorldBoundRequest currentRequest{
+        .worldGeneration = session.generation(),
+    };
+    CHECK(skill_editor::request_can_run(currentRequest, session));
+    CHECK(!session.is_target_confirmed());
+}
+
 void test_observations_do_not_replace_or_clear_explicit_target() {
     skill_editor::SelectedTargetState state;
     CHECK(state.confirm({.identity = identity(10), .name = "Boar"}));
@@ -710,8 +728,8 @@ void test_stale_generation_never_reaches_apply_callback() {
     CHECK(appliedTarget == 0x2000);
 
     const auto stale = skill_editor::apply_if_target_is_current(
-        {.targetGeneration = state.generation() + 1, .worldGeneration = session.generation()}, state,
-        observed, 0x2000, session, apply);
+        {.targetGeneration = state.generation() + 1, .worldGeneration = session.generation()},
+        state, observed, 0x2000, session, apply);
     CHECK(!stale.has_value());
     CHECK(applyCalls == 1);
 
@@ -755,6 +773,7 @@ auto main() -> int {
     test_target_requires_explicit_confirmation();
     test_world_session_transition_requires_reconfirmation();
     test_world_session_cannot_confirm_during_transition();
+    test_world_bound_selection_request_expires_across_transition();
     test_observations_do_not_replace_or_clear_explicit_target();
     test_resolution_status_has_actionable_message();
     test_unique_local_candidate_is_selected();
