@@ -5,6 +5,8 @@
 #include <compare>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <map>
 #include <span>
 #include <string>
 #include <utility>
@@ -84,6 +86,128 @@ enum class ResourceOperation : std::uint8_t { crafting, building, repair };
 [[nodiscard]] constexpr auto operation_index(const ResourceOperation operation) noexcept
     -> std::size_t {
     return static_cast<std::size_t>(operation);
+}
+
+[[nodiscard]] constexpr auto resource_hooks_required(const bool enabled,
+                                                     const bool worldAccessible) noexcept -> bool {
+    return enabled && worldAccessible;
+}
+
+inline constexpr double kPreviewCacheSeconds = 1.0;
+
+class PreviewCacheGate {
+public:
+    auto record(const std::uint64_t generation, const double nowSeconds) noexcept -> void {
+        valid_ = true;
+        generation_ = generation;
+        createdAtSeconds_ = nowSeconds;
+    }
+
+    auto invalidate() noexcept -> void {
+        valid_ = false;
+        generation_ = 0;
+        createdAtSeconds_ = 0.0;
+    }
+
+    [[nodiscard]] auto can_reuse(const std::uint64_t generation,
+                                 const double nowSeconds) const noexcept -> bool {
+        const auto age = nowSeconds - createdAtSeconds_;
+        return valid_ && generation == generation_ && age >= 0.0 && age < kPreviewCacheSeconds;
+    }
+
+private:
+    bool valid_{};
+    std::uint64_t generation_{};
+    double createdAtSeconds_{};
+};
+
+class SnapshotDirtyFlag {
+public:
+    auto mark() noexcept -> void {
+        dirty_ = true;
+    }
+
+    [[nodiscard]] auto consume() noexcept -> bool {
+        return std::exchange(dirty_, false);
+    }
+
+private:
+    bool dirty_{true};
+};
+
+struct ItemAmount {
+    std::string id;
+    std::int64_t amount{};
+};
+
+struct AmountAggregation {
+    std::map<std::string, std::int64_t> amounts;
+    std::string error;
+};
+
+[[nodiscard]] inline auto aggregate_amounts(const std::span<const ItemAmount> values)
+    -> AmountAggregation {
+    AmountAggregation result;
+    for (const auto& value : values) {
+        if (value.id.empty()) {
+            result.error = "物品 ID 不能为空。";
+            result.amounts.clear();
+            return result;
+        }
+        if (value.amount < 0) {
+            result.error = "物品数量不能为负数。";
+            result.amounts.clear();
+            return result;
+        }
+        auto& current = result.amounts[value.id];
+        if (value.amount > std::numeric_limits<std::int64_t>::max() - current) {
+            result.error = "物品数量合计溢出。";
+            result.amounts.clear();
+            return result;
+        }
+        current += value.amount;
+    }
+    return result;
+}
+
+[[nodiscard]] inline auto shared_requirements_available(
+    const std::span<const ItemAmount> requirements,
+    const std::map<std::string, std::int64_t>& available) -> bool {
+    const auto merged = aggregate_amounts(requirements);
+    if (!merged.error.empty()) {
+        return false;
+    }
+    return std::ranges::all_of(merged.amounts, [&available](const auto& requirement) {
+        const auto found = available.find(requirement.first);
+        return found != available.end() && found->second >= requirement.second;
+    });
+}
+
+[[nodiscard]] inline auto max_productable_from_shared_counts(
+    const std::int32_t vanilla, const std::span<const ItemAmount> requirements,
+    const std::map<std::string, std::int64_t>& available) -> std::int32_t {
+    const auto merged = aggregate_amounts(requirements);
+    if (!merged.error.empty() || merged.amounts.empty()) {
+        return vanilla;
+    }
+
+    auto sharedMaximum = std::numeric_limits<std::int64_t>::max();
+    bool hasPositiveRequirement{};
+    for (const auto& [id, required] : merged.amounts) {
+        if (required == 0) {
+            continue;
+        }
+        hasPositiveRequirement = true;
+        const auto found = available.find(id);
+        const auto count = found == available.end() ? std::int64_t{} : found->second;
+        sharedMaximum = std::min(sharedMaximum, count / required);
+    }
+    if (!hasPositiveRequirement) {
+        return vanilla;
+    }
+    const auto clamped = std::min(
+        sharedMaximum, static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()));
+    return std::max(vanilla, static_cast<std::int32_t>(clamped));
 }
 
 struct CapabilityState {

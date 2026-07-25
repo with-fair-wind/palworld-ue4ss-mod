@@ -242,6 +242,49 @@ void test_status_text_reports_partial_support() {
     CHECK(detectingText.find("BuildConsume") != std::string::npos);
 }
 
+void test_disabled_resource_sharing_has_no_runtime_work() {
+    using namespace base_resource_sharing;
+
+    CHECK(!resource_hooks_required(false, true));
+    CHECK(!resource_hooks_required(true, false));
+    CHECK(resource_hooks_required(true, true));
+
+    SnapshotDirtyFlag dirty;
+    CHECK(dirty.consume());
+    CHECK(!dirty.consume());
+    dirty.mark();
+    CHECK(dirty.consume());
+}
+
+void test_preview_cache_expires_at_one_second_and_on_world_change() {
+    using namespace base_resource_sharing;
+
+    PreviewCacheGate cache;
+    cache.record(7, 10.0);
+    CHECK(cache.can_reuse(7, 10.999));
+    CHECK(!cache.can_reuse(7, 11.0));
+    CHECK(!cache.can_reuse(8, 10.1));
+    cache.invalidate();
+    CHECK(!cache.can_reuse(7, 10.1));
+}
+
+void test_preview_amounts_merge_duplicates_and_preserve_vanilla() {
+    using namespace base_resource_sharing;
+
+    const std::array raw{ItemAmount{"Wood", 7}, ItemAmount{"Wood", 5}, ItemAmount{"Stone", 2}};
+    const auto aggregated = aggregate_amounts(raw);
+    CHECK(aggregated.error.empty());
+    CHECK(aggregated.amounts.at("Wood") == 12);
+
+    const std::array requirements{ItemAmount{"Wood", 3}, ItemAmount{"Wood", 2},
+                                  ItemAmount{"Stone", 1}};
+    CHECK(max_productable_from_shared_counts(1, requirements, aggregated.amounts) == 2);
+    CHECK(shared_requirements_available(requirements, aggregated.amounts));
+
+    const std::array invalid{ItemAmount{"Wood", -1}};
+    CHECK(!aggregate_amounts(invalid).error.empty());
+}
+
 auto main() -> int {
     test_settings_default_off_and_round_trip();
     test_settings_file_round_trip();
@@ -252,5 +295,8 @@ auto main() -> int {
     test_union_restoration_accepts_only_the_recorded_tail();
     test_request_guards_and_build_window_are_generation_safe();
     test_status_text_reports_partial_support();
+    test_disabled_resource_sharing_has_no_runtime_work();
+    test_preview_cache_expires_at_one_second_and_on_world_change();
+    test_preview_amounts_merge_duplicates_and_preserve_vanilla();
     return failures == 0 ? 0 : 1;
 }
