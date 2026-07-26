@@ -14,6 +14,7 @@
 #include <items/item_catalog.hpp>
 #include <skills/active_skill_definitions.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
+#include <skills/passive_skill_presets.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
@@ -62,6 +63,23 @@ void test_skill_catalog_filter_and_deduplicate() {
         unique, "passive", std::unordered_set<std::string>{"Passive_Swift"});
     CHECK(visible.size() == 1);
     CHECK(visible[0].id == "Passive_Workaholic");
+}
+
+void test_passive_skill_presets_have_expected_palworld_1_0_ids() {
+    const auto presets = skill_editor::passive_skill_presets();
+    CHECK(presets.size() == 2);
+    CHECK(presets[0].displayName == "工作毕业1");
+    CHECK((presets[0].passiveIds ==
+           std::array<std::string_view, 4>{"WorldTree_CraftSpeed", "CraftSpeed_up3", "Vampire",
+                                           "CraftSpeed_up2"}));
+    CHECK(presets[1].displayName == "工作毕业2");
+    CHECK((presets[1].passiveIds ==
+           std::array<std::string_view, 4>{"WorldTree_CraftSpeed", "CraftSpeed_up3",
+                                           "CraftSpeed_up2", "PAL_CorporateSlave"}));
+}
+
+void test_passive_skill_preset_definitions_are_valid() {
+    CHECK(skill_editor::passive_skill_presets_are_valid());
 }
 
 void test_active_skill_definitions_are_unique_and_known_values_match() {
@@ -855,6 +873,8 @@ void test_stale_generation_never_reaches_apply_callback() {
 auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
+    test_passive_skill_presets_have_expected_palworld_1_0_ids();
+    test_passive_skill_preset_definitions_are_valid();
     test_active_skill_definitions_are_unique_and_known_values_match();
     test_internal_active_skill_filter();
     test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
