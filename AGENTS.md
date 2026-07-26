@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.5.1），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.5.2），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -110,7 +110,9 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 非拥有句柄；业务数据的反射读取和修改只在 EngineTick 游戏线程回调执行。当前技能目标从唯一属于本地
 控制器的队伍 Holder 解析，用户点击“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数锁定；
 只有再次点击该按钮才会切换编辑目标。数字键切换或瞬时解析失败只暂停写入，不自动清空选择；消费请求时仍会
-重新校验当前 GUID。不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。LoadMap 前置回调递增世界代次、
+重新校验当前 GUID。未确认目标且没有选择/编辑请求时不执行当前帕鲁解析；确认后最多每 250 毫秒后台校验一次，
+而选择和编辑请求会在同一 EngineTick 立即解析。解析得到的 UObject 只在当次回调内使用，技能 GUI 快照仅在
+可观察值变化时发布。不缓存扫描得到的帕鲁对象，也不注册详情页函数 Hook。LoadMap 前置回调递增世界代次、
 清空所有待处理操作并撤销写权限；后置回调只恢复读取和目录刷新。原目标 GUID/名称仅用于显示，进入新世界后
 必须再次点击“选择当前帕鲁”，技能编辑请求还必须匹配提交时的世界代次。
 
@@ -118,7 +120,8 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 `scripts/generate-active-skill-definitions.ps1` 从 Palworld 1.0 UHT dump 生成的数值/Raw ID 表。
 主动和被动名称由 `PalUIUtility` 按游戏当前语言查询，`PalPlayerInventoryData` 只作为当帧本地化世界上下文；
 上下文暂不可用时目录回退为 Raw ID。两个目录区段分别维护可用状态、错误和旧目录回退，一类失败不禁用另一类。
-更新 Palworld/UHT dump 后必须重新运行生成脚本。
+启动时物品扫描和技能目录加载/失败重试属于初始化工作，不是常驻逐帧解析。更新 Palworld/UHT dump 后必须
+重新运行生成脚本。
 
 跨据点资源共享只读取同公会 `PalBaseCampModuleItemStorage.ContainerInfos` 中登记的普通仓储，并要求每个
 容器 GUID 都能解析到已加载 `PalItemContainer`。制作/建造预览使用有效期 1 秒的纯数值缓存，合计玩家 Common
@@ -161,14 +164,16 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.5.1)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.5.2)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
 主动/被动名称跟随游戏语言、已装备主动技能数值可映射为标签、被动技能新增/替换/删除，以及主动技能
 装备/替换/清空。场景中保留一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
 检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。还应重复退出世界/重进存档，确认
-加载期间请求被清空、原目标仅保留显示、重新选择前无法写入，并且 LoadMap 不再崩溃。资源共享还应验证：
+加载期间请求被清空、原目标仅保留显示、重新选择前无法写入，并且 LoadMap 不再崩溃。还应确认未选择目标时
+不再持续解析队伍 Holder，确认目标后数字键切换在约 250 毫秒内反映，且在该窗口内提交修改仍会立即重查并拒绝
+错误目标。资源共享还应验证：
 默认关闭且配置可持久化；关闭时工厂/建造界面性能与未启用资源功能一致；开启后反复打开工厂和建造菜单不再
 持续卡顿，另一据点材料变化可在约 1 秒内反映到预览；制作/建造能消费同公会另一已加载据点的普通箱子材料；
 材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
