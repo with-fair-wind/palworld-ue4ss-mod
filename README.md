@@ -1,8 +1,8 @@
-# PalworldEditor 1.4.2 — Palworld 物品与帕鲁技能编辑器
+# PalworldEditor 1.6.4 — Palworld 物品、帕鲁技能与据点资源编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
-提供游戏内物品编辑，以及当前选中帕鲁的主动/被动技能编辑。所有操作都在 UE4SS GUI 的 ImGui
-窗口中完成，不依赖游戏 F10 控制台。
+提供游戏内物品编辑、当前选中帕鲁的主动/被动技能编辑，以及可选的同公会跨据点制作/建造材料共享。
+所有操作都在 UE4SS GUI 的 ImGui 窗口中完成，不依赖游戏 F10 控制台。
 
 ## 功能
 
@@ -12,12 +12,13 @@
 | **物品浏览器** | 扫描游戏物品定义与本地化名称 → 按名称/ID 搜索 → 点击填充 Raw ID |
 | **背包列表** | 读取主背包 → 显示 `本地化名称 [RawId] ×数量` |
 | **修改数量** | 选中物品 → 设置新数量（写 `StackCount`） |
-| **目标帕鲁** | 用 Q/E 指定下一只待出战帕鲁，再点击“选择当前帕鲁”确认编辑目标 |
-| **被动技能** | 最多 4 个；支持新增、替换、删除 |
+| **目标帕鲁** | 用数字键高亮下一次按 E 会召唤的队伍帕鲁，再点击“选择当前帕鲁”确认；确认前不做后台扫描 |
+| **被动技能** | 最多 4 个；支持新增、替换、删除，以及一次性应用可扩展的四词条预设 |
 | **主动技能** | 编辑 3 个 `EquipWaza` 槽位；支持装备、替换、清空 |
-| **技能目录** | 运行时加载全部可分配被动与 `EPalWazaID` 主动技能 |
-| **中文搜索** | 物品与技能均显示 `中文名 [RawId]`，可按中文名或原始 ID 搜索 |
-| **安全修改** | 以个体 GUID + 目标代数校验 FIFO 请求；Q/E 切换后立即取消选择并丢弃旧请求 |
+| **技能目录** | 进入存档且主背包就绪后自动重试完整目录；手动刷新也必须通过运行时安全检查 |
+| **本地化搜索** | 物品与技能均显示 `当前语言名称 [RawId]`，可按名称或原始 ID 搜索 |
+| **据点资源共享** | 默认关闭；单人/本地房主可让制作和建造使用同公会所有已加载普通仓储材料 |
+| **安全修改** | Unreal 访问只在 EngineTick 游戏线程执行；修改前立即重查 GUID + 目标/世界代次，跨世界请求自动失效 |
 | **类名发现** | 扫描 UObject 直方图（调试用） |
 
 ## 前置依赖
@@ -43,8 +44,8 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 #    -> build/Game__Shipping__Win64/bin/PalworldEditor.dll
 
-# 4. 运行纯 C++ 技能编辑测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests
+# 4. 运行纯 C++ 技能编辑与据点资源安全契约测试
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests
 ctest --test-dir build --output-on-failure
 
 # 5. 部署到游戏
@@ -94,10 +95,12 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 
 ### 帕鲁主动/被动技能
 
-1. 确保队伍中有帕鲁，并用 Q/E 选择下一只待出战帕鲁；无需打开帕鲁盒子或详情页。
-2. 点击“选择当前帕鲁”。成功后窗口显示 `当前待出战帕鲁：<CharacterID>` 和技能编辑区。
+1. 确保队伍中有帕鲁，并用数字键高亮下一次按 E 会召唤的队伍帕鲁；无需打开帕鲁盒子或详情页。
+2. 点击“选择当前帕鲁”。成功后窗口显示 `当前已选择帕鲁：<CharacterID>` 和技能编辑区。
    点击按钮前不会读取或修改任何帕鲁技能。
 3. 被动技能区域：
+   - 从“词条预设”下拉框选择“工作毕业1”或“工作毕业2”，确认四个当前语言词条名称后点击“应用预设”；
+   - 选择预设本身不会修改技能；“应用预设”会把完整被动集合精确替换成该预设；
    - 当前被动逐行显示；
    - 点击“替换”后从可搜索下拉框中选择并确认；
    - 点击“删除”移除已有被动；
@@ -105,14 +108,73 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 4. 主动技能区域固定显示 3 个 `EquipWaza` 槽位：
    - 已装备槽位可替换或清空；
    - 第一个空槽可选择并装备新技能。
-5. 点击“刷新技能列表”可重新加载运行时技能目录。
+5. 进入存档且 Common 主背包容器就绪后，mod 会每两秒自动重试一次完整技能目录，成功后停止重试；点击
+   “刷新技能列表”会跳过时间节流，但同样必须先通过运行时安全检查，随后重新加载主动技能、被动技能及
+   当前游戏语言名称。
 
 下拉框只在点击确认时提交修改；选择候选本身不会立刻写入游戏。已经拥有/装备的技能会从候选中隐藏。
-每次修改都在游戏线程执行并重读实际状态；替换未生效时会尝试恢复完整原状态。
-如果玩家用 Q/E 切换目标，当前确认会立刻失效、编辑区清空，所有尚未处理的请求都会被丢弃；
-必须再次点击“选择当前帕鲁”才能继续。目标从本地 `PlayerController` 解析，并以
+每次修改都在游戏线程执行并重读实际状态；替换未生效时会尝试恢复完整原状态。应用预设只提交一个请求，
+仅写入当前词条与目标预设之间的差异；目标已经一致时不写入，因游戏拒绝而部分生效时会按重读状态回滚。
+预设是 `inc/skills/passive_skill_presets.hpp` 中的编译期 C++ 表，新增预设不需要增加 Hook、扫描或逐帧任务。
+点击“选择当前帕鲁”后，目标保持为纯值锁定；数字键切换高亮不会自动替换或清空该选择，只有再次点击该按钮
+才会切换编辑目标。空闲时无论是否已确认目标，mod 都不再后台解析队伍 Holder。
+点击“选择当前帕鲁”或提交技能修改时，mod 会在同一游戏线程回调中立即重新解析并校验 GUID；如果数字键
+高亮目标已变化，本次修改会在写入前被拒绝。解析得到的 `UObject*` 只在当前回调中使用。
+退出世界、切换地图或重新进入存档时，LoadMap 回调会清空所有待处理物品/技能操作并撤销技能写权限；
+原帕鲁名称和 GUID 仅保留用于显示。进入新世界后必须再次点击“选择当前帕鲁”，旧世界请求不会补执行。
+目标从唯一属于本地控制器的队伍 Holder 解析，并以
 `FPalInstanceID.InstanceId` 区分同种帕鲁；GUI 与游戏线程之间不传递或缓存 `UObject*`。
-技能目录本地化仍使用 `PalPlayerInventoryData` 作为稳定世界上下文。
+主动技能数值与 Raw ID 来自生成的 Palworld 1.0 定义表，不读取运行时 `UEnum` 内存布局；名称由
+`PalUIUtility` 按游戏当前语言查询，并使用 `PalPlayerInventoryData` 作为当帧世界上下文。游戏运行时尚未
+完整就绪时目录可回退显示 Raw ID，但所有技能写入保持禁用；自动重试或手动刷新成功后恢复当前语言名称和编辑。
+主动和被动目录分别保留可用状态和最近错误，一类刷新失败不会清空另一类已经可用的目录。
+启动时的一次物品扫描保持不变；技能目录及本地化反射会等待 Common 主背包容器有效，并且只在现有 2 秒刷新
+到期或手动请求时检查，不会在启动画面或每个 EngineTick 强行查询尚未就绪的玩家运行时。
+主动技能候选会排除稳定 Raw ID 中明确属于游戏内部用途的 `Human_`、`_GYM_`、`Raid` 和 `Boss`
+条目；普通技能、`SelfDestruct` 和正常的 `Unique_*` 帕鲁专属技能仍会保留。
+
+游戏内验证时可在场景中保留一只野生帕鲁，同时让队伍 UI 高亮另一只队伍帕鲁。点击
+“选择当前帕鲁”后，目标必须是下一次按 E 会召唤的队伍帕鲁，而不是场景中的野生帕鲁。
+
+### 同公会跨据点资源共享
+
+1. 展开“据点资源共享”，勾选“同公会跨据点资源共享”。默认值为关闭，选择会写入
+   `ue4ss/Mods/PalworldEditor/config.ini`。
+2. 进入单人世界或由本机担任房主的世界；状态区会显示已加载的同公会据点和普通资源容器数量。
+3. 在据点 A 发起制作或建造时，可使用据点 B 普通箱子中的材料。箱子界面仍只显示本地箱子，
+   物品不会预先移动，实际扣除、复制和存档仍由 Palworld 完成。
+4. 当前据点/当前资源助手已有的容器保持在队列前部，因此优先遵循原版本地消耗顺序。
+5. 关闭开关或切换世界时，mod 会先恢复并验证所有临时容器引用，再恢复原版行为。
+6. 在同一世界内重新打开开关会按当前世界代次重新启动目录调度并自动恢复计数，无需退出存档。
+
+关闭共享时不会注册任何资源 UFunction Hook，也不会发现据点容器。开启后，mod 通过
+`PalBaseCampManager`、`PalBaseCampModel`、`PalBaseCampModuleItemStorage` 和 `PalMapObjectManager`
+直接取得同公会普通箱子，不使用全局 `FindAllOf`，也不扫描 `ItemSlotArray` 或统计每个槽位数量。
+据点/箱子结构事件只合并记录目录失效；存在活动制作或建造会话时不会拆除并重建联合，会话结束后才校准一次。
+8 秒低频校准只在没有活动材料会话时运行，作为事件遗漏时的安全兜底。
+同一世界内重新开启只安排既有的一次管理器目录校准，不增加线程、全局扫描、槽位扫描或逐帧任务；失败仍按
+1 秒退避，关闭状态保持零资源 Hook 和零目录发现。
+
+原版建筑菜单的 `OnOpenMenu` 和制作模型的 `Initialize` 都在原函数执行前建立短生命周期资源联合，使首次
+图标/配方资格计算即可读取共享材料。制作只扩展本地主背包 `InventoryMultiHelper`，避免同一箱子同时从据点
+模块和材料助手重复计数；建造按原版预览与扣料需要扩展据点模块和材料助手。`StartProduction` 原请求返回后
+立即释放制作会话，未提交请求时仍以 1.5 秒空闲租约兜底；退出建造模式时释放建造会话。跨帧只保存 GUID、
+对象全名和序列账本，不保存 `UObject*` 或 Unreal 数组地址。高频预览 Hook 只更新固定大小会话状态，不执行
+反射、目录扫描、数组改写或日志输出。若首次菜单早于目录初始化，菜单上下文会触发下一游戏 Tick 的一次扫描，
+扫描完成后直接建立当前会话，不需要先打开炉子，也不会进入逐帧重试。
+
+此功能只处理制作与建造材料，不共享食物箱、帕鲁运输、自动生产或箱子 UI。修理材料共享目前明确显示
+“不可用”，因为 Palworld 1.0.1 尚未验证安全的修理检查与扣除入口。不要同时启用 IntegratedStorage、
+UBIM Lite、BlueprintResearch 或其他会修改相同制作/建造资源路径的 mod。
+
+配置文件只接受：
+
+```ini
+[BaseResourceSharing]
+Enabled=true
+```
+
+也可把值设为 `false`。配置缺失或无效时安全回退为关闭。
 
 ## 物品 ID
 
@@ -129,20 +191,33 @@ mods/PalworldEditor/
 ├── inc/
 │   ├── game/
 │   │   └── pal_game.hpp             物品/背包与当前待出战帕鲁解析
+│   ├── base_resource_sharing/
+│   │   ├── hook_manifest.hpp         Palworld 1.0.1 Hook 能力清单
+│   │   ├── pal_base_resources.hpp    跨据点资源桥值接口
+│   │   ├── resource_pool.hpp         过滤、排序、能力与恢复纯逻辑
+│   │   ├── resource_session.hpp      目录校准调度与制作/建造会话租约
+│   │   └── settings.hpp              默认关闭的持久化配置
 │   ├── items/
 │   │   └── item_catalog.hpp          物品标签、搜索、去重、排序与索引
 │   ├── skills/
+│   │   ├── active_skill_definitions.hpp Palworld 1.0 主动技能数值/Raw ID 生成表
+│   │   ├── pal_resolution_scheduler.hpp 当前帕鲁选择/编辑事件决策与纯值解析快照
 │   │   ├── pal_skills.hpp           Palworld 技能目录适配层
 │   │   ├── selected_target_state.hpp 当前目标状态与过期请求保护
 │   │   ├── skill_catalog.hpp        可搜索技能目录纯逻辑
-│   │   └── skill_editor_service.hpp 编辑校验、重读、回滚与 FIFO 队列
+│   │   ├── skill_editor_service.hpp 编辑校验、重读、回滚与 FIFO 队列
+│   │   └── world_session_state.hpp  LoadMap 世界代次与重新确认状态
 │   └── support/
 │       └── text_encoding.hpp        UE 宽字符串到 UTF-8
 ├── src/
-│   ├── dllmain.cpp              Mod 类 + GUI + 游戏线程请求分发
-│   └── pal_skills.cpp           技能目录与游戏函数实现
+│   ├── base_resource_settings.cpp 配置解析与原子保存
+│   ├── dllmain.cpp                Mod 类 + GUI + EngineTick/LoadMap 请求分发
+│   ├── pal_base_resource_runtime.* 管理器发现与可逆临时联合
+│   ├── pal_base_resources.cpp     事件调度、会话租约与 Hook
+│   └── pal_skills.cpp             技能目录与游戏函数实现
 └── tests/
-    └── skill_editor_tests.cpp   不链接 UE4SS 的 CTest 测试
+    ├── base_resource_sharing_tests.cpp 资源共享纯 C++ 安全契约
+    └── skill_editor_tests.cpp          技能编辑纯 C++ 测试
 ```
 
 仓库根目录：
@@ -151,7 +226,7 @@ mods/PalworldEditor/
 ├── CMakeLists.txt       Super-build：add_subdirectory(RE-UE4SS) + add_subdirectory(mods)
 ├── CMakePresets.json    Ninja + MSVC x64 preset
 ├── cmake/Deploy.cmake   deploy target -> 游戏 Mods 目录
-└── scripts/             setup.ps1 / build.ps1 / deploy.ps1
+└── scripts/             setup/build/deploy + 主动技能定义生成脚本
 ```
 
 ## 已知限制
@@ -159,12 +234,22 @@ mods/PalworldEditor/
 - F10 游戏控制台不可用（Palworld ConsoleManager 签名歧义）；所有操作通过 UE4SS GUI。
 - 直接写 `StackCount` 绕过游戏复制/通知逻辑；单机可用，多人不可靠。
 - 技能编辑支持单机和房主/本地主机；普通联机客户端不支持。
+- 据点资源共享同样只支持单人世界/本地房主，且只包含当前已加载的同公会普通仓储容器。
+- 修理材料共享尚不可用；缺少必需 Hook、容器解析不完整或恢复序列不一致时，对应能力会按世界失败关闭。
+- 1.6.1 修复同一世界内关闭后重新开启资源共享的生命周期；1.6.2 移除确认帕鲁后的 250 毫秒
+  `FindAllOf` 后台解析；1.6.3 把资源联合提前到原版首次资格计算前，制作只暴露唯一 Helper 路径，并暂停活动
+  会话期间的目录校准；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚，不增加常驻工作。
+- 不要与 UBIM Lite 或其他修改相同制作/建造资源请求路径的 mod 同时运行。
 - 主动技能只修改 `EquipWaza`，不会解锁或修改 `MasteredWaza`，也不编辑伙伴技能。
 - 技能数组通过 UE4SS 的真实 `TArray<T>` 读取；仍依赖 Palworld 1.0 的 UFunction 参数布局，
   游戏更新后可能需要同步 UHT 签名。
+- 游戏版本更新并替换 `UHTHeaderDump/` 后，需要运行
+  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-active-skill-definitions.ps1`
+  更新主动技能定义表。
 - 是否持久化由游戏公开函数和存档流程决定；修改后请正常保存，并在重载存档后确认。
 
 ## 参考
 
 - [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) · [创建 C++ mod](https://docs.ue4ss.com/guides/creating-a-c++-mod.html)
 - [pwmodding.wiki](https://pwmodding.wiki) · [ItemIDs](https://github.com/KURAMAAA0/PalModding/blob/main/ItemIDs.txt)
+- [PalSchema](https://github.com/Okaetsu/PalSchema) · [PalworldSaveTools](https://github.com/deafdudecomputers/PalworldSaveTools)

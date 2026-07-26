@@ -1,17 +1,24 @@
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <iostream>
+#include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_set>
 #include <vector>
 
 #include <items/item_catalog.hpp>
+#include <skills/active_skill_definitions.hpp>
+#include <skills/pal_resolution_scheduler.hpp>
+#include <skills/passive_skill_presets.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
+#include <skills/world_session_state.hpp>
 
 namespace {
 auto failures = 0;
@@ -58,26 +65,272 @@ void test_skill_catalog_filter_and_deduplicate() {
     CHECK(visible[0].id == "Passive_Workaholic");
 }
 
-void test_skill_catalog_refresh_keeps_last_success() {
-    skill_editor::SkillCatalogSnapshot previous{
-        .passiveSkills = {{.id = "Passive_Swift", .localizedName = "神速"}},
-        .activeSkills = {{.id = "FireBall",
-                          .localizedName = "火球",
-                          .activeValue = std::uint16_t{1}}},
-        .ready = true,
+void test_passive_skill_presets_have_expected_palworld_1_0_ids() {
+    const auto presets = skill_editor::passive_skill_presets();
+    CHECK(presets.size() == 2);
+    CHECK(presets[0].displayName == "工作毕业1");
+    CHECK((presets[0].passiveIds == std::array<std::string_view, 4>{"WorldTree_CraftSpeed",
+                                                                    "CraftSpeed_up3", "Vampire",
+                                                                    "CraftSpeed_up2"}));
+    CHECK(presets[1].displayName == "工作毕业2");
+    CHECK((presets[1].passiveIds ==
+           std::array<std::string_view, 4>{"WorldTree_CraftSpeed", "CraftSpeed_up3",
+                                           "CraftSpeed_up2", "PAL_CorporateSlave"}));
+}
+
+void test_passive_skill_preset_definitions_are_valid() {
+    CHECK(skill_editor::passive_skill_presets_are_valid());
+}
+
+void test_passive_skill_preset_builds_one_world_bound_request() {
+    skill_editor::SkillEditQueue queue;
+    const auto& preset = skill_editor::passive_skill_presets().front();
+
+    queue.push(skill_editor::make_passive_preset_request(preset, 17, 23));
+
+    CHECK(queue.size() == 1);
+    const auto request = queue.try_pop();
+    CHECK(request.has_value());
+    CHECK(request->targetGeneration == 17);
+    CHECK(request->worldGeneration == 23);
+    CHECK(request->kind == skill_editor::SkillKind::passive);
+    CHECK(request->operation == skill_editor::SkillEditOperation::replaceAllPassives);
+    CHECK((request->desiredPassiveIds == std::vector<std::string>{"WorldTree_CraftSpeed",
+                                                                  "CraftSpeed_up3", "Vampire",
+                                                                  "CraftSpeed_up2"}));
+}
+
+void test_active_skill_definitions_are_unique_and_known_values_match() {
+    const auto definitions = skill_editor::active_skill_definitions();
+    CHECK(!definitions.empty());
+
+    std::unordered_set<std::uint16_t> values;
+    std::unordered_set<std::string_view> ids;
+    for (const auto& definition : definitions) {
+        CHECK(definition.value != 0);
+        CHECK(!definition.id.empty());
+        CHECK(definition.id != "None");
+        CHECK(definition.id != "MAX");
+        CHECK(values.insert(definition.value).second);
+        CHECK(ids.insert(definition.id).second);
+    }
+
+    CHECK(skill_editor::find_active_skill_id(1) == std::optional<std::string_view>{"Human_Punch"});
+    CHECK(skill_editor::find_active_skill_id(15) ==
+          std::optional<std::string_view>{"Unique_Boar_Tackle"});
+    CHECK(skill_editor::find_active_skill_id(22) == std::optional<std::string_view>{"AirCanon"});
+    CHECK(skill_editor::find_active_skill_id(124) == std::optional<std::string_view>{"MudShot"});
+    CHECK(!skill_editor::find_active_skill_id(0).has_value());
+    CHECK(skill_editor::active_skill_id_or_numeric(15) == "Unique_Boar_Tackle");
+    CHECK(skill_editor::active_skill_id_or_numeric(124) == "MudShot");
+    CHECK(skill_editor::active_skill_id_or_numeric(65535) == "65535");
+}
+
+void test_internal_active_skill_filter() {
+    CHECK(skill_editor::is_internal_active_skill_id("Human_Punch"));
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_MoonQueen_GYM_Act"));
+    CHECK(skill_editor::is_internal_active_skill_id("RaidCutter"));
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_LilyQueen_LilyHealing_Boss"));
+    CHECK(!skill_editor::is_internal_active_skill_id("SelfDestruct"));
+    CHECK(!skill_editor::is_internal_active_skill_id("MudShot"));
+    CHECK(!skill_editor::is_internal_active_skill_id("Unique_Boar_Tackle"));
+
+    constexpr std::array definitions{
+        skill_editor::ActiveSkillDefinition{.value = 1, .id = "Human_Punch"},
+        skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
+        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
     };
-    skill_editor::SkillCatalogSnapshot failed{.error = "runtime lookup failed"};
+    const auto options = skill_editor::make_active_skill_options(
+        definitions, [](const auto&) { return std::string{}; });
+    CHECK(options.size() == 2);
+    CHECK(options[0].id == "Unique_Boar_Tackle");
+    CHECK(options[1].id == "MudShot");
+}
 
-    const auto fallback = skill_editor::with_catalog_fallback(previous, failed);
-    CHECK(fallback.ready);
-    CHECK(fallback.passiveSkills.size() == 1);
-    CHECK(fallback.activeSkills.size() == 1);
-    CHECK(fallback.error == "runtime lookup failed");
+void test_active_skill_options_use_runtime_localization_with_raw_id_fallback() {
+    constexpr std::array definitions{
+        skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
+        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
+    };
 
-    const auto unavailable = skill_editor::with_catalog_fallback({}, failed);
-    CHECK(!unavailable.ready);
-    CHECK(unavailable.passiveSkills.empty());
-    CHECK(unavailable.error == "runtime lookup failed");
+    const auto options = skill_editor::make_active_skill_options(
+        definitions, [](const skill_editor::ActiveSkillDefinition& definition) {
+            return definition.value == 15 ? std::string{"野猪突进"} : std::string{};
+        });
+
+    CHECK(options.size() == 2);
+    CHECK(options[0].id == "Unique_Boar_Tackle");
+    CHECK(options[0].localizedName == "野猪突进");
+    CHECK(options[0].activeValue == std::optional<std::uint16_t>{std::uint16_t{15}});
+    CHECK(skill_editor::skill_label(options[0]) == "野猪突进 [Unique_Boar_Tackle]");
+    CHECK(options[1].id == "MudShot");
+    CHECK(options[1].localizedName.empty());
+    CHECK(skill_editor::skill_label(options[1]) == "MudShot");
+}
+
+void test_skill_catalog_refresh_merges_sections_independently() {
+    const skill_editor::SkillCatalogSnapshot previous{
+        .passive =
+            {
+                .skills = {{.id = "Passive_Old", .localizedName = "旧被动"}},
+                .ready = true,
+            },
+        .active =
+            {
+                .skills = {{.id = "OldActive", .activeValue = std::uint16_t{1}}},
+                .ready = true,
+            },
+    };
+    const skill_editor::SkillCatalogSnapshot refreshed{
+        .passive =
+            {
+                .skills = {{.id = "Passive_New", .localizedName = "新被动"}},
+                .ready = true,
+            },
+        .active = {.error = "active refresh failed"},
+    };
+
+    const auto merged = skill_editor::with_catalog_fallback(previous, refreshed);
+    CHECK(merged.passive.ready);
+    CHECK(merged.passive.skills.size() == 1);
+    CHECK(merged.passive.skills[0].id == "Passive_New");
+    CHECK(merged.passive.error.empty());
+    CHECK(merged.active.ready);
+    CHECK(merged.active.skills.size() == 1);
+    CHECK(merged.active.skills[0].id == "OldActive");
+    CHECK(merged.active.error == "active refresh failed");
+}
+
+void test_skill_catalog_first_partial_load_keeps_available_section() {
+    const skill_editor::SkillCatalogSnapshot refreshed{
+        .passive =
+            {
+                .skills = {{.id = "Passive_Swift", .localizedName = "神速"}},
+                .ready = true,
+            },
+        .active = {.error = "active unavailable"},
+    };
+
+    const auto merged = skill_editor::with_catalog_fallback({}, refreshed);
+    CHECK(merged.passive.ready);
+    CHECK(merged.passive.skills.size() == 1);
+    CHECK(!merged.active.ready);
+    CHECK(merged.active.skills.empty());
+    CHECK(merged.active.error == "active unavailable");
+}
+
+void test_partial_catalog_is_not_ready_for_editing() {
+    skill_editor::SkillCatalogSnapshot catalog{
+        .passive =
+            {
+                .skills = {{.id = "PAL_rude"}},
+                .ready = false,
+            },
+        .active =
+            {
+                .skills = {{.id = "Unique_Boar_Tackle", .activeValue = std::uint16_t{15}}},
+                .ready = true,
+            },
+        .runtimeReady = false,
+    };
+
+    CHECK(!skill_editor::catalog_is_ready_for_editing(catalog));
+    catalog.passive.ready = true;
+    CHECK(!skill_editor::catalog_is_ready_for_editing(catalog));
+    catalog.runtimeReady = true;
+    CHECK(skill_editor::catalog_is_ready_for_editing(catalog));
+}
+
+void test_catalog_fallback_preserves_established_runtime_readiness() {
+    const skill_editor::SkillCatalogSnapshot previous{
+        .passive =
+            {
+                .skills = {{.id = "PAL_rude"}},
+                .ready = true,
+            },
+        .active =
+            {
+                .skills = {{.id = "Unique_Boar_Tackle", .activeValue = std::uint16_t{15}}},
+                .ready = true,
+            },
+        .runtimeReady = true,
+    };
+    const skill_editor::SkillCatalogSnapshot failed{
+        .passive = {.error = "passive unavailable"},
+        .active = {.error = "active unavailable"},
+        .runtimeReady = false,
+    };
+
+    const auto merged = skill_editor::with_catalog_fallback(previous, failed);
+    CHECK(merged.runtimeReady);
+    CHECK(skill_editor::catalog_is_ready_for_editing(merged));
+}
+
+void test_catalog_refresh_scheduler_throttles_automatic_retries() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+
+    CHECK(scheduler.should_refresh(false, false, start, [] { return true; }));
+    CHECK(!scheduler.should_refresh(false, false, start + 1s, [] { return true; }));
+    CHECK(scheduler.should_refresh(false, false, start + 2s, [] { return true; }));
+    CHECK(!scheduler.should_refresh(false, true, start + 4s, [] { return true; }));
+}
+
+void test_catalog_refresh_scheduler_honors_manual_refresh_immediately() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+
+    CHECK(scheduler.should_refresh(false, false, start, [] { return true; }));
+    CHECK(scheduler.should_refresh(true, false, start + 100ms, [] { return true; }));
+    CHECK(scheduler.should_refresh(true, true, start + 200ms, [] { return true; }));
+}
+
+void test_catalog_refresh_scheduler_defers_unsafe_runtime_queries() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+    auto readinessChecks = 0;
+
+    CHECK(!scheduler.should_refresh(false, false, start, [&readinessChecks] {
+        ++readinessChecks;
+        return false;
+    }));
+    CHECK(readinessChecks == 1);
+    CHECK(!scheduler.should_refresh(false, false, start + 1s, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 1);
+    CHECK(scheduler.should_refresh(false, false, start + 2s, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 2);
+}
+
+void test_catalog_refresh_scheduler_never_bypasses_runtime_gate() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+    auto readinessChecks = 0;
+
+    CHECK(!scheduler.should_refresh(true, false, start, [&readinessChecks] {
+        ++readinessChecks;
+        return false;
+    }));
+    CHECK(readinessChecks == 1);
+    CHECK(scheduler.should_refresh(true, false, start + 1ms, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 2);
+    CHECK(!scheduler.should_refresh(false, true, start + 2s, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 2);
 }
 
 void test_item_catalog_labels_and_search() {
@@ -185,6 +438,15 @@ auto passive_request(const skill_editor::SkillEditOperation operation, std::stri
     };
 }
 
+auto passive_set_request(std::vector<std::string> ids) -> skill_editor::SkillEditRequest {
+    return {
+        .target = 0x1234,
+        .kind = skill_editor::SkillKind::passive,
+        .operation = skill_editor::SkillEditOperation::replaceAllPassives,
+        .desiredPassiveIds = std::move(ids),
+    };
+}
+
 void test_passive_edits_validate_target_and_limits() {
     FakeSkillGateway gateway;
     gateway.valid = false;
@@ -246,6 +508,94 @@ void test_passive_replace_rolls_back_on_failure() {
     CHECK(!std::ranges::contains(result.state.passiveIds, "A"));
 }
 
+void test_passive_set_rejects_invalid_definitions_before_writing() {
+    const std::array invalidSets{
+        std::vector<std::string>{},
+        std::vector<std::string>{"A", "B", "C"},
+        std::vector<std::string>{"A", "B", "C", "C"},
+        std::vector<std::string>{"A", "B", "C", ""},
+    };
+    for (const auto& ids : invalidSets) {
+        FakeSkillGateway gateway;
+        gateway.state.passiveIds = {"O1", "O2", "O3", "O4"};
+        const auto result = skill_editor::execute_skill_edit(gateway, passive_set_request(ids));
+        CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+        CHECK(gateway.calls == std::vector<std::string>({"read"}));
+    }
+}
+
+void test_matching_passive_set_is_zero_write() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"D", "C", "B", "A"};
+
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "C", "D"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(gateway.calls == std::vector<std::string>({"read"}));
+}
+
+void test_passive_set_replaces_a_completely_different_set() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"Old1", "Old2", "Old3", "Old4"};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_set_request({"New1", "New2", "New3", "New4"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(gateway.calls == std::vector<std::string>({"read", "remove:Old1", "remove:Old2",
+                                                     "remove:Old3", "remove:Old4", "add:New1",
+                                                     "add:New2", "add:New3", "add:New4", "read"}));
+    CHECK(skill_editor::detail::same_passives(
+        result.state.passiveIds, std::vector<std::string>{"New1", "New2", "New3", "New4"}));
+}
+
+void test_passive_set_uses_only_required_difference_writes() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A", "B", "Old1", "Old2"};
+
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "New1", "New2"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(gateway.calls == std::vector<std::string>({"read", "remove:Old1", "remove:Old2",
+                                                     "add:New1", "add:New2", "read"}));
+    CHECK(skill_editor::detail::same_passives(result.state.passiveIds,
+                                              std::vector<std::string>{"A", "B", "New1", "New2"}));
+}
+
+void test_passive_set_rolls_back_after_partial_failure() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A", "B", "C", "D"};
+    gateway.addOutcomes = {true, false, true, true};
+
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "X", "Y"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::rolledBack);
+    CHECK(gateway.calls ==
+          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y", "read",
+                                    "remove:X", "add:C", "add:D", "read"}));
+    CHECK(skill_editor::detail::same_passives(result.state.passiveIds,
+                                              std::vector<std::string>{"A", "B", "C", "D"}));
+}
+
+void test_passive_set_reports_rollback_failure() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A", "B", "C", "D"};
+    gateway.addOutcomes = {true, false, false, true};
+
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "X", "Y"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
+    CHECK(gateway.calls ==
+          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y", "read",
+                                    "remove:X", "add:C", "add:D", "read"}));
+    CHECK(!skill_editor::detail::same_passives(result.state.passiveIds,
+                                               std::vector<std::string>{"A", "B", "C", "D"}));
+}
+
 auto active_request(const skill_editor::SkillEditOperation operation, const std::size_t slot,
                     std::optional<skill_editor::ActiveSkill> skill = std::nullopt)
     -> skill_editor::SkillEditRequest {
@@ -282,6 +632,12 @@ void test_active_edits_validate_three_compact_slots() {
     result = skill_editor::execute_skill_edit(
         gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{3, "WindCutter"}}));
     CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+
+    const auto originalActiveSkills = gateway.state.activeSkills;
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replaceAllPassives, 0));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+    CHECK(result.state.activeSkills == originalActiveSkills);
 }
 
 void test_active_add_replace_and_remove_preserve_order() {
@@ -369,6 +725,63 @@ auto identity(const std::uint32_t value) -> skill_editor::TargetIdentity {
     return {.instanceId = {value, value + 1, value + 2, value + 3}};
 }
 
+void test_pal_resolution_decision_has_zero_idle_work_after_selection() {
+    CHECK(skill_editor::decide_pal_resolution(false, false) ==
+          skill_editor::PalResolutionTrigger::none);
+    CHECK(skill_editor::decide_pal_resolution(true, false) ==
+          skill_editor::PalResolutionTrigger::selectionRequest);
+    CHECK(skill_editor::decide_pal_resolution(false, false) ==
+          skill_editor::PalResolutionTrigger::none);
+    CHECK(skill_editor::decide_pal_resolution(false, false) ==
+          skill_editor::PalResolutionTrigger::none);
+}
+
+void test_pal_resolution_decision_runs_edits_immediately() {
+    CHECK(skill_editor::decide_pal_resolution(false, true) ==
+          skill_editor::PalResolutionTrigger::editRequest);
+}
+
+void test_pal_resolution_decision_prioritizes_selection() {
+    CHECK(skill_editor::decide_pal_resolution(true, true) ==
+          skill_editor::PalResolutionTrigger::selectionRequest);
+}
+
+void test_target_resolution_snapshot_equality_tracks_observable_changes() {
+    const skill_editor::TargetResolutionSnapshot first{
+        .resolved = true,
+        .observation = {.identity = identity(10), .name = "Boar"},
+        .status = skill_editor::SelectedTargetResolutionStatus::success,
+        .holderCandidateCount = 1,
+        .localHolderCandidateCount = 1,
+        .holderCandidateClasses = L"PalOtomoHolderComponent",
+    };
+    auto same = first;
+    CHECK(first == same);
+    same.observation.identity = identity(11);
+    CHECK(!(first == same));
+}
+
+void test_target_resolution_state_marks_only_real_changes() {
+    skill_editor::TargetResolutionState state;
+    const skill_editor::TargetResolutionSnapshot first{
+        .resolved = true,
+        .observation = {.identity = identity(10), .name = "Boar"},
+        .status = skill_editor::SelectedTargetResolutionStatus::success,
+        .holderCandidateCount = 1,
+        .localHolderCandidateCount = 1,
+        .holderCandidateClasses = L"PalOtomoHolderComponent",
+    };
+
+    CHECK(state.update(first));
+    CHECK(!state.update(first));
+    auto changed = first;
+    changed.status = skill_editor::SelectedTargetResolutionStatus::parameterUnavailable;
+    CHECK(state.update(changed));
+    CHECK(state.current() == changed);
+    state.reset();
+    CHECK(state.current() == skill_editor::TargetResolutionSnapshot{});
+}
+
 void test_target_requires_explicit_confirmation() {
     skill_editor::SelectedTargetState state;
     const skill_editor::SelectedTargetObservation observed{
@@ -377,55 +790,167 @@ void test_target_requires_explicit_confirmation() {
     };
 
     CHECK(!state.is_selected());
-    CHECK(!state.invalidate_if_changed(observed));
+    CHECK(!state.matches_current(observed));
     CHECK(!state.is_selected());
 
     CHECK(state.confirm(observed));
     CHECK(state.is_selected());
+    CHECK(state.matches_current(observed));
     CHECK(state.current().identity == observed.identity);
     CHECK(state.current().name == "Boar");
     CHECK(state.generation() == 1);
 }
 
-void test_qe_change_invalidates_even_for_same_character_id() {
+void test_world_session_transition_requires_reconfirmation() {
+    skill_editor::WorldSessionState session;
+    CHECK(session.can_access_unreal());
+    CHECK(session.confirm_target());
+    CHECK(session.is_target_confirmed());
+
+    session.begin_transition();
+    CHECK(session.generation() == 1);
+    CHECK(!session.can_access_unreal());
+    CHECK(!session.is_target_confirmed());
+    CHECK(!session.request_targets_current_world(0));
+    CHECK(!session.request_is_current(0));
+
+    session.finish_transition();
+    CHECK(session.can_access_unreal());
+    CHECK(!session.is_target_confirmed());
+    CHECK(session.request_targets_current_world(1));
+    CHECK(!session.request_is_current(1));
+
+    CHECK(session.confirm_target());
+    CHECK(session.request_is_current(1));
+}
+
+void test_world_session_cannot_confirm_during_transition() {
+    skill_editor::WorldSessionState session;
+    session.begin_transition();
+    CHECK(!session.confirm_target());
+    CHECK(!session.is_target_confirmed());
+}
+
+void test_world_bound_selection_request_expires_across_transition() {
+    skill_editor::WorldSessionState session;
+    const skill_editor::WorldBoundRequest oldRequest{
+        .worldGeneration = session.generation(),
+    };
+    CHECK(skill_editor::request_can_run(oldRequest, session));
+
+    session.begin_transition();
+    session.finish_transition();
+    CHECK(!skill_editor::request_can_run(oldRequest, session));
+
+    const skill_editor::WorldBoundRequest currentRequest{
+        .worldGeneration = session.generation(),
+    };
+    CHECK(skill_editor::request_can_run(currentRequest, session));
+    CHECK(!session.is_target_confirmed());
+}
+
+void test_observations_do_not_replace_or_clear_explicit_target() {
     skill_editor::SelectedTargetState state;
     CHECK(state.confirm({.identity = identity(10), .name = "Boar"}));
     const auto selectedGeneration = state.generation();
 
-    CHECK(state.invalidate_if_changed({.identity = identity(20), .name = "Boar"}));
-    CHECK(!state.is_selected());
-    CHECK(state.generation() == selectedGeneration + 1);
-    CHECK(!state.current().is_valid());
+    CHECK(state.matches_current({.identity = identity(10), .name = "Boar"}));
+    CHECK(!state.matches_current({}));
+    CHECK(!state.matches_current({.identity = identity(20), .name = "SheepBall"}));
+    CHECK(state.is_selected());
+    CHECK(state.current().identity == identity(10));
+    CHECK(state.current().name == "Boar");
+    CHECK(state.generation() == selectedGeneration);
 }
 
 void test_resolution_status_has_actionable_message() {
-    CHECK(skill_editor::resolution_status_message(
-              skill_editor::SelectedTargetResolutionStatus::worldContextUnavailable) ==
-          "未找到本地 PlayerController");
-    CHECK(skill_editor::resolution_status_message(
-              skill_editor::SelectedTargetResolutionStatus::holderUnavailable) ==
-          "未取得当前玩家的 Otomo Holder");
-    CHECK(skill_editor::resolution_status_message(
-              skill_editor::SelectedTargetResolutionStatus::success)
-              .empty());
+    using enum skill_editor::SelectedTargetResolutionStatus;
+    CHECK(skill_editor::resolution_status_message(holderCandidatesUnavailable) ==
+          "未发现队伍 Holder");
+    CHECK(skill_editor::resolution_status_message(holderOwnerPawnUnavailable) ==
+          "未取得队伍 Holder 的所属玩家角色");
+    CHECK(skill_editor::resolution_status_message(holderOwnerControllerUnavailable) ==
+          "未取得队伍 Holder 的所属控制器");
+    CHECK(skill_editor::resolution_status_message(localHolderUnavailable) ==
+          "未找到本地玩家的队伍 Holder");
+    CHECK(skill_editor::resolution_status_message(localHolderAmbiguous) ==
+          "发现多个本地玩家队伍 Holder，已拒绝猜测");
+    CHECK(skill_editor::resolution_status_message(getSelectedFunctionUnavailable) ==
+          "实际 Holder 类未实现 GetSelectedOtomoID");
+    CHECK(skill_editor::resolution_status_message(selectedSlotUnavailable) ==
+          "当前高亮队伍槽位没有有效帕鲁");
+    CHECK(skill_editor::resolution_status_message(success).empty());
 }
 
-void test_first_valid_local_candidate_is_selected() {
-    const std::array candidates{1, 2, 3, 4};
-    const auto selected = skill_editor::find_local_candidate(
-        candidates, [](const int value) { return value != 1; },
-        [](const int value) { return value == 3 || value == 4; });
-    CHECK(selected.has_value());
-    CHECK(*selected == 3);
+struct LocalCandidateProbe {
+    bool valid{true};
+    bool hasOwnerPawn{true};
+    bool hasController{true};
+    bool local{};
+};
+
+auto select_local_candidate(const std::vector<LocalCandidateProbe*>& candidates) {
+    return skill_editor::find_unique_local_candidate(
+        candidates,
+        [](const LocalCandidateProbe* candidate) {
+            return candidate != nullptr && candidate->valid;
+        },
+        [](LocalCandidateProbe* candidate) {
+            return candidate->hasOwnerPawn ? candidate : nullptr;
+        },
+        [](LocalCandidateProbe* pawn) { return pawn->hasController ? pawn : nullptr; },
+        [](const LocalCandidateProbe* controller) { return controller->local; });
+}
+
+void test_unique_local_candidate_is_selected() {
+    LocalCandidateProbe remote{.local = false};
+    LocalCandidateProbe local{.local = true};
+    const auto selection = select_local_candidate({&remote, &local});
+
+    CHECK(selection.status == skill_editor::LocalCandidateSelectionStatus::success);
+    CHECK(selection.candidate.has_value());
+    CHECK(*selection.candidate == &local);
+    CHECK(selection.candidateCount == 2);
+    CHECK(selection.localCandidateCount == 1);
+}
+
+void test_local_candidate_selection_reports_each_unavailable_stage() {
+    CHECK(select_local_candidate({}).status ==
+          skill_editor::LocalCandidateSelectionStatus::noCandidates);
+
+    LocalCandidateProbe noPawn{.hasOwnerPawn = false};
+    CHECK(select_local_candidate({&noPawn}).status ==
+          skill_editor::LocalCandidateSelectionStatus::ownerPawnUnavailable);
+
+    LocalCandidateProbe noController{.hasController = false};
+    CHECK(select_local_candidate({&noController}).status ==
+          skill_editor::LocalCandidateSelectionStatus::ownerControllerUnavailable);
+
+    LocalCandidateProbe remote{.local = false};
+    CHECK(select_local_candidate({&remote}).status ==
+          skill_editor::LocalCandidateSelectionStatus::localCandidateUnavailable);
+}
+
+void test_multiple_local_candidates_are_rejected() {
+    LocalCandidateProbe first{.local = true};
+    LocalCandidateProbe second{.local = true};
+    const auto selection = select_local_candidate({&first, &second});
+
+    CHECK(selection.status ==
+          skill_editor::LocalCandidateSelectionStatus::ambiguousLocalCandidates);
+    CHECK(!selection.candidate.has_value());
+    CHECK(selection.localCandidateCount == 2);
 }
 
 void test_stale_generation_never_reaches_apply_callback() {
     skill_editor::SelectedTargetState state;
+    skill_editor::WorldSessionState session;
     const skill_editor::SelectedTargetObservation observed{
         .identity = identity(10),
         .name = "Boar",
     };
     CHECK(state.confirm(observed));
+    CHECK(session.confirm_target());
 
     int applyCalls = 0;
     skill_editor::SkillTarget appliedTarget = 0;
@@ -439,35 +964,80 @@ void test_stale_generation_never_reaches_apply_callback() {
     };
 
     const auto accepted = skill_editor::apply_if_target_is_current(
-        {.targetGeneration = state.generation()}, state, observed, 0x2000, apply);
+        {.targetGeneration = state.generation(), .worldGeneration = session.generation()}, state,
+        observed, 0x2000, session, apply);
     CHECK(accepted.has_value());
     CHECK(applyCalls == 1);
     CHECK(appliedTarget == 0x2000);
 
     const auto stale = skill_editor::apply_if_target_is_current(
-        {.targetGeneration = state.generation() + 1}, state, observed, 0x2000, apply);
+        {.targetGeneration = state.generation() + 1, .worldGeneration = session.generation()},
+        state, observed, 0x2000, session, apply);
     CHECK(!stale.has_value());
+    CHECK(applyCalls == 1);
+
+    session.begin_transition();
+    session.finish_transition();
+    const auto staleWorld = skill_editor::apply_if_target_is_current(
+        {.targetGeneration = state.generation(), .worldGeneration = 0}, state, observed, 0x2000,
+        session, apply);
+    CHECK(!staleWorld.has_value());
+    CHECK(applyCalls == 1);
+
+    const auto unconfirmedWorld = skill_editor::apply_if_target_is_current(
+        {.targetGeneration = state.generation(), .worldGeneration = session.generation()}, state,
+        observed, 0x2000, session, apply);
+    CHECK(!unconfirmedWorld.has_value());
     CHECK(applyCalls == 1);
 }
 
 auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
-    test_skill_catalog_refresh_keeps_last_success();
+    test_passive_skill_presets_have_expected_palworld_1_0_ids();
+    test_passive_skill_preset_definitions_are_valid();
+    test_passive_skill_preset_builds_one_world_bound_request();
+    test_active_skill_definitions_are_unique_and_known_values_match();
+    test_internal_active_skill_filter();
+    test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
+    test_skill_catalog_refresh_merges_sections_independently();
+    test_skill_catalog_first_partial_load_keeps_available_section();
+    test_partial_catalog_is_not_ready_for_editing();
+    test_catalog_fallback_preserves_established_runtime_readiness();
+    test_catalog_refresh_scheduler_throttles_automatic_retries();
+    test_catalog_refresh_scheduler_honors_manual_refresh_immediately();
+    test_catalog_refresh_scheduler_defers_unsafe_runtime_queries();
+    test_catalog_refresh_scheduler_never_bypasses_runtime_gate();
     test_item_catalog_labels_and_search();
     test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();
     test_passive_add_remove_and_replace_reread_state();
     test_passive_replace_rolls_back_on_failure();
+    test_passive_set_rejects_invalid_definitions_before_writing();
+    test_matching_passive_set_is_zero_write();
+    test_passive_set_replaces_a_completely_different_set();
+    test_passive_set_uses_only_required_difference_writes();
+    test_passive_set_rolls_back_after_partial_failure();
+    test_passive_set_reports_rollback_failure();
     test_active_edits_validate_three_compact_slots();
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();
     test_skill_edit_queue_is_fifo();
     test_skill_edit_queue_can_discard_all_pending_requests();
+    test_pal_resolution_decision_has_zero_idle_work_after_selection();
+    test_pal_resolution_decision_runs_edits_immediately();
+    test_pal_resolution_decision_prioritizes_selection();
+    test_target_resolution_snapshot_equality_tracks_observable_changes();
+    test_target_resolution_state_marks_only_real_changes();
     test_target_requires_explicit_confirmation();
-    test_qe_change_invalidates_even_for_same_character_id();
+    test_world_session_transition_requires_reconfirmation();
+    test_world_session_cannot_confirm_during_transition();
+    test_world_bound_selection_request_expires_across_transition();
+    test_observations_do_not_replace_or_clear_explicit_target();
     test_resolution_status_has_actionable_message();
-    test_first_valid_local_candidate_is_selected();
+    test_unique_local_candidate_is_selected();
+    test_local_candidate_selection_reports_each_unavailable_stage();
+    test_multiple_local_candidates_are_rejected();
     test_stale_generation_never_reaches_apply_callback();
     return failures == 0 ? 0 : 1;
 }

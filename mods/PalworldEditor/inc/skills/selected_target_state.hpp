@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -15,6 +16,7 @@
 #include <utility>
 
 #include <skills/skill_editor_service.hpp>
+#include <skills/world_session_state.hpp>
 
 /** @brief 提供当前待出战帕鲁目标的纯 C++ 状态管理。 */
 namespace skill_editor {
@@ -56,6 +58,9 @@ struct SelectedTargetObservation {
     [[nodiscard]] auto is_valid() const -> bool {
         return identity.is_valid();
     }
+
+    /** @brief 比较两个纯值观测的个体身份和展示名称。 */
+    auto operator==(const SelectedTargetObservation&) const -> bool = default;
 };
 
 /**
@@ -63,10 +68,11 @@ struct SelectedTargetObservation {
  */
 enum class SelectedTargetResolutionStatus {
     success,                           /**< 已取得参数对象、个体 GUID 和 CharacterID。 */
-    worldContextUnavailable,           /**< 未找到本地 PlayerController。 */
-    palUtilityUnavailable,             /**< 未找到 PalUtility 默认对象。 */
-    getHolderFunctionUnavailable,      /**< 未找到 GetOtomoHolderComponent。 */
-    holderUnavailable,                 /**< 未取得当前玩家的 Otomo Holder。 */
+    holderCandidatesUnavailable,       /**< 未发现有效的 Otomo Holder 候选。 */
+    holderOwnerPawnUnavailable,        /**< Holder 候选没有可用的所属玩家角色。 */
+    holderOwnerControllerUnavailable,  /**< Holder 所属玩家角色没有可用控制器。 */
+    localHolderUnavailable,            /**< 未找到由本地玩家控制的 Otomo Holder。 */
+    localHolderAmbiguous,              /**< 发现多个由本地玩家控制的 Otomo Holder。 */
     getSelectedFunctionUnavailable,    /**< 未找到 GetSelectedOtomoID。 */
     selectedSlotUnavailable,           /**< 当前槽位索引无效。 */
     getHandleFunctionUnavailable,      /**< 未找到 GetOtomoIndividualHandle。 */
@@ -90,18 +96,20 @@ enum class SelectedTargetResolutionStatus {
     switch (status) {
         case success:
             return {};
-        case worldContextUnavailable:
-            return "未找到本地 PlayerController";
-        case palUtilityUnavailable:
-            return "未找到 PalUtility";
-        case getHolderFunctionUnavailable:
-            return "未找到 GetOtomoHolderComponent";
-        case holderUnavailable:
-            return "未取得当前玩家的 Otomo Holder";
+        case holderCandidatesUnavailable:
+            return "未发现队伍 Holder";
+        case holderOwnerPawnUnavailable:
+            return "未取得队伍 Holder 的所属玩家角色";
+        case holderOwnerControllerUnavailable:
+            return "未取得队伍 Holder 的所属控制器";
+        case localHolderUnavailable:
+            return "未找到本地玩家的队伍 Holder";
+        case localHolderAmbiguous:
+            return "发现多个本地玩家队伍 Holder，已拒绝猜测";
         case getSelectedFunctionUnavailable:
-            return "未找到 GetSelectedOtomoID";
+            return "实际 Holder 类未实现 GetSelectedOtomoID";
         case selectedSlotUnavailable:
-            return "当前 Q/E 槽位没有有效帕鲁";
+            return "当前高亮队伍槽位没有有效帕鲁";
         case getHandleFunctionUnavailable:
             return "未找到 GetOtomoIndividualHandle";
         case handleUnavailable:
@@ -122,26 +130,100 @@ enum class SelectedTargetResolutionStatus {
     return "未知目标解析错误";
 }
 
+/** @brief 唯一本地候选解析的终止状态。 */
+enum class LocalCandidateSelectionStatus {
+    success,
+    noCandidates,
+    ownerPawnUnavailable,
+    ownerControllerUnavailable,
+    localCandidateUnavailable,
+    ambiguousLocalCandidates,
+};
+
 /**
- * @brief 从候选集合中选择第一个有效且属于本地玩家的值。
+ * @brief 唯一本地候选解析结果。
+ * @tparam Candidate 候选值类型。
+ */
+template <typename Candidate>
+struct LocalCandidateSelection {
+    std::optional<Candidate> candidate;
+    LocalCandidateSelectionStatus status{LocalCandidateSelectionStatus::noCandidates};
+    std::size_t candidateCount{};
+    std::size_t localCandidateCount{};
+};
+
+/**
+ * @brief 经由所属角色和控制器链解析唯一的本地玩家候选。
  * @tparam Range 可输入遍历的候选集合类型。
  * @tparam IsValid 接受候选值并判断其是否可用的谓词。
- * @tparam IsLocal 接受候选值并判断其是否属于本地玩家的谓词。
+ * @tparam ResolveOwnerPawn 从候选值解析所属玩家角色的函数。
+ * @tparam ResolveController 从所属角色解析控制器的函数。
+ * @tparam IsLocal 判断控制器是否属于本地玩家的谓词。
  * @param[in] candidates 按运行时发现顺序排列的候选值。
  * @param[in] isValid 候选有效性谓词。
- * @param[in] isLocal 本地玩家谓词。
- * @return 第一个同时满足两个谓词的候选；不存在时返回 std::nullopt。
+ * @param[in] resolveOwnerPawn 所属玩家角色解析函数。
+ * @param[in] resolveController 控制器解析函数。
+ * @param[in] isLocal 本地玩家控制器谓词。
+ * @return 唯一本地候选及分阶段诊断；没有或存在多个本地候选时不返回候选值。
  */
-template <std::ranges::input_range Range, typename IsValid, typename IsLocal>
-[[nodiscard]] auto find_local_candidate(const Range& candidates, IsValid&& isValid,
-                                        IsLocal&& isLocal)
-    -> std::optional<std::ranges::range_value_t<Range>> {
+template <std::ranges::input_range Range, typename IsValid, typename ResolveOwnerPawn,
+          typename ResolveController, typename IsLocal>
+[[nodiscard]] auto find_unique_local_candidate(const Range& candidates, IsValid&& isValid,
+                                               ResolveOwnerPawn&& resolveOwnerPawn,
+                                               ResolveController&& resolveController,
+                                               IsLocal&& isLocal)
+    -> LocalCandidateSelection<std::ranges::range_value_t<Range>> {
+    using Candidate = std::ranges::range_value_t<Range>;
+
+    LocalCandidateSelection<Candidate> result;
+    bool foundOwnerPawn{};
+    bool foundController{};
+
     for (const auto& candidate : candidates) {
-        if (std::invoke(isValid, candidate) && std::invoke(isLocal, candidate)) {
-            return candidate;
+        if (!std::invoke(isValid, candidate)) {
+            continue;
+        }
+
+        ++result.candidateCount;
+        const auto ownerPawn = std::invoke(resolveOwnerPawn, candidate);
+        if (!ownerPawn) {
+            continue;
+        }
+        foundOwnerPawn = true;
+
+        const auto controller = std::invoke(resolveController, ownerPawn);
+        if (!controller) {
+            continue;
+        }
+        foundController = true;
+
+        if (!std::invoke(isLocal, controller)) {
+            continue;
+        }
+
+        ++result.localCandidateCount;
+        if (result.localCandidateCount == 1) {
+            result.candidate = candidate;
+        } else {
+            result.candidate.reset();
         }
     }
-    return std::nullopt;
+
+    if (result.candidateCount == 0) {
+        result.status = LocalCandidateSelectionStatus::noCandidates;
+    } else if (!foundOwnerPawn) {
+        result.status = LocalCandidateSelectionStatus::ownerPawnUnavailable;
+    } else if (!foundController) {
+        result.status = LocalCandidateSelectionStatus::ownerControllerUnavailable;
+    } else if (result.localCandidateCount == 0) {
+        result.status = LocalCandidateSelectionStatus::localCandidateUnavailable;
+    } else if (result.localCandidateCount > 1) {
+        result.status = LocalCandidateSelectionStatus::ambiguousLocalCandidates;
+    } else {
+        result.status = LocalCandidateSelectionStatus::success;
+    }
+
+    return result;
 }
 
 /**
@@ -167,38 +249,6 @@ public:
     }
 
     /**
-     * @brief 在已确认目标与当前 Q/E 观测不同时取消选择。
-     * @param[in] observation 当前帧的纯值目标观测。
-     * @retval true 已确认目标失效并被清空。
-     * @retval false 尚未选择目标，或当前观测仍指向同一个体。
-     */
-    [[nodiscard]] auto invalidate_if_changed(const SelectedTargetObservation& observation) -> bool {
-        if (!selected_) {
-            return false;
-        }
-        if (!observation.is_valid() || current_.identity != observation.identity) {
-            invalidate();
-            return true;
-        }
-
-        current_.name = observation.name;
-        return false;
-    }
-
-    /**
-     * @brief 取消当前确认目标。
-     * @details 仅当当前确有目标时增加代数，避免重复空状态产生无意义变化。
-     */
-    auto invalidate() -> void {
-        if (!selected_) {
-            return;
-        }
-        current_ = {};
-        selected_ = false;
-        ++generation_;
-    }
-
-    /**
      * @brief 查询是否已有用户显式确认的目标。
      * @return 当前选择状态。
      */
@@ -207,8 +257,19 @@ public:
     }
 
     /**
+     * @brief 判断当前运行时观察是否仍指向用户显式确认的目标。
+     * @param[in] observation 当前帧解析得到的纯值目标观察。
+     * @return 已选择目标且观察有效、个体 GUID 相同时返回 `true`。
+     * @details 本函数不改变选择；空观察和其他 GUID 都只表示当前不可安全编辑。
+     */
+    [[nodiscard]] auto matches_current(const SelectedTargetObservation& observation) const noexcept
+        -> bool {
+        return selected_ && observation.is_valid() && current_.identity == observation.identity;
+    }
+
+    /**
      * @brief 获取当前目标代数。
-     * @return 每次确认或失效时递增的代数。
+     * @return 每次显式确认目标时递增的代数。
      */
     [[nodiscard]] auto generation() const -> std::uint64_t {
         return generation_;
@@ -223,20 +284,19 @@ public:
     }
 
     /**
-     * @brief 校验请求代数和当前 Q/E 观测仍指向已确认个体。
+     * @brief 校验请求代数和当前高亮队伍帕鲁观测仍指向已确认个体。
      * @param[in] generation GUI 提交请求时取得的目标代数。
      * @param[in] observation 执行前在游戏线程重新解析的目标。
      * @return 已选择、代数相同且实例 GUID 相同时返回 true。
      */
     [[nodiscard]] auto matches(const std::uint64_t generation,
                                const SelectedTargetObservation& observation) const -> bool {
-        return selected_ && generation == generation_ && observation.is_valid() &&
-               current_.identity == observation.identity;
+        return generation == generation_ && matches_current(observation);
     }
 
 private:
     SelectedTargetObservation current_; /**< 当前显式确认的纯值目标。 */
-    std::uint64_t generation_{};        /**< 确认或失效时递增的请求防护代数。 */
+    std::uint64_t generation_{};        /**< 每次显式确认时递增的请求防护代数。 */
     bool selected_{};                   /**< 是否存在用户显式确认的目标。 */
 };
 
@@ -254,9 +314,11 @@ template <typename Apply>
 [[nodiscard]] auto apply_if_target_is_current(const SkillEditRequest& request,
                                               const SelectedTargetState& state,
                                               const SelectedTargetObservation& observation,
-                                              const SkillTarget transientTarget, Apply&& apply)
+                                              const SkillTarget transientTarget,
+                                              const WorldSessionState& session, Apply&& apply)
     -> std::optional<SkillEditResult> {
-    if (transientTarget == 0 || !state.matches(request.targetGeneration, observation)) {
+    if (transientTarget == 0 || !session.request_is_current(request.worldGeneration) ||
+        !state.matches(request.targetGeneration, observation)) {
         return std::nullopt;
     }
 
