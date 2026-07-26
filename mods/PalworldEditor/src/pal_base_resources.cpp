@@ -91,7 +91,7 @@ public:
         }
 
         if (transition.disableRuntime) {
-            leases_.reset();
+            sessions_.reset();
             scheduler_.reset();
             restore_or_disable("关闭资源共享");
             unregister_resource_hooks();
@@ -105,7 +105,7 @@ public:
         runtime_.set_preference(enabled);
         if (transition.beginAccessibleWorld) {
             const auto generation = runtime_.generation();
-            leases_.begin_world(generation);
+            sessions_.begin_world(generation);
             scheduler_.begin_world(generation);
             runtimeError_.clear();
         }
@@ -119,7 +119,7 @@ public:
     }
 
     auto on_world_begin(const std::uint64_t generation) -> void {
-        leases_.reset();
+        sessions_.reset();
         scheduler_.reset();
         restore_or_disable("切换世界");
         unregister_resource_hooks();
@@ -135,7 +135,7 @@ public:
 
     auto on_world_ready(const std::uint64_t generation) -> void {
         runtime_.finish_world_transition(generation);
-        leases_.begin_world(generation);
+        sessions_.begin_world(generation);
         scheduler_.begin_world(generation);
         publish_capabilities();
         snapshotDirty_.mark();
@@ -149,11 +149,12 @@ public:
             return;
         }
 
-        if (leases_.advance(deltaSeconds, generation) && !leases_.desired(generation)) {
+        const auto sessionTransition = sessions_.advance(deltaSeconds, generation);
+        if (sessionTransition.unionBecameIdle) {
             restore_or_disable("制作会话空闲");
         }
 
-        if (scheduler_.advance(deltaSeconds, generation)) {
+        if (scheduler_.advance(deltaSeconds, generation, !liveUnion_.active)) {
             auto* worldContext = resolve_world_context(nullptr);
             reconcile_catalog(worldContext);
         }
@@ -207,7 +208,7 @@ public:
     }
 
     auto shutdown_hooks() -> void {
-        leases_.reset();
+        sessions_.reset();
         scheduler_.reset();
         restore_or_disable("卸载 mod");
         unregister_resource_hooks();
@@ -255,8 +256,7 @@ private:
     auto reconcile_catalog(UObject* worldContext) -> void {
         const auto generation = runtime_.generation();
         const auto started = std::chrono::steady_clock::now();
-        const bool shouldReapply = leases_.desired(generation);
-        if (liveUnion_.active && !restore_live_union("刷新资源目录")) {
+        if (liveUnion_.active) {
             scheduler_.complete(false, generation);
             return;
         }
@@ -276,11 +276,12 @@ private:
         containerCount_ = catalog_.plan.ordered.size();
         runtimeError_.clear();
 
-        bool reapplied = true;
-        if (shouldReapply) {
-            reapplied = apply_live_union(worldContext);
-            if (!reapplied) {
-                scheduler_.request_immediate(generation);
+        bool unionReady = true;
+        const auto targets = sessions_.required_targets(generation);
+        if (targets != UnionTargets{}) {
+            unionReady = apply_live_union(worldContext, targets);
+            if (!unionReady) {
+                static_cast<void>(sessions_.cancel_all(generation));
             }
         }
 
@@ -290,28 +291,33 @@ private:
         Output::send<LogLevel::Verbose>(
             STR("PalworldEditor: resource catalog reconciled in {:.3f} ms, bases={}, "
                 "containers={}, union={}\n"),
-            elapsed, baseCount_, containerCount_, reapplied && liveUnion_.active);
+            elapsed, baseCount_, containerCount_, liveUnion_.active);
+        if (!unionReady) {
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: resource union initialization failed after catalog "
+                    "reconciliation; the current material operation was cancelled\n"));
+        }
         snapshotDirty_.mark();
     }
 
-    [[nodiscard]] auto ensure_catalog(UObject* worldContext) -> bool {
-        if (catalog_ready()) {
-            return true;
-        }
-        const auto generation = runtime_.generation();
-        scheduler_.request_immediate(generation);
-        if (scheduler_.advance(0.0F, generation)) {
-            reconcile_catalog(worldContext);
-        }
-        return catalog_ready();
-    }
-
-    [[nodiscard]] auto apply_live_union(UObject* worldContext) -> bool {
+    [[nodiscard]] auto apply_live_union(UObject* worldContext, const UnionTargets targets) -> bool {
+        UnionTargets requestedTargets = targets;
+        UnionTargets previousTargets;
         if (liveUnion_.active) {
-            return liveUnion_.generation == runtime_.generation() &&
-                   liveUnion_.guildId == catalog_.guildId;
+            if (liveUnion_.generation != runtime_.generation() ||
+                liveUnion_.guildId != catalog_.guildId) {
+                return false;
+            }
+            if (contains_union_targets(liveUnion_.targets, targets)) {
+                return true;
+            }
+            previousTargets = liveUnion_.targets;
+            requestedTargets = combine_union_targets(previousTargets, targets);
+            if (!restore_live_union("扩展材料操作联合")) {
+                return false;
+            }
         }
-        if (!catalog_ready()) {
+        if (worldContext == nullptr || !catalog_ready()) {
             runtimeError_ = "资源目录尚未安全就绪。";
             snapshotDirty_.mark();
             return false;
@@ -322,9 +328,16 @@ private:
         bool applied{};
         {
             MutationScope mutation{selfMutation_};
-            applied = detail::apply_union(worldContext, catalog_, liveUnion_, error);
+            applied =
+                detail::apply_union(worldContext, catalog_, requestedTargets, liveUnion_, error);
         }
         if (!applied) {
+            if (previousTargets != UnionTargets{}) {
+                std::string rollbackError;
+                MutationScope mutation{selfMutation_};
+                static_cast<void>(detail::apply_union(worldContext, catalog_, previousTargets,
+                                                      liveUnion_, rollbackError));
+            }
             runtimeError_ = std::move(error);
             snapshotDirty_.mark();
             return false;
@@ -334,8 +347,10 @@ private:
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                 .count();
         Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: resource union opened in {:.3f} ms, entries={}\n"), elapsed,
-            liveUnion_.entries.size());
+            STR("PalworldEditor: resource union opened in {:.3f} ms, entries={}, modules={}, "
+                "helper={}\n"),
+            elapsed, liveUnion_.entries.size(), requestedTargets.baseModules,
+            requestedTargets.playerHelper);
         runtimeError_.clear();
         snapshotDirty_.mark();
         return true;
@@ -346,11 +361,13 @@ private:
         if (!runtime_.can_extend(operation, generation)) {
             return false;
         }
-        auto* worldContext = resolve_world_context(hint);
-        if (worldContext == nullptr || !ensure_catalog(worldContext)) {
+        remember_world_context(hint);
+        const auto targets = sessions_.required_targets(generation);
+        if (hint == nullptr || targets == UnionTargets{} || !catalog_ready()) {
+            scheduler_.request_immediate(generation);
             return false;
         }
-        return apply_live_union(worldContext);
+        return apply_live_union(hint, targets);
     }
 
     [[nodiscard]] auto restore_live_union(const std::string_view reason) -> bool {
@@ -397,59 +414,93 @@ private:
         }
         const auto generation = runtime_.generation();
         if (inBuildingMode) {
-            static_cast<void>(leases_.acquire_building(generation));
-            static_cast<void>(ensure_union(builder, ResourceOperation::building));
             return;
         }
-        static_cast<void>(leases_.release_building(generation));
-        if (!leases_.desired(generation)) {
+        const auto transition = sessions_.release(ResourceOperation::building, generation);
+        if (transition.unionBecameIdle) {
             restore_or_disable("退出建造模式");
+        }
+    }
+
+    auto handle_acquire(UObject* context, const ResourceOperation operation) -> void {
+        const auto generation = runtime_.generation();
+        static_cast<void>(sessions_.acquire(operation, generation));
+        remember_world_context(context);
+        if (!catalog_ready()) {
+            runtimeError_ = "正在初始化共享资源目录；目录就绪后会自动建立本次材料会话。";
+            scheduler_.request_immediate(generation);
+            snapshotDirty_.mark();
+            return;
+        }
+        if (ensure_union(context, operation)) {
+            return;
+        }
+        const auto transition = sessions_.release(operation, generation);
+        if (transition.unionBecameIdle) {
+            restore_or_disable("材料操作会话获取失败");
+        }
+        runtimeError_ = "资源目录尚未安全就绪；本次菜单保持原版行为，请重新打开后再试。";
+        scheduler_.request_immediate(generation);
+        snapshotDirty_.mark();
+    }
+
+    auto handle_touch(const ResourceOperation operation) -> void {
+        static_cast<void>(sessions_.touch(operation, runtime_.generation()));
+    }
+
+    auto handle_release(const ResourceOperation operation, const std::string_view reason) -> void {
+        const auto transition = sessions_.release(operation, runtime_.generation());
+        if (transition.unionBecameIdle) {
+            restore_or_disable(reason);
+        }
+    }
+
+    auto handle_structure_changed() -> void {
+        scheduler_.request_immediate(runtime_.generation());
+    }
+
+    auto dispatch_hook(const HookPhase phase, const HookSpec& spec,
+                       UnrealScriptFunctionCallableContext& context) -> void {
+        if (selfMutation_ || !runtime_.accessible()) {
+            return;
+        }
+        const auto event = event_for_phase(spec, phase);
+        if (event == HookEvent::none) {
+            return;
+        }
+
+        switch (event) {
+            case HookEvent::none:
+                break;
+            case HookEvent::structureChanged:
+                handle_structure_changed();
+                break;
+            case HookEvent::acquire:
+                handle_acquire(context.Context, spec.operation);
+                break;
+            case HookEvent::touch:
+                handle_touch(spec.operation);
+                break;
+            case HookEvent::release:
+                handle_release(spec.operation, "制作请求已提交");
+                break;
+            case HookEvent::updateBuildingMode:
+                update_building_mode(context.Context);
+                break;
+        }
+        if (event != HookEvent::touch) {
+            snapshotDirty_.mark();
         }
     }
 
     auto on_hook_pre(UFunction*, const HookSpec& spec, UnrealScriptFunctionCallableContext& context)
         -> void {
-        if (selfMutation_ || !runtime_.accessible()) {
-            return;
-        }
-        remember_world_context(context.Context);
-        const auto generation = runtime_.generation();
-        switch (spec.action) {
-            case HookAction::buildingTouch:
-                static_cast<void>(leases_.acquire_building(generation));
-                static_cast<void>(ensure_union(context.Context, ResourceOperation::building));
-                break;
-            case HookAction::craftingTouch:
-                static_cast<void>(leases_.touch_crafting(generation));
-                static_cast<void>(ensure_union(context.Context, ResourceOperation::crafting));
-                break;
-            default:
-                break;
-        }
+        dispatch_hook(HookPhase::pre, spec, context);
     }
 
     auto on_hook_post(UFunction*, const HookSpec& spec,
                       UnrealScriptFunctionCallableContext& context) -> void {
-        if (selfMutation_ || !runtime_.accessible()) {
-            return;
-        }
-        remember_world_context(context.Context);
-        const auto generation = runtime_.generation();
-        switch (spec.action) {
-            case HookAction::structureChanged:
-                scheduler_.request_immediate(generation);
-                break;
-            case HookAction::buildingModeChanged:
-                update_building_mode(context.Context);
-                break;
-            case HookAction::craftingAcquire:
-                static_cast<void>(leases_.touch_crafting(generation));
-                static_cast<void>(ensure_union(context.Context, ResourceOperation::crafting));
-                break;
-            default:
-                break;
-        }
-        snapshotDirty_.mark();
+        dispatch_hook(HookPhase::post, spec, context);
     }
 
     auto unregister_resource_hooks() -> void {
@@ -536,7 +587,7 @@ private:
 
     RuntimeState runtime_;
     ReconcileScheduler scheduler_;
-    ResourceUnionLeaseState leases_;
+    MaterialOperationSessions sessions_;
     detail::ResourceCatalogSnapshot catalog_;
     detail::LiveUnion liveUnion_;
     std::vector<HookResolution> resolutions_{all_hook_resolutions(false)};

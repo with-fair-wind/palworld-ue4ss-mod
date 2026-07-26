@@ -580,7 +580,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
 }
 
 auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
-                 LiveUnion& liveUnion, std::string& error) -> bool {
+                 const UnionTargets targets, LiveUnion& liveUnion, std::string& error) -> bool {
     error.clear();
     if (liveUnion.active) {
         error = "已有据点资源联合处于活动状态。";
@@ -600,44 +600,55 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
         return false;
     }
 
-    liveUnion = {.generation = catalog.generation, .guildId = catalog.guildId, .active = true};
+    liveUnion = {
+        .generation = catalog.generation,
+        .guildId = catalog.guildId,
+        .targets = targets,
+        .active = true,
+    };
     std::vector<GuidKey> globalIds;
     globalIds.reserve(catalog.plan.ordered.size());
     for (const auto& descriptor : catalog.plan.ordered) {
         globalIds.push_back(descriptor.containerId);
     }
 
-    for (const auto& module : catalog.modules) {
-        auto* object = find_object_by_full_name(module.objectFullName);
-        auto* property = object == nullptr
-                             ? nullptr
-                             : CastField<FArrayProperty>(
-                                   object->GetPropertyByNameInChain(STR("ContainerInfos")));
-        UnionLedgerEntry ledger{.objectFullName = module.objectFullName};
-        if (!read_module_sequence(object, property, ledger.original)) {
-            error = "建立联合时无法重新读取据点仓储序列。";
-            std::string restoreError;
-            static_cast<void>(restore_union(liveUnion, restoreError));
-            return false;
-        }
-        liveUnion.entries.push_back(ledger);
-
-        const auto missing = missing_union_tail(ledger.original, globalIds);
-        for (const auto& id : missing) {
-            const auto [sourceModule, sourceContainer] = locate_catalog_container(catalog, id);
-            static_cast<void>(sourceContainer);
-            if (sourceModule == nullptr ||
-                !append_container_info(object, property, *sourceModule, id)) {
-                error = "向据点仓储追加共享箱子登记失败。";
+    if (targets.baseModules) {
+        for (const auto& module : catalog.modules) {
+            auto* object = find_object_by_full_name(module.objectFullName);
+            auto* property = object == nullptr
+                                 ? nullptr
+                                 : CastField<FArrayProperty>(
+                                       object->GetPropertyByNameInChain(STR("ContainerInfos")));
+            UnionLedgerEntry ledger{.objectFullName = module.objectFullName};
+            if (!read_module_sequence(object, property, ledger.original)) {
+                error = "建立联合时无法重新读取据点仓储序列。";
                 std::string restoreError;
                 static_cast<void>(restore_union(liveUnion, restoreError));
                 return false;
             }
-            liveUnion.entries.back().injected.push_back(id);
+            liveUnion.entries.push_back(ledger);
+
+            const auto missing = missing_union_tail(ledger.original, globalIds);
+            for (const auto& id : missing) {
+                const auto [sourceModule, sourceContainer] = locate_catalog_container(catalog, id);
+                static_cast<void>(sourceContainer);
+                if (sourceModule == nullptr ||
+                    !append_container_info(object, property, *sourceModule, id)) {
+                    error = "向据点仓储追加共享箱子登记失败。";
+                    std::string restoreError;
+                    static_cast<void>(restore_union(liveUnion, restoreError));
+                    return false;
+                }
+                liveUnion.entries.back().injected.push_back(id);
+            }
+            if (!liveUnion.entries.back().injected.empty()) {
+                notify_array_changed(object, STR("OnRep_ContainerInfos"));
+            }
         }
-        if (!liveUnion.entries.back().injected.empty()) {
-            notify_array_changed(object, STR("OnRep_ContainerInfos"));
-        }
+    }
+
+    if (!targets.playerHelper) {
+        return true;
     }
 
     auto* helperProperty = CastField<FObjectPropertyBase>(

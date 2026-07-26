@@ -234,35 +234,59 @@ void test_disabled_resource_sharing_has_no_runtime_work() {
     CHECK(dirty.consume());
 }
 
-void test_hook_manifest_separates_required_sessions_from_optional_events() {
+void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
-    CHECK(std::ranges::count(hooks, HookAction::structureChanged, &HookSpec::action) == 4);
-    CHECK(std::ranges::count(hooks, HookAction::buildingModeChanged, &HookSpec::action) == 1);
-    CHECK(std::ranges::count(hooks, HookAction::buildingTouch, &HookSpec::action) == 1);
-    CHECK(std::ranges::count(hooks, HookAction::craftingAcquire, &HookSpec::action) == 1);
-    CHECK(std::ranges::count(hooks, HookAction::craftingTouch, &HookSpec::action) == 3);
+    const auto buildOpen = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalUIBuildModel:OnOpenMenu"}, &HookSpec::path);
+    CHECK(buildOpen != hooks.end());
+    CHECK(event_for_phase(*buildOpen, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*buildOpen, HookPhase::post) == HookEvent::none);
+    CHECK(buildOpen->requirement == HookRequirement::required);
 
-    auto resolved = all_hook_resolutions(false);
+    const auto craftInitialize = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalUIConvertItemModel:Initialize"}, &HookSpec::path);
+    CHECK(craftInitialize != hooks.end());
+    CHECK(event_for_phase(*craftInitialize, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*craftInitialize, HookPhase::post) == HookEvent::none);
+    CHECK(craftInitialize->requirement == HookRequirement::required);
+}
+
+void test_hook_manifest_keeps_touches_pre_and_releases_crafting_after_request() {
+    using namespace base_resource_sharing;
+
+    const auto hooks = palworld_1_0_1_hook_manifest();
+    const auto startProduction = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalUIConvertItemModel:StartProduction"},
+        &HookSpec::path);
+    CHECK(startProduction != hooks.end());
+    CHECK(event_for_phase(*startProduction, HookPhase::pre) == HookEvent::touch);
+    CHECK(event_for_phase(*startProduction, HookPhase::post) == HookEvent::release);
+
     for (const auto& hook : hooks) {
-        if (hook.requirement == HookRequirement::optional) {
-            mark_resolved(resolved, hook.path);
+        if (event_for_phase(hook, HookPhase::pre) == HookEvent::touch) {
+            CHECK(event_for_phase(hook, HookPhase::pre) != HookEvent::acquire);
+        }
+        if (event_for_phase(hook, HookPhase::post) == HookEvent::structureChanged) {
+            CHECK(event_for_phase(hook, HookPhase::pre) == HookEvent::none);
         }
     }
-    auto capabilities = evaluate_capabilities(resolved);
-    CHECK(!capabilities[operation_index(ResourceOperation::crafting)].available());
+}
+
+void test_missing_early_build_acquire_disables_only_building() {
+    using namespace base_resource_sharing;
+
+    auto resolved = all_hook_resolutions(true);
+    for (auto& resolution : resolved) {
+        if (resolution.spec.path == "/Script/Pal.PalUIBuildModel:OnOpenMenu") {
+            resolution.resolved = false;
+        }
+    }
+    const auto capabilities = evaluate_capabilities(resolved);
     CHECK(!capabilities[operation_index(ResourceOperation::building)].available());
-
-    for (const auto& hook : hooks) {
-        if (hook.operation == ResourceOperation::building &&
-            hook.requirement == HookRequirement::required) {
-            mark_resolved(resolved, hook.path);
-        }
-    }
-    capabilities = evaluate_capabilities(resolved);
-    CHECK(!capabilities[operation_index(ResourceOperation::crafting)].available());
-    CHECK(capabilities[operation_index(ResourceOperation::building)].available());
+    CHECK(capabilities[operation_index(ResourceOperation::crafting)].available());
+    CHECK(!capabilities[operation_index(ResourceOperation::repair)].available());
 }
 
 void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable() {
@@ -294,50 +318,98 @@ void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
 
     ReconcileScheduler scheduler;
     scheduler.begin_world(7);
-    CHECK(scheduler.advance(0.0F, 7));
+    CHECK(scheduler.advance(0.0F, 7, true));
     scheduler.complete(true, 7);
-    CHECK(!scheduler.advance(7.999F, 7));
-    CHECK(scheduler.advance(0.001F, 7));
+    CHECK(!scheduler.advance(20.0F, 7, false));
+    CHECK(!scheduler.advance(7.999F, 7, true));
+    CHECK(scheduler.advance(0.001F, 7, true));
     scheduler.complete(true, 7);
 
     scheduler.request_immediate(7);
     scheduler.request_immediate(7);
-    CHECK(scheduler.advance(0.0F, 7));
-    CHECK(!scheduler.advance(0.0F, 7));
+    CHECK(!scheduler.advance(10.0F, 7, false));
+    CHECK(scheduler.advance(0.0F, 7, true));
+    CHECK(!scheduler.advance(0.0F, 7, true));
     scheduler.complete(false, 7);
-    CHECK(!scheduler.advance(0.999F, 7));
-    CHECK(scheduler.advance(0.001F, 7));
+    CHECK(!scheduler.advance(0.999F, 7, true));
+    CHECK(scheduler.advance(0.001F, 7, true));
     scheduler.complete(true, 7);
 
-    CHECK(!scheduler.advance(8.0F, 8));
+    CHECK(!scheduler.advance(8.0F, 8, true));
 
     scheduler.reset();
-    CHECK(!scheduler.advance(0.0F, 7));
+    CHECK(!scheduler.advance(0.0F, 7, true));
     scheduler.begin_world(7);
-    CHECK(scheduler.advance(0.0F, 7));
+    CHECK(scheduler.advance(0.0F, 7, true));
     scheduler.complete(true, 7);
-    CHECK(!scheduler.advance(0.0F, 7));
+    CHECK(!scheduler.advance(0.0F, 7, true));
 }
 
-void test_union_leases_overlap_and_crafting_expires_after_idle() {
+void test_material_sessions_open_once_overlap_and_close_once() {
     using namespace base_resource_sharing;
 
-    ResourceUnionLeaseState leases;
-    leases.begin_world(11);
-    CHECK(leases.acquire_building(11));
-    CHECK(leases.touch_crafting(11));
-    CHECK(leases.desired(11));
-    CHECK(!leases.advance(1.5F, 11));
-    CHECK(leases.desired(11));
-    CHECK(!leases.release_building(12));
-    CHECK(leases.release_building(11));
-    CHECK(!leases.desired(11));
+    MaterialOperationSessions sessions;
+    sessions.begin_world(11);
 
-    CHECK(leases.touch_crafting(11));
-    CHECK(!leases.advance(1.499F, 11));
-    CHECK(leases.advance(0.001F, 11));
-    CHECK(!leases.desired(11));
-    CHECK(!leases.touch_crafting(12));
+    auto transition = sessions.acquire(ResourceOperation::building, 11);
+    CHECK(transition.unionBecameDesired);
+    CHECK(!transition.unionBecameIdle);
+    CHECK(sessions.active(ResourceOperation::building, 11));
+
+    transition = sessions.acquire(ResourceOperation::crafting, 11);
+    CHECK(!transition.unionBecameDesired);
+    CHECK(sessions.touch(ResourceOperation::crafting, 11));
+    CHECK(
+        (sessions.required_targets(11) == UnionTargets{.baseModules = true, .playerHelper = true}));
+
+    transition = sessions.release(ResourceOperation::building, 11);
+    CHECK(!transition.unionBecameIdle);
+    CHECK((sessions.required_targets(11) ==
+           UnionTargets{.baseModules = false, .playerHelper = true}));
+
+    transition = sessions.release(ResourceOperation::crafting, 11);
+    CHECK(transition.unionBecameIdle);
+    CHECK(!sessions.desired(11));
+}
+
+void test_material_session_touch_does_not_acquire_and_wrong_generation_is_ignored() {
+    using namespace base_resource_sharing;
+
+    MaterialOperationSessions sessions;
+    sessions.begin_world(12);
+    CHECK(!sessions.touch(ResourceOperation::crafting, 12));
+    CHECK(!sessions.acquire(ResourceOperation::crafting, 13).unionBecameDesired);
+    CHECK(!sessions.desired(12));
+
+    CHECK(sessions.acquire(ResourceOperation::crafting, 12).unionBecameDesired);
+    CHECK(!sessions.release(ResourceOperation::crafting, 13).unionBecameIdle);
+    CHECK(sessions.release(ResourceOperation::crafting, 12).unionBecameIdle);
+}
+
+void test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation() {
+    using namespace base_resource_sharing;
+
+    MaterialOperationSessions sessions;
+    sessions.begin_world(14);
+    CHECK(sessions.acquire(ResourceOperation::building, 14).unionBecameDesired);
+    CHECK(sessions.acquire(ResourceOperation::crafting, 14).unionBecameDesired == false);
+
+    CHECK(!sessions.cancel_all(15).unionBecameIdle);
+    CHECK(sessions.desired(14));
+
+    CHECK(sessions.cancel_all(14).unionBecameIdle);
+    CHECK(!sessions.desired(14));
+    CHECK(sessions.acquire(ResourceOperation::crafting, 14).unionBecameDesired);
+}
+
+void test_union_targets_do_not_double_expose_crafting_containers() {
+    using namespace base_resource_sharing;
+
+    CHECK((union_targets_for_operation(ResourceOperation::crafting) ==
+           UnionTargets{.baseModules = false, .playerHelper = true}));
+    CHECK((union_targets_for_operation(ResourceOperation::building) ==
+           UnionTargets{.baseModules = true, .playerHelper = true}));
+    CHECK(union_targets_for_operation(ResourceOperation::repair) == UnionTargets{});
 }
 
 auto main() -> int {
@@ -350,9 +422,14 @@ auto main() -> int {
     test_recorded_injection_removal_preserves_runtime_native_changes();
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
-    test_hook_manifest_separates_required_sessions_from_optional_events();
+    test_hook_manifest_acquires_before_first_build_and_craft_eligibility();
+    test_hook_manifest_keeps_touches_pre_and_releases_crafting_after_request();
+    test_missing_early_build_acquire_disables_only_building();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
-    test_union_leases_overlap_and_crafting_expires_after_idle();
+    test_material_sessions_open_once_overlap_and_close_once();
+    test_material_session_touch_does_not_acquire_and_wrong_generation_is_ignored();
+    test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation();
+    test_union_targets_do_not_double_expose_crafting_containers();
     return failures == 0 ? 0 : 1;
 }

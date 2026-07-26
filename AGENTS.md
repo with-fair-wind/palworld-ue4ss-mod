@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.2），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.6.3），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -84,8 +84,8 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 - `inc/game/pal_game.hpp`：背包、物品和帕鲁 UObject 反射访问；
 - `inc/base_resource_sharing/settings.hpp`：默认关闭的配置解析与持久化接口；
 - `inc/base_resource_sharing/resource_pool.hpp`：公会资源过滤/排序、能力与按注入次数恢复的纯逻辑；
-- `inc/base_resource_sharing/resource_session.hpp`：8 秒目录校准调度与制作/建造会话租约；
-- `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 制作/建造 Hook 清单；
+- `inc/base_resource_sharing/resource_session.hpp`：8 秒目录校准调度与固定大小制作/建造操作会话；
+- `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 分阶段制作/建造 Hook 清单；
 - `inc/base_resource_sharing/pal_base_resources.hpp` + `src/pal_base_resources.cpp`：事件驱动目录调度、
   制作/建造会话与 Hook 适配；
 - `src/pal_base_resource_runtime.hpp` + `src/pal_base_resource_runtime.cpp`：通过游戏管理器发现同公会普通仓储、
@@ -132,11 +132,15 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 每个登记项都必须通过 `PalMapObjectManager:FindConcreteModel` 解析到已加载的 `PalItemContainer`。该功能
 不使用全局 `FindAllOf`，不扫描或写入 `ItemSlotArray`/`StackCount`，也没有一秒一次的物品数量预览缓存。
 
-`OnRep_ContainerInfos`、仓储 ConcreteModel 可用性和 `OnRep_ModuleArray` 只负责使目录失效；EngineTick 合并
-事件，并以 8 秒校准兜底。进入建造模式或制作界面时建立会话租约，租约存续期间把同公会普通箱子引用临时追加
-到各据点仓储模块和本地主背包 `InventoryMultiHelper`，让 Palworld 原生预览、校验、真实扣除、复制和持久化
-使用同一资源集合。退出建造模式或制作空闲 1.5 秒后按原始次数、注入次数和当前序列恢复；运行时新增的非注入
-引用会保留。跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
+`OnRep_ContainerInfos`、仓储 ConcreteModel 可用性和 `OnRep_ModuleArray` 只负责合并目录失效标记；活动材料
+会话期间目录调度器不得执行校准或拆装联合，会话结束后处理一次失效，8 秒校准仅为空闲兜底。
+`PalUIBuildModel:OnOpenMenu` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前获取
+会话并建立联合。制作只向本地主背包 `InventoryMultiHelper` 追加同公会普通箱子，避免与据点模块重复计数；
+建造同时扩展据点仓储模块和材料助手。高频列表、配方和资格 Hook 只刷新固定大小状态，不做 UObject 查找、
+反射、目录发现、数组修改或日志。`StartProduction` post-hook 在原请求返回后释放制作会话，1.5 秒只作为未提交
+请求的空闲兜底；退出建造模式释放建造会话。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用
+会保留。首次菜单早于目录初始化时保存对象全名并在下一 EngineTick 完成一次目录发现和联合，不允许逐帧重试。
+跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
 
 本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先恢复活动联合再注销
 资源 Hook。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
@@ -147,7 +151,8 @@ BlueprintResearch 或等价的资源路径 mod 同时启用。
 同一可访问世界内从关闭切换为开启时，资源桥必须按当前世界代次重新初始化会话和目录调度器，并由后续
 EngineTick 自动执行一次既有的管理器目录校准。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局
 UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
-开关生命周期；1.6.2 只移除技能目标的空闲后台解析，建筑/制作首次资格计算的前置 Hook 重构仍未实施。
+开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
+入口和活动会话校准抑制。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -180,7 +185,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.2)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.3)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
@@ -191,15 +196,18 @@ git diff --check
 目标，空闲等待至少 10 秒都不再解析队伍 Holder；数字键切换不会静默改变锁定目标，提交修改时会立即重查并拒绝
 错误目标。实际帧时间改善必须在游戏内测量。资源共享还应验证：
 默认关闭且配置可持久化；关闭时工厂/建造界面性能与未启用资源功能一致；开启后反复打开工厂和建造菜单不再
-持续卡顿，另一据点箱子中的材料变化能由原生容器引用直接反映到预览；制作/建造能消费同公会另一已加载据点的普通箱子材料；
+持续卡顿，另一据点箱子中的材料变化能由原生容器引用直接反映到预览；首次打开建筑菜单时图标即可选择，
+无需先打开炉子；制作最大数量与真实可制作数量一致且不会把同一箱子计算两次；制作/建造能消费同公会另一
+已加载据点的普通箱子材料；
 材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
 显示不可用；同一世界内关闭后重新开启会自动恢复非零计数且每次只产生一次成功的初始校准；日志中目录校准
-最多每 8 秒一次，每次实时联合都有匹配且无错误的恢复和耗时记录。不要与
+仅在无活动材料会话时最多每 8 秒一次，活动菜单期间不出现联合反复恢复/重建；每次实时联合都有匹配且无错误
+的恢复和耗时记录。不要与
 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时测试。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common 主背包
-就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。1.6.2 保留技能目录启动安全门和事件驱动资源联合，
-并把当前帕鲁解析改为仅由选择/编辑请求触发；资源开关在同一世界内重新开启时仍会重启目录调度器。
+就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。1.6.3 保留技能目录启动安全门和按需帕鲁解析，
+并把材料联合提前到原版资格计算前；资源开关在同一世界内重新开启时仍会重启目录调度器。
 
 ## 权威参考资料
 
