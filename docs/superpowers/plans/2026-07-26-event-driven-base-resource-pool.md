@@ -161,7 +161,7 @@ git commit -m "feat: add resource pool session policies"
 **Interfaces:**
 - Produces:
   - `struct InjectionRemovalPlan { std::vector<GuidKey> kept; bool complete{}; }`
-  - `remove_recorded_injections(std::span<const GuidKey> current, std::span<const GuidKey> injected) -> InjectionRemovalPlan`
+  - `remove_recorded_injections(std::span<const GuidKey> current, std::span<const GuidKey> original, std::span<const GuidKey> injected) -> InjectionRemovalPlan`
 - The obsolete exact-tail, request-window, and preview policies remain temporarily so the main DLL stays buildable until Task 5
   replaces their callers.
 
@@ -175,15 +175,16 @@ void test_recorded_injection_removal_preserves_runtime_native_changes() {
     const GuidKey b{{2, 0, 0, 0}};
     const GuidKey c{{3, 0, 0, 0}};
     const GuidKey d{{4, 0, 0, 0}};
+    const std::array original{a};
     const std::array current{a, b, c, d, b};
     const std::array injected{b, c};
 
-    const auto plan = remove_recorded_injections(current, injected);
+    const auto plan = remove_recorded_injections(current, original, injected);
     CHECK(plan.complete);
     CHECK(plan.kept == std::vector<GuidKey>({a, d, b}));
 
     const std::array missing{a, b};
-    CHECK(!remove_recorded_injections(missing, injected).complete);
+    CHECK(!remove_recorded_injections(missing, original, injected).complete);
 }
 ```
 
@@ -201,7 +202,9 @@ Expected: compilation fails because `InjectionRemovalPlan` and `remove_recorded_
 
 - [ ] **Step 3: Implement reverse multiplicity removal**
 
-Copy `current` into `kept`. For each injected ID in reverse injection order, find the last matching element in `kept`; erase one match or set `complete=false` if no match exists. Never erase all occurrences indiscriminately.
+Count each ID in `original` and `injected`. While traversing `current`, preserve the first `original` occurrences, remove the next
+recorded `injected` occurrences, and preserve later occurrences added by the game. Set `complete=false` if the current sequence cannot
+account for every recorded injection. Never erase all matching occurrences indiscriminately.
 
 - [ ] **Step 4: Inventory obsolete policies without deleting live callers**
 

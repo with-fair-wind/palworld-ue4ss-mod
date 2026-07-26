@@ -194,6 +194,25 @@ void test_union_restoration_accepts_only_the_recorded_tail() {
     CHECK(missing_union_tail(partialPlan, globalPlan) == std::vector<GuidKey>({b}));
 }
 
+void test_recorded_injection_removal_preserves_runtime_native_changes() {
+    using namespace base_resource_sharing;
+
+    const GuidKey a{{1, 0, 0, 0}};
+    const GuidKey b{{2, 0, 0, 0}};
+    const GuidKey c{{3, 0, 0, 0}};
+    const GuidKey d{{4, 0, 0, 0}};
+    const std::array original{a};
+    const std::array current{a, b, c, d, b};
+    const std::array injected{b, c};
+
+    const auto plan = remove_recorded_injections(current, original, injected);
+    CHECK(plan.complete);
+    CHECK(plan.kept == std::vector<GuidKey>({a, d, b}));
+
+    const std::array missing{a, b};
+    CHECK(!remove_recorded_injections(missing, original, injected).complete);
+}
+
 void test_request_guards_and_build_window_are_generation_safe() {
     using namespace base_resource_sharing;
 
@@ -358,6 +377,7 @@ auto main() -> int {
     test_hook_capabilities_require_preview_and_consume_paths();
     test_discovery_rejects_partially_resolved_container_sets();
     test_union_restoration_accepts_only_the_recorded_tail();
+    test_recorded_injection_removal_preserves_runtime_native_changes();
     test_request_guards_and_build_window_are_generation_safe();
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();

@@ -322,6 +322,47 @@ struct ArrayPatchLedger {
     bool helperArray{};
 };
 
+struct InjectionRemovalPlan {
+    std::vector<GuidKey> kept;
+    bool complete{};
+};
+
+[[nodiscard]] inline auto remove_recorded_injections(
+    const std::span<const GuidKey> current, const std::span<const GuidKey> original,
+    const std::span<const GuidKey> injected) -> InjectionRemovalPlan {
+    std::map<GuidKey, std::size_t> originalCounts;
+    std::map<GuidKey, std::size_t> injectedCounts;
+    for (const auto& id : original) {
+        ++originalCounts[id];
+    }
+    for (const auto& id : injected) {
+        ++injectedCounts[id];
+    }
+
+    std::map<GuidKey, std::size_t> encounteredCounts;
+    std::map<GuidKey, std::size_t> removedCounts;
+    InjectionRemovalPlan result;
+    result.kept.reserve(current.size());
+    for (const auto& id : current) {
+        const auto encountered = ++encounteredCounts[id];
+        if (encountered <= originalCounts[id]) {
+            result.kept.push_back(id);
+            continue;
+        }
+        if (removedCounts[id] < injectedCounts[id]) {
+            ++removedCounts[id];
+            continue;
+        }
+        result.kept.push_back(id);
+    }
+
+    result.complete = std::ranges::all_of(injectedCounts, [&](const auto& entry) {
+        const auto removed = removedCounts.find(entry.first);
+        return removed != removedCounts.end() && removed->second == entry.second;
+    });
+    return result;
+}
+
 [[nodiscard]] inline auto verify_restoration_sequence(const std::span<const GuidKey> original,
                                                       const std::span<const GuidKey> current,
                                                       const std::span<const GuidKey> appended)
