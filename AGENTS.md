@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.5.2），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.5.3），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -120,8 +120,9 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 `scripts/generate-active-skill-definitions.ps1` 从 Palworld 1.0 UHT dump 生成的数值/Raw ID 表。
 主动和被动名称由 `PalUIUtility` 按游戏当前语言查询，`PalPlayerInventoryData` 只作为当帧本地化世界上下文；
 上下文暂不可用时目录回退为 Raw ID。两个目录区段分别维护可用状态、错误和旧目录回退，一类失败不禁用另一类。
-启动时物品扫描和技能目录加载/失败重试属于初始化工作，不是常驻逐帧解析。更新 Palworld/UHT dump 后必须
-重新运行生成脚本。
+启动时物品扫描属于初始化工作；技能目录及本地化反射必须等待玩家 Common 主背包容器有效，并且只在现有
+2 秒刷新到期或手动请求时检查该安全门。手动刷新不能绕过安全门，检查得到的容器指针不得离开当次 EngineTick。
+这些初始化工作不是常驻逐帧解析。更新 Palworld/UHT dump 后必须重新运行生成脚本。
 
 跨据点资源共享只读取同公会 `PalBaseCampModuleItemStorage.ContainerInfos` 中登记的普通仓储，并要求每个
 容器 GUID 都能解析到已加载 `PalItemContainer`。制作/建造预览使用有效期 1 秒的纯数值缓存，合计玩家 Common
@@ -164,7 +165,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.5.2)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.5.3)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
@@ -179,6 +180,10 @@ git diff --check
 材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
 显示不可用；日志中预览缓存重建最多每秒一次，每次实时联合都有匹配且无错误的恢复和耗时记录。不要与
 UBIM Lite 等修改相同资源请求路径的 mod 同时测试。
+
+还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common 主背包
+就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。1.5.3 不改变 1.5.2 的当前帕鲁解析节流和资源共享
+实现。
 
 ## 权威参考资料
 
