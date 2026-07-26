@@ -4,71 +4,36 @@
  */
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <utility>
 
 #include <skills/selected_target_state.hpp>
 
 namespace skill_editor {
-/** @brief 后台目标一致性检查的固定最短间隔。 */
-inline constexpr auto kTargetValidationInterval = std::chrono::milliseconds{250};
-
 /** @brief 本次 EngineTick 需要解析当前帕鲁的原因。 */
 enum class PalResolutionTrigger : std::uint8_t {
     none,
     selectionRequest,
     editRequest,
-    validation,
 };
 
-/** @brief 在纯值状态上调度立即解析和低频后台校验。 */
-class PalResolutionScheduler {
-public:
-    using clock = std::chrono::steady_clock;
-    using time_point = clock::time_point;
-
-    /**
-     * @brief 决定当前 tick 是否需要执行 Unreal 目标解析。
-     * @details 选择和编辑请求优先于后台校验，并刷新下一次校验截止时间。
-     */
-    [[nodiscard]] auto decide(const bool validationRequired, const bool selectionRequested,
-                              const bool editRequested, const time_point now)
-        -> PalResolutionTrigger {
-        if (selectionRequested) {
-            schedule_next(now);
-            return PalResolutionTrigger::selectionRequest;
-        }
-        if (editRequested) {
-            schedule_next(now);
-            return PalResolutionTrigger::editRequest;
-        }
-        if (!validationRequired) {
-            nextValidation_.reset();
-            return PalResolutionTrigger::none;
-        }
-        if (!nextValidation_.has_value() || now >= *nextValidation_) {
-            schedule_next(now);
-            return PalResolutionTrigger::validation;
-        }
-        return PalResolutionTrigger::none;
+/**
+ * @brief 根据显式 GUI 事件决定当前 EngineTick 是否需要解析当前帕鲁。
+ * @details 选择优先于编辑；没有请求时始终不执行后台解析。
+ */
+[[nodiscard]] constexpr auto decide_pal_resolution(const bool selectionRequested,
+                                                    const bool editRequested) noexcept
+    -> PalResolutionTrigger {
+    if (selectionRequested) {
+        return PalResolutionTrigger::selectionRequest;
     }
-
-    /** @brief 丢弃旧世界或旧目标留下的校验截止时间。 */
-    auto reset() noexcept -> void {
-        nextValidation_.reset();
+    if (editRequested) {
+        return PalResolutionTrigger::editRequest;
     }
-
-private:
-    auto schedule_next(const time_point now) -> void {
-        nextValidation_ = now + kTargetValidationInterval;
-    }
-
-    std::optional<time_point> nextValidation_;
-};
+    return PalResolutionTrigger::none;
+}
 
 /** @brief 不含 Unreal 指针的当前帕鲁解析结果。 */
 struct TargetResolutionSnapshot {
