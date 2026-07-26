@@ -13,6 +13,7 @@
 
 #include <items/item_catalog.hpp>
 #include <skills/active_skill_definitions.hpp>
+#include <skills/pal_resolution_scheduler.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
@@ -539,6 +540,75 @@ auto identity(const std::uint32_t value) -> skill_editor::TargetIdentity {
     return {.instanceId = {value, value + 1, value + 2, value + 3}};
 }
 
+void test_pal_resolution_scheduler_has_zero_idle_work() {
+    using namespace std::chrono_literals;
+    skill_editor::PalResolutionScheduler scheduler;
+    const auto start = skill_editor::PalResolutionScheduler::time_point{};
+
+    CHECK(scheduler.decide(false, false, false, start) == skill_editor::PalResolutionTrigger::none);
+    CHECK(scheduler.decide(false, false, false, start + 10s) ==
+          skill_editor::PalResolutionTrigger::none);
+}
+
+void test_pal_resolution_scheduler_throttles_selected_target_validation() {
+    using namespace std::chrono_literals;
+    skill_editor::PalResolutionScheduler scheduler;
+    const auto start = skill_editor::PalResolutionScheduler::time_point{};
+
+    CHECK(scheduler.decide(false, true, false, start) ==
+          skill_editor::PalResolutionTrigger::selectionRequest);
+    CHECK(scheduler.decide(true, false, false, start + 249ms) ==
+          skill_editor::PalResolutionTrigger::none);
+    CHECK(scheduler.decide(true, false, false, start + 250ms) ==
+          skill_editor::PalResolutionTrigger::validation);
+    CHECK(scheduler.decide(true, false, false, start + 499ms) ==
+          skill_editor::PalResolutionTrigger::none);
+}
+
+void test_pal_resolution_scheduler_never_delays_edit_validation() {
+    using namespace std::chrono_literals;
+    skill_editor::PalResolutionScheduler scheduler;
+    const auto start = skill_editor::PalResolutionScheduler::time_point{};
+
+    CHECK(scheduler.decide(false, true, false, start) ==
+          skill_editor::PalResolutionTrigger::selectionRequest);
+    CHECK(scheduler.decide(true, false, true, start + 1ms) ==
+          skill_editor::PalResolutionTrigger::editRequest);
+    CHECK(scheduler.decide(true, false, false, start + 250ms) ==
+          skill_editor::PalResolutionTrigger::none);
+    CHECK(scheduler.decide(true, false, false, start + 251ms) ==
+          skill_editor::PalResolutionTrigger::validation);
+}
+
+void test_pal_resolution_scheduler_reset_discards_old_deadline() {
+    using namespace std::chrono_literals;
+    skill_editor::PalResolutionScheduler scheduler;
+    const auto start = skill_editor::PalResolutionScheduler::time_point{};
+
+    CHECK(scheduler.decide(false, true, false, start) ==
+          skill_editor::PalResolutionTrigger::selectionRequest);
+    scheduler.reset();
+    CHECK(scheduler.decide(false, false, false, start + 1s) ==
+          skill_editor::PalResolutionTrigger::none);
+    CHECK(scheduler.decide(true, false, false, start + 1s) ==
+          skill_editor::PalResolutionTrigger::validation);
+}
+
+void test_target_resolution_snapshot_equality_tracks_observable_changes() {
+    const skill_editor::TargetResolutionSnapshot first{
+        .resolved = true,
+        .observation = {.identity = identity(10), .name = "Boar"},
+        .status = skill_editor::SelectedTargetResolutionStatus::success,
+        .holderCandidateCount = 1,
+        .localHolderCandidateCount = 1,
+        .holderCandidateClasses = L"PalOtomoHolderComponent",
+    };
+    auto same = first;
+    CHECK(first == same);
+    same.observation.identity = identity(11);
+    CHECK(!(first == same));
+}
+
 void test_target_requires_explicit_confirmation() {
     skill_editor::SelectedTargetState state;
     const skill_editor::SelectedTargetObservation observed{
@@ -770,6 +840,11 @@ auto main() -> int {
     test_active_edit_rolls_back_complete_original_sequence();
     test_skill_edit_queue_is_fifo();
     test_skill_edit_queue_can_discard_all_pending_requests();
+    test_pal_resolution_scheduler_has_zero_idle_work();
+    test_pal_resolution_scheduler_throttles_selected_target_validation();
+    test_pal_resolution_scheduler_never_delays_edit_validation();
+    test_pal_resolution_scheduler_reset_discards_old_deadline();
+    test_target_resolution_snapshot_equality_tracks_observable_changes();
     test_target_requires_explicit_confirmation();
     test_world_session_transition_requires_reconfirmation();
     test_world_session_cannot_confirm_during_transition();

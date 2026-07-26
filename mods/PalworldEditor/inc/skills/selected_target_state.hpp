@@ -58,6 +58,9 @@ struct SelectedTargetObservation {
     [[nodiscard]] auto is_valid() const -> bool {
         return identity.is_valid();
     }
+
+    /** @brief 比较两个纯值观测的个体身份和展示名称。 */
+    auto operator==(const SelectedTargetObservation&) const -> bool = default;
 };
 
 /**
