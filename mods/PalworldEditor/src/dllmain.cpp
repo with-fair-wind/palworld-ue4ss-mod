@@ -31,6 +31,7 @@
 #include <game/pal_game.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
+#include <skills/pal_resolution_scheduler.hpp>
 #include <skills/pal_skills.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/world_session_state.hpp>
@@ -153,9 +154,10 @@ public:
                 const std::lock_guard lock(selectionRequestMutex_);
                 selectCurrentPalRequest_.reset();
             }
-            const std::lock_guard lock(skillSnapshotMutex_);
-            skillSnapshot_.lastResult =
+            skillRuntimeSnapshot_.lastResult =
                 "UE4SS 游戏线程/世界切换回调注册失败；为避免跨世界写入，技能编辑已停用。";
+            skillSnapshotDirty_ = true;
+            publish_skill_snapshot_if_dirty();
         }
     }
 
@@ -241,64 +243,82 @@ public:
             item_db_cache_ = std::move(fresh);
         }
 
-        const auto selectedPal = pal_game::resolve_selected_otomo();
-        const bool targetResolved =
-            selectedPal.status == skill_editor::SelectedTargetResolutionStatus::success &&
-            selectedPal.observation.is_valid() && pal_game::is_valid(selectedPal.parameter);
-        const auto targetObservation =
-            targetResolved ? selectedPal.observation : skill_editor::SelectedTargetObservation{};
-
-        if (!lastResolutionStatus_.has_value() || *lastResolutionStatus_ != selectedPal.status) {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: selected Pal resolution status={}, holder_candidates={}, "
-                    "local_candidates={}, classes=[{}]\n"),
-                static_cast<int32>(selectedPal.status),
-                static_cast<int32>(selectedPal.holderCandidateCount),
-                static_cast<int32>(selectedPal.localHolderCandidateCount),
-                selectedPal.holderCandidateClasses);
-            lastResolutionStatus_ = selectedPal.status;
-        }
-
-        std::string lifecycleResult;
-
-        std::optional<skill_editor::SkillState> refreshedState;
-        bool targetConfirmed = false;
-        std::optional<skill_editor::WorldBoundRequest> selectCurrentPalRequest;
+        std::optional<skill_editor::WorldBoundRequest> selectionRequest;
         {
             const std::lock_guard lock(selectionRequestMutex_);
-            selectCurrentPalRequest = std::exchange(selectCurrentPalRequest_, std::nullopt);
+            selectionRequest = std::exchange(selectCurrentPalRequest_, std::nullopt);
         }
-        if (selectCurrentPalRequest.has_value() &&
-            skill_editor::request_can_run(*selectCurrentPalRequest, worldSession_) &&
-            worldLifecycleCallbacksReady_.load()) {
+        const bool selectionRequested =
+            selectionRequest.has_value() &&
+            skill_editor::request_can_run(*selectionRequest, worldSession_) &&
+            worldLifecycleCallbacksReady_.load();
+
+        std::optional<skill_editor::SkillEditRequest> editRequest;
+        if (selectionRequested) {
             skillQueue_.clear();
-            if (targetResolved && selectedTarget_.confirm(targetObservation) &&
-                worldSession_.confirm_target()) {
-                refreshedState = skillGateway_.read_state(
-                    reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter));
-                targetConfirmed = true;
-                lifecycleResult.clear();
-            } else {
-                const auto reason = skill_editor::resolution_status_message(selectedPal.status);
-                lifecycleResult = "选择失败：";
-                lifecycleResult.append(reason.data(), reason.size());
+        } else {
+            editRequest = skillQueue_.try_pop();
+        }
+
+        const auto trigger = palResolutionScheduler_.decide(
+            worldSession_.is_target_confirmed() && selectedTarget_.is_selected(),
+            selectionRequested, editRequest.has_value(),
+            skill_editor::PalResolutionScheduler::clock::now());
+        std::optional<pal_game::SelectedPalTarget> resolvedPal;
+        if (trigger != skill_editor::PalResolutionTrigger::none) {
+            resolvedPal = pal_game::resolve_selected_otomo();
+            const bool resolved =
+                resolvedPal->status == skill_editor::SelectedTargetResolutionStatus::success &&
+                resolvedPal->observation.is_valid() && pal_game::is_valid(resolvedPal->parameter);
+            const skill_editor::TargetResolutionSnapshot nextResolution{
+                .resolved = resolved,
+                .observation =
+                    resolved ? resolvedPal->observation : skill_editor::SelectedTargetObservation{},
+                .status = resolvedPal->status,
+                .holderCandidateCount = resolvedPal->holderCandidateCount,
+                .localHolderCandidateCount = resolvedPal->localHolderCandidateCount,
+                .holderCandidateClasses = resolvedPal->holderCandidateClasses,
+            };
+            skillSnapshotDirty_ =
+                targetResolutionState_.update(nextResolution) || skillSnapshotDirty_;
+
+            if (!lastResolutionStatus_.has_value() ||
+                *lastResolutionStatus_ != resolvedPal->status) {
+                Output::send<LogLevel::Warning>(
+                    STR("PalworldEditor: selected Pal resolution status={}, "
+                        "holder_candidates={}, local_candidates={}, classes=[{}]\n"),
+                    static_cast<int32>(resolvedPal->status),
+                    static_cast<int32>(resolvedPal->holderCandidateCount),
+                    static_cast<int32>(resolvedPal->localHolderCandidateCount),
+                    resolvedPal->holderCandidateClasses);
+                lastResolutionStatus_ = resolvedPal->status;
             }
         }
 
-        const bool targetMatchesCurrent = worldSession_.is_target_confirmed() && targetResolved &&
-                                          selectedTarget_.matches_current(targetObservation);
+        const auto& resolution = targetResolutionState_.current();
+        if (selectionRequested) {
+            if (resolvedPal.has_value() && resolution.resolved &&
+                selectedTarget_.confirm(resolution.observation) && worldSession_.confirm_target()) {
+                skillRuntimeSnapshot_.state = skillGateway_.read_state(
+                    reinterpret_cast<skill_editor::SkillTarget>(resolvedPal->parameter));
+                skillRuntimeSnapshot_.lastResult.clear();
+            } else {
+                const auto reason = skill_editor::resolution_status_message(resolution.status);
+                skillRuntimeSnapshot_.lastResult = "选择失败：";
+                skillRuntimeSnapshot_.lastResult.append(reason.data(), reason.size());
+            }
+            skillSnapshotDirty_ = true;
+        }
 
         std::optional<skill_editor::SkillEditResult> editResult;
-        if (auto request = skillQueue_.try_pop()) {
-            {
-                const std::lock_guard lock(skillSnapshotMutex_);
-                skillSnapshot_.pending = true;
-            }
+        if (editRequest.has_value()) {
+            const auto target =
+                resolvedPal.has_value() && resolution.resolved
+                    ? reinterpret_cast<skill_editor::SkillTarget>(resolvedPal->parameter)
+                    : skill_editor::SkillTarget{};
             editResult = skill_editor::apply_if_target_is_current(
-                *request, selectedTarget_, targetObservation,
-                targetResolved ? reinterpret_cast<skill_editor::SkillTarget>(selectedPal.parameter)
-                               : skill_editor::SkillTarget{},
-                worldSession_, [this](const skill_editor::SkillEditRequest& executableRequest) {
+                *editRequest, selectedTarget_, resolution.observation, target, worldSession_,
+                [this](const skill_editor::SkillEditRequest& executableRequest) {
                     return skill_editor::execute_skill_edit(skillGateway_, executableRequest);
                 });
             if (!editResult.has_value()) {
@@ -308,62 +328,53 @@ public:
                     .message = "当前高亮帕鲁与已选择目标不一致或暂时无法确认；本次修改未执行。",
                 };
             } else {
-                refreshedState = editResult->state;
+                skillRuntimeSnapshot_.state = editResult->state;
             }
+            skillRuntimeSnapshot_.lastResult = editResult->message;
+            skillSnapshotDirty_ = true;
         }
 
-        std::optional<skill_editor::SkillCatalogSnapshot> refreshedCatalog;
         const bool manualRefreshRequested = wantRefreshSkillCatalog_.exchange(false);
-        bool catalogReady = false;
-        {
-            const std::lock_guard lock(skillSnapshotMutex_);
-            catalogReady = skill_editor::catalog_is_ready_for_editing(skillSnapshot_.catalog);
-        }
+        const bool catalogReady =
+            skill_editor::catalog_is_ready_for_editing(skillRuntimeSnapshot_.catalog);
         const bool refreshRequested = skillCatalogRefreshScheduler_.should_refresh(
             manualRefreshRequested, catalogReady,
             skill_editor::SkillCatalogRefreshScheduler::clock::now());
         if (refreshRequested) {
-            skill_editor::SkillCatalogSnapshot previous;
-            {
-                const std::lock_guard lock(skillSnapshotMutex_);
-                previous = skillSnapshot_.catalog;
-            }
-            refreshedCatalog =
-                skill_editor::with_catalog_fallback(previous, skillGateway_.load_catalog());
+            skillRuntimeSnapshot_.catalog = skill_editor::with_catalog_fallback(
+                skillRuntimeSnapshot_.catalog, skillGateway_.load_catalog());
+            skillSnapshotDirty_ = true;
         }
 
-        {
-            const std::lock_guard lock(skillSnapshotMutex_);
-            skillSnapshot_.targetGeneration = selectedTarget_.generation();
-            skillSnapshot_.worldGeneration = worldSession_.generation();
-            skillSnapshot_.worldAccessible = worldSession_.can_access_unreal();
-            skillSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
-            skillSnapshot_.targetConfirmedForWorld = worldSession_.is_target_confirmed();
-            skillSnapshot_.targetSelected = selectedTarget_.is_selected();
-            skillSnapshot_.targetMatchesCurrent = targetMatchesCurrent;
-            skillSnapshot_.palName =
-                selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
-            skillSnapshot_.resolutionStatus = selectedPal.status;
-            skillSnapshot_.pending = skillQueue_.size() != 0;
-            if (!selectedTarget_.is_selected()) {
-                skillSnapshot_.state = {};
+        const auto update_runtime_value = [this](auto& current, auto next) {
+            if (current != next) {
+                current = std::move(next);
+                skillSnapshotDirty_ = true;
             }
-            if (refreshedCatalog.has_value()) {
-                skillSnapshot_.catalog = std::move(*refreshedCatalog);
-            }
-            if (refreshedState.has_value()) {
-                skillSnapshot_.state = std::move(*refreshedState);
-            }
-            if (targetConfirmed) {
-                skillSnapshot_.lastResult.clear();
-            }
-            if (!lifecycleResult.empty()) {
-                skillSnapshot_.lastResult = std::move(lifecycleResult);
-            }
-            if (editResult.has_value()) {
-                skillSnapshot_.lastResult = editResult->message;
-            }
+        };
+        update_runtime_value(skillRuntimeSnapshot_.targetGeneration, selectedTarget_.generation());
+        update_runtime_value(skillRuntimeSnapshot_.worldGeneration, worldSession_.generation());
+        update_runtime_value(skillRuntimeSnapshot_.worldAccessible,
+                             worldSession_.can_access_unreal());
+        update_runtime_value(skillRuntimeSnapshot_.worldLifecycleCallbacksReady,
+                             worldLifecycleCallbacksReady_.load());
+        update_runtime_value(skillRuntimeSnapshot_.targetConfirmedForWorld,
+                             worldSession_.is_target_confirmed());
+        update_runtime_value(skillRuntimeSnapshot_.targetSelected, selectedTarget_.is_selected());
+        update_runtime_value(skillRuntimeSnapshot_.targetMatchesCurrent,
+                             worldSession_.is_target_confirmed() && resolution.resolved &&
+                                 selectedTarget_.matches_current(resolution.observation));
+        update_runtime_value(skillRuntimeSnapshot_.palName, selectedTarget_.is_selected()
+                                                                ? selectedTarget_.current().name
+                                                                : std::string{});
+        update_runtime_value(skillRuntimeSnapshot_.resolutionStatus, resolution.status);
+        update_runtime_value(skillRuntimeSnapshot_.pending, skillQueue_.size() != 0);
+        if (!selectedTarget_.is_selected() && (!skillRuntimeSnapshot_.state.passiveIds.empty() ||
+                                               !skillRuntimeSnapshot_.state.activeSkills.empty())) {
+            skillRuntimeSnapshot_.state = {};
+            skillSnapshotDirty_ = true;
         }
+        publish_skill_snapshot_if_dirty();
 
         // Discover
         if (want_discover_.exchange(false)) {
@@ -410,25 +421,26 @@ private:
         }
 
         lastResolutionStatus_.reset();
-        {
-            const std::lock_guard lock(skillSnapshotMutex_);
-            skillSnapshot_.targetGeneration = selectedTarget_.generation();
-            skillSnapshot_.worldGeneration = worldSession_.generation();
-            skillSnapshot_.palName =
-                selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
-            skillSnapshot_.state = {};
-            skillSnapshot_.catalog = {};
-            skillSnapshot_.lastResult =
-                "世界切换已取消所有待处理操作；进入存档后请重新选择当前帕鲁。";
-            skillSnapshot_.resolutionStatus =
-                skill_editor::SelectedTargetResolutionStatus::holderCandidatesUnavailable;
-            skillSnapshot_.targetSelected = selectedTarget_.is_selected();
-            skillSnapshot_.targetMatchesCurrent = false;
-            skillSnapshot_.pending = false;
-            skillSnapshot_.worldAccessible = false;
-            skillSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
-            skillSnapshot_.targetConfirmedForWorld = false;
-        }
+        palResolutionScheduler_.reset();
+        targetResolutionState_.reset();
+        skillRuntimeSnapshot_.targetGeneration = selectedTarget_.generation();
+        skillRuntimeSnapshot_.worldGeneration = worldSession_.generation();
+        skillRuntimeSnapshot_.palName =
+            selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
+        skillRuntimeSnapshot_.state = {};
+        skillRuntimeSnapshot_.catalog = {};
+        skillRuntimeSnapshot_.lastResult =
+            "世界切换已取消所有待处理操作；进入存档后请重新选择当前帕鲁。";
+        skillRuntimeSnapshot_.resolutionStatus =
+            skill_editor::SelectedTargetResolutionStatus::holderCandidatesUnavailable;
+        skillRuntimeSnapshot_.targetSelected = selectedTarget_.is_selected();
+        skillRuntimeSnapshot_.targetMatchesCurrent = false;
+        skillRuntimeSnapshot_.pending = false;
+        skillRuntimeSnapshot_.worldAccessible = false;
+        skillRuntimeSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
+        skillRuntimeSnapshot_.targetConfirmedForWorld = false;
+        skillSnapshotDirty_ = true;
+        publish_skill_snapshot_if_dirty();
     }
 
     /** @brief Re-enables reads after LoadMap without restoring Pal write authorization. */
@@ -451,14 +463,19 @@ private:
         want_scan_items_.store(true);
         wantRefreshSkillCatalog_.store(true);
 
-        const std::lock_guard lock(skillSnapshotMutex_);
-        skillSnapshot_.worldGeneration = worldSession_.generation();
-        skillSnapshot_.worldAccessible = true;
-        skillSnapshot_.targetConfirmedForWorld = false;
-        skillSnapshot_.targetMatchesCurrent = false;
-        skillSnapshot_.pending = false;
-        skillSnapshot_.lastResult =
+        palResolutionScheduler_.reset();
+        targetResolutionState_.reset();
+        skillRuntimeSnapshot_.worldGeneration = worldSession_.generation();
+        skillRuntimeSnapshot_.worldAccessible = true;
+        skillRuntimeSnapshot_.targetConfirmedForWorld = false;
+        skillRuntimeSnapshot_.targetMatchesCurrent = false;
+        skillRuntimeSnapshot_.pending = false;
+        skillRuntimeSnapshot_.resolutionStatus =
+            skill_editor::SelectedTargetResolutionStatus::holderCandidatesUnavailable;
+        skillRuntimeSnapshot_.lastResult =
             "已进入新的世界；原帕鲁选择仅用于显示，请重新点击“选择当前帕鲁”。";
+        skillSnapshotDirty_ = true;
+        publish_skill_snapshot_if_dirty();
     }
 
     /**
@@ -482,6 +499,15 @@ private:
         bool worldLifecycleCallbacksReady{};  /**< LoadMap 前后回调是否均已注册。 */
         bool targetConfirmedForWorld{};       /**< 当前世界是否已由用户重新确认目标。 */
     };
+
+    /** @brief 仅在可观察技能状态变化时把游戏线程快照发布给 GUI。 */
+    auto publish_skill_snapshot_if_dirty() -> void {
+        if (!std::exchange(skillSnapshotDirty_, false)) {
+            return;
+        }
+        const std::lock_guard lock(skillSnapshotMutex_);
+        skillSnapshot_ = skillRuntimeSnapshot_;
+    }
 
     /**
      * @brief 把整数限制到闭区间 `[lo, hi]`。
@@ -868,7 +894,8 @@ private:
     /**
      * @brief 渲染当前待出战帕鲁、技能目录状态和主动/被动技能编辑区域。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
-     * @details 每帧解析只检测数字键当前高亮、下一次按 E 召唤的队伍目标变化；
+     * @details 未确认目标时不执行后台解析；确认后最多每 250 毫秒校验一次数字键当前高亮目标，
+     *          选择和编辑请求仍会在写入前立即解析。
      *          用户点击“选择当前帕鲁”后才显示编辑区。
      *          GUI 请求只携带目标代数，不传递 Unreal 对象地址。
      * @warning 只在 GUI 线程调用。
@@ -933,7 +960,8 @@ private:
             ImGui::TextDisabled(
                 "请用数字键高亮队伍帕鲁，再点击“选择当前帕鲁”；目标应与下一次按 E 召唤一致。");
         }
-        if (snapshot.resolutionStatus != skill_editor::SelectedTargetResolutionStatus::success) {
+        if (snapshot.targetConfirmedForWorld &&
+            snapshot.resolutionStatus != skill_editor::SelectedTargetResolutionStatus::success) {
             const auto message = skill_editor::resolution_status_message(snapshot.resolutionStatus);
             ImGui::TextColored(ImVec4(1.0F, 0.45F, 0.35F, 1.0F), "解析状态：%.*s",
                                static_cast<int>(message.size()), message.data());
@@ -1049,14 +1077,22 @@ private:
     skill_editor::WorldSessionState worldSession_;
     /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
     skill_editor::SelectedTargetState selectedTarget_;
+    /** @brief 选择/编辑时立即解析、确认目标后每 250 毫秒校验一次的纯值调度器。 */
+    skill_editor::PalResolutionScheduler palResolutionScheduler_;
+    /** @brief 最近一次解析结果的纯值副本；不含任何 Unreal 指针。 */
+    skill_editor::TargetResolutionState targetResolutionState_;
     /** @brief 最近一次输出日志的目标解析状态；仅由游戏线程访问。 */
     std::optional<skill_editor::SelectedTargetResolutionStatus> lastResolutionStatus_;
     /** @brief GUI 生产、游戏线程 FIFO 消费的线程安全技能编辑请求队列。 */
     skill_editor::SkillEditQueue skillQueue_;
     /** @brief 保护游戏线程发布、GUI 线程复制的 skillSnapshot_。 */
     std::mutex skillSnapshotMutex_;
+    /** @brief 仅由游戏线程修改的技能编辑工作快照。 */
+    SkillEditorSnapshot skillRuntimeSnapshot_;
     /** @brief 最近一次发布给 GUI 的完整技能编辑快照；由 skillSnapshotMutex_ 保护。 */
     SkillEditorSnapshot skillSnapshot_;
+    /** @brief 游戏线程工作快照是否包含尚未发布的可观察变化。 */
+    bool skillSnapshotDirty_{true};
     /** @brief 保护绑定世界代次的“选择当前帕鲁”请求。 */
     std::mutex selectionRequestMutex_;
     /** @brief GUI 提交、EngineTick 消费的最新目标选择请求。 */

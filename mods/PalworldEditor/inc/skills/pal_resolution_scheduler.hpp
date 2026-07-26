@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <skills/selected_target_state.hpp>
 
@@ -80,5 +81,28 @@ struct TargetResolutionSnapshot {
     std::wstring holderCandidateClasses;
 
     auto operator==(const TargetResolutionSnapshot&) const -> bool = default;
+};
+
+/** @brief 保存最近一次纯值解析结果并报告可观察变化。 */
+class TargetResolutionState {
+public:
+    [[nodiscard]] auto update(TargetResolutionSnapshot next) -> bool {
+        if (current_ == next) {
+            return false;
+        }
+        current_ = std::move(next);
+        return true;
+    }
+
+    auto reset() -> void {
+        current_ = {};
+    }
+
+    [[nodiscard]] auto current() const -> const TargetResolutionSnapshot& {
+        return current_;
+    }
+
+private:
+    TargetResolutionSnapshot current_;
 };
 }  // namespace skill_editor

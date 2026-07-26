@@ -609,6 +609,27 @@ void test_target_resolution_snapshot_equality_tracks_observable_changes() {
     CHECK(!(first == same));
 }
 
+void test_target_resolution_state_marks_only_real_changes() {
+    skill_editor::TargetResolutionState state;
+    const skill_editor::TargetResolutionSnapshot first{
+        .resolved = true,
+        .observation = {.identity = identity(10), .name = "Boar"},
+        .status = skill_editor::SelectedTargetResolutionStatus::success,
+        .holderCandidateCount = 1,
+        .localHolderCandidateCount = 1,
+        .holderCandidateClasses = L"PalOtomoHolderComponent",
+    };
+
+    CHECK(state.update(first));
+    CHECK(!state.update(first));
+    auto changed = first;
+    changed.status = skill_editor::SelectedTargetResolutionStatus::parameterUnavailable;
+    CHECK(state.update(changed));
+    CHECK(state.current() == changed);
+    state.reset();
+    CHECK(state.current() == skill_editor::TargetResolutionSnapshot{});
+}
+
 void test_target_requires_explicit_confirmation() {
     skill_editor::SelectedTargetState state;
     const skill_editor::SelectedTargetObservation observed{
@@ -845,6 +866,7 @@ auto main() -> int {
     test_pal_resolution_scheduler_never_delays_edit_validation();
     test_pal_resolution_scheduler_reset_discards_old_deadline();
     test_target_resolution_snapshot_equality_tracks_observable_changes();
+    test_target_resolution_state_marks_only_real_changes();
     test_target_requires_explicit_confirmation();
     test_world_session_transition_requires_reconfirmation();
     test_world_session_cannot_confirm_during_transition();
