@@ -247,9 +247,8 @@ git commit -m "refactor: make resource union restoration mutation-safe"
 - Produces:
   - `enum class HookAction : std::uint8_t`
     - `structureChanged`
-    - `buildingAcquire`
+    - `buildingModeChanged`
     - `buildingTouch`
-    - `buildingRelease`
     - `craftingAcquire`
     - `craftingTouch`
   - `enum class HookRequirement : std::uint8_t { optional, required }`
@@ -264,9 +263,8 @@ void test_hook_manifest_separates_required_sessions_from_optional_events() {
 
     const auto hooks = palworld_1_0_1_hook_manifest();
     CHECK(std::ranges::count(hooks, HookAction::structureChanged, &HookSpec::action) == 4);
-    CHECK(std::ranges::count(hooks, HookAction::buildingAcquire, &HookSpec::action) == 1);
+    CHECK(std::ranges::count(hooks, HookAction::buildingModeChanged, &HookSpec::action) == 1);
     CHECK(std::ranges::count(hooks, HookAction::buildingTouch, &HookSpec::action) == 1);
-    CHECK(std::ranges::count(hooks, HookAction::buildingRelease, &HookSpec::action) == 1);
     CHECK(std::ranges::count(hooks, HookAction::craftingAcquire, &HookSpec::action) == 1);
     CHECK(std::ranges::count(hooks, HookAction::craftingTouch, &HookSpec::action) == 3);
 }
@@ -293,16 +291,15 @@ Use these paths:
 /Script/Pal.PalBaseCampModuleItemStorage:OnAvailableConcreteModel_ServerInternal
 /Script/Pal.PalBaseCampModuleItemStorage:OnNotAvailableConcreteModel_ServerInternal
 /Script/Pal.PalBaseCampModel:OnRep_ModuleArray
-/Script/Pal.PalBuilderComponent:OnStartBuildingMode_Local
+/Script/Pal.PalBuilderComponent:ChangeMode
 /Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject
-/Script/Pal.PalBuilderComponent:OnEndBuildingMode_Local
 /Script/Pal.PalUIConvertItemModel:Initialize
 /Script/Pal.PalUIProductSettingModel:CalcMaxProductableNum
 /Script/Pal.PalUIConvertItemModel:CanStartProduction
 /Script/Pal.PalUIConvertItemModel:StartProduction
 ```
 
-Mark the four structure paths and `CalcMaxProductableNum` optional. Mark build acquire/touch/release and craft acquire/`CanStartProduction`/`StartProduction` required.
+Mark the four structure paths and `CalcMaxProductableNum` optional. Mark build mode/touch and craft acquire/`CanStartProduction`/`StartProduction` required.
 
 - [ ] **Step 4: Run focused tests and observe GREEN**
 
@@ -556,9 +553,8 @@ Pre/post callbacks must follow this table:
 | Action | Callback behavior |
 |---|---|
 | `structureChanged` | post: if not `selfMutation_`, call `request_immediate(generation)` |
-| `buildingAcquire` | post: acquire building lease and call `ensure_union(context.Context)` |
+| `buildingModeChanged` | post: call `IsInBuildingMode`; acquire/ensure while active, otherwise release/restore |
 | `buildingTouch` | pre: acquire/touch building lease and call `ensure_union(context.Context)` |
-| `buildingRelease` | post: release building lease and restore if no lease remains |
 | `craftingAcquire` | post: touch crafting lease and call `ensure_union(context.Context)` |
 | `craftingTouch` | pre: touch crafting lease and call `ensure_union(context.Context)` |
 

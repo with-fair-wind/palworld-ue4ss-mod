@@ -93,34 +93,6 @@ enum class ResourceOperation : std::uint8_t { crafting, building, repair };
     return enabled && worldAccessible;
 }
 
-inline constexpr double kPreviewCacheSeconds = 1.0;
-
-class PreviewCacheGate {
-public:
-    auto record(const std::uint64_t generation, const double nowSeconds) noexcept -> void {
-        valid_ = true;
-        generation_ = generation;
-        createdAtSeconds_ = nowSeconds;
-    }
-
-    auto invalidate() noexcept -> void {
-        valid_ = false;
-        generation_ = 0;
-        createdAtSeconds_ = 0.0;
-    }
-
-    [[nodiscard]] auto can_reuse(const std::uint64_t generation,
-                                 const double nowSeconds) const noexcept -> bool {
-        const auto age = nowSeconds - createdAtSeconds_;
-        return valid_ && generation == generation_ && age >= 0.0 && age < kPreviewCacheSeconds;
-    }
-
-private:
-    bool valid_{};
-    std::uint64_t generation_{};
-    double createdAtSeconds_{};
-};
-
 class SnapshotDirtyFlag {
 public:
     auto mark() noexcept -> void {
@@ -134,91 +106,6 @@ public:
 private:
     bool dirty_{true};
 };
-
-struct ItemAmount {
-    std::string id;
-    std::int64_t amount{};
-};
-
-struct AmountAggregation {
-    std::map<std::string, std::int64_t> amounts;
-    std::string error;
-};
-
-[[nodiscard]] inline auto aggregate_amounts(const std::span<const ItemAmount> values)
-    -> AmountAggregation {
-    AmountAggregation result;
-    for (const auto& value : values) {
-        if (value.id.empty()) {
-            result.error = "物品 ID 不能为空。";
-            result.amounts.clear();
-            return result;
-        }
-        if (value.amount < 0) {
-            result.error = "物品数量不能为负数。";
-            result.amounts.clear();
-            return result;
-        }
-        auto& current = result.amounts[value.id];
-        if (value.amount > std::numeric_limits<std::int64_t>::max() - current) {
-            result.error = "物品数量合计溢出。";
-            result.amounts.clear();
-            return result;
-        }
-        current += value.amount;
-    }
-    return result;
-}
-
-[[nodiscard]] inline auto combine_preview_sources(const std::span<const ItemAmount> player,
-                                                  const std::span<const ItemAmount> bases)
-    -> AmountAggregation {
-    std::vector<ItemAmount> combined;
-    combined.reserve(player.size() + bases.size());
-    combined.insert(combined.end(), player.begin(), player.end());
-    combined.insert(combined.end(), bases.begin(), bases.end());
-    return aggregate_amounts(combined);
-}
-
-[[nodiscard]] inline auto shared_requirements_available(
-    const std::span<const ItemAmount> requirements,
-    const std::map<std::string, std::int64_t>& available) -> bool {
-    const auto merged = aggregate_amounts(requirements);
-    if (!merged.error.empty()) {
-        return false;
-    }
-    return std::ranges::all_of(merged.amounts, [&available](const auto& requirement) {
-        const auto found = available.find(requirement.first);
-        return found != available.end() && found->second >= requirement.second;
-    });
-}
-
-[[nodiscard]] inline auto max_productable_from_shared_counts(
-    const std::int32_t vanilla, const std::span<const ItemAmount> requirements,
-    const std::map<std::string, std::int64_t>& available) -> std::int32_t {
-    const auto merged = aggregate_amounts(requirements);
-    if (!merged.error.empty() || merged.amounts.empty()) {
-        return vanilla;
-    }
-
-    auto sharedMaximum = std::numeric_limits<std::int64_t>::max();
-    bool hasPositiveRequirement{};
-    for (const auto& [id, required] : merged.amounts) {
-        if (required == 0) {
-            continue;
-        }
-        hasPositiveRequirement = true;
-        const auto found = available.find(id);
-        const auto count = found == available.end() ? std::int64_t{} : found->second;
-        sharedMaximum = std::min(sharedMaximum, count / required);
-    }
-    if (!hasPositiveRequirement) {
-        return vanilla;
-    }
-    const auto clamped = std::min(
-        sharedMaximum, static_cast<std::int64_t>(std::numeric_limits<std::int32_t>::max()));
-    return std::max(vanilla, static_cast<std::int32_t>(clamped));
-}
 
 struct CapabilityState {
     bool previewReady{};
@@ -282,54 +169,15 @@ private:
     std::array<CapabilityState, 3> capabilities_{};
 };
 
-struct ValidationResult {
-    std::string error;
-};
-
-[[nodiscard]] inline auto validate_live_container_resolution(
-    const std::span<const ContainerDescriptor> registered, const std::span<const GuidKey> resolved)
-    -> ValidationResult {
-    std::vector<GuidKey> expected;
-    for (const auto& descriptor : registered) {
-        if (descriptor.containerId.valid() &&
-            std::ranges::find(expected, descriptor.containerId) == expected.end()) {
-            expected.push_back(descriptor.containerId);
-        }
-    }
-
-    std::vector<GuidKey> actual;
-    for (const auto& id : resolved) {
-        if (id.valid() && std::ranges::find(actual, id) == actual.end()) {
-            actual.push_back(id);
-        }
-    }
-
-    const bool complete =
-        expected.size() == actual.size() && std::ranges::all_of(expected, [&](const auto& id) {
-            return std::ranges::find(actual, id) != actual.end();
-        });
-    if (complete && !expected.empty()) {
-        return {};
-    }
-    return {.error = "仅解析到 " + std::to_string(actual.size()) + "/" +
-                     std::to_string(expected.size()) + " 个已登记据点资源容器。"};
-}
-
-struct ArrayPatchLedger {
-    std::wstring objectFullName;
-    std::vector<GuidKey> original;
-    std::vector<GuidKey> appended;
-    bool helperArray{};
-};
-
 struct InjectionRemovalPlan {
     std::vector<GuidKey> kept;
     bool complete{};
 };
 
-[[nodiscard]] inline auto remove_recorded_injections(
-    const std::span<const GuidKey> current, const std::span<const GuidKey> original,
-    const std::span<const GuidKey> injected) -> InjectionRemovalPlan {
+[[nodiscard]] inline auto remove_recorded_injections(const std::span<const GuidKey> current,
+                                                     const std::span<const GuidKey> original,
+                                                     const std::span<const GuidKey> injected)
+    -> InjectionRemovalPlan {
     std::map<GuidKey, std::size_t> originalCounts;
     std::map<GuidKey, std::size_t> injectedCounts;
     for (const auto& id : original) {
@@ -363,15 +211,6 @@ struct InjectionRemovalPlan {
     return result;
 }
 
-[[nodiscard]] inline auto verify_restoration_sequence(const std::span<const GuidKey> original,
-                                                      const std::span<const GuidKey> current,
-                                                      const std::span<const GuidKey> appended)
-    -> bool {
-    return current.size() == original.size() + appended.size() &&
-           std::ranges::equal(current.first(original.size()), original) &&
-           std::ranges::equal(current.last(appended.size()), appended);
-}
-
 [[nodiscard]] inline auto missing_union_tail(const std::span<const GuidKey> existing,
                                              const std::span<const GuidKey> globalPlan)
     -> std::vector<GuidKey> {
@@ -384,87 +223,6 @@ struct InjectionRemovalPlan {
     }
     return missing;
 }
-
-class RequestGuard {
-public:
-    [[nodiscard]] auto try_enter(const ResourceOperation operation,
-                                 const std::uint64_t generation) noexcept -> bool {
-        if (depth_ != 0) {
-            return false;
-        }
-        operation_ = operation;
-        generation_ = generation;
-        depth_ = 1;
-        return true;
-    }
-
-    auto leave(const ResourceOperation operation, const std::uint64_t generation) noexcept -> void {
-        if (depth_ == 1 && operation_ == operation && generation_ == generation) {
-            reset();
-        }
-    }
-
-    auto reset() noexcept -> void {
-        depth_ = 0;
-        generation_ = 0;
-    }
-
-    [[nodiscard]] auto active() const noexcept -> bool {
-        return depth_ != 0;
-    }
-
-private:
-    ResourceOperation operation_{ResourceOperation::crafting};
-    std::uint64_t generation_{};
-    std::uint8_t depth_{};
-};
-
-inline constexpr float kBuildUnionTimeoutSeconds = 0.75F;
-
-class BuildUnionWindow {
-public:
-    [[nodiscard]] auto open(const std::uint64_t generation) noexcept -> bool {
-        if (opened_) {
-            return false;
-        }
-        opened_ = true;
-        generation_ = generation;
-        elapsed_ = 0.0F;
-        return true;
-    }
-
-    [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t generation) noexcept
-        -> bool {
-        if (!opened_) {
-            return false;
-        }
-        if (generation != generation_) {
-            reset();
-            return true;
-        }
-        elapsed_ += std::max(deltaSeconds, 0.0F);
-        if (elapsed_ >= kBuildUnionTimeoutSeconds) {
-            reset();
-            return true;
-        }
-        return false;
-    }
-
-    auto reset() noexcept -> void {
-        opened_ = false;
-        generation_ = 0;
-        elapsed_ = 0.0F;
-    }
-
-    [[nodiscard]] auto opened() const noexcept -> bool {
-        return opened_;
-    }
-
-private:
-    bool opened_{};
-    std::uint64_t generation_{};
-    float elapsed_{};
-};
 
 struct BaseResourceSharingStatus {
     bool enabled{};

@@ -9,11 +9,20 @@
 #include <base_resource_sharing/resource_pool.hpp>
 
 namespace base_resource_sharing {
-enum class HookRole : std::uint8_t { preview, consume };
+enum class HookAction : std::uint8_t {
+    structureChanged,
+    buildingModeChanged,
+    buildingTouch,
+    craftingAcquire,
+    craftingTouch,
+};
+
+enum class HookRequirement : std::uint8_t { optional, required };
 
 struct HookSpec {
     ResourceOperation operation;
-    HookRole role;
+    HookAction action;
+    HookRequirement requirement;
     std::string_view path;
 };
 
@@ -23,14 +32,26 @@ struct HookResolution {
 };
 
 inline constexpr std::array kPalworld101HookManifest{
-    HookSpec{ResourceOperation::crafting, HookRole::preview,
-             "/Script/Pal.PalUIProductSettingModel:CalcMaxProductableNum"},
-    HookSpec{ResourceOperation::crafting, HookRole::consume,
-             "/Script/Pal.PalUIConvertItemModel:StartProduction"},
-    HookSpec{ResourceOperation::building, HookRole::preview,
+    HookSpec{ResourceOperation::repair, HookAction::structureChanged, HookRequirement::optional,
+             "/Script/Pal.PalBaseCampModuleItemStorage:OnRep_ContainerInfos"},
+    HookSpec{ResourceOperation::repair, HookAction::structureChanged, HookRequirement::optional,
+             "/Script/Pal.PalBaseCampModuleItemStorage:OnAvailableConcreteModel_ServerInternal"},
+    HookSpec{ResourceOperation::repair, HookAction::structureChanged, HookRequirement::optional,
+             "/Script/Pal.PalBaseCampModuleItemStorage:OnNotAvailableConcreteModel_ServerInternal"},
+    HookSpec{ResourceOperation::repair, HookAction::structureChanged, HookRequirement::optional,
+             "/Script/Pal.PalBaseCampModel:OnRep_ModuleArray"},
+    HookSpec{ResourceOperation::building, HookAction::buildingModeChanged,
+             HookRequirement::required, "/Script/Pal.PalBuilderComponent:ChangeMode"},
+    HookSpec{ResourceOperation::building, HookAction::buildingTouch, HookRequirement::required,
              "/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject"},
-    HookSpec{ResourceOperation::building, HookRole::consume,
-             "/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer"},
+    HookSpec{ResourceOperation::crafting, HookAction::craftingAcquire, HookRequirement::required,
+             "/Script/Pal.PalUIConvertItemModel:Initialize"},
+    HookSpec{ResourceOperation::crafting, HookAction::craftingTouch, HookRequirement::optional,
+             "/Script/Pal.PalUIProductSettingModel:CalcMaxProductableNum"},
+    HookSpec{ResourceOperation::crafting, HookAction::craftingTouch, HookRequirement::required,
+             "/Script/Pal.PalUIConvertItemModel:CanStartProduction"},
+    HookSpec{ResourceOperation::crafting, HookAction::craftingTouch, HookRequirement::required,
+             "/Script/Pal.PalUIConvertItemModel:StartProduction"},
 };
 
 [[nodiscard]] constexpr auto palworld_1_0_1_hook_manifest() noexcept -> std::span<const HookSpec> {
@@ -58,20 +79,30 @@ inline void mark_resolved(const std::span<HookResolution> resolutions,
 [[nodiscard]] inline auto evaluate_capabilities(const std::span<const HookResolution> resolutions)
     -> std::array<CapabilityState, 3> {
     std::array<CapabilityState, 3> result{};
+    std::array<std::size_t, 3> requiredCounts{};
+    std::array<std::size_t, 3> resolvedRequiredCounts{};
     for (const auto& resolution : resolutions) {
+        if (resolution.spec.requirement != HookRequirement::required) {
+            continue;
+        }
         auto& capability = result[operation_index(resolution.spec.operation)];
+        ++requiredCounts[operation_index(resolution.spec.operation)];
         if (resolution.resolved) {
-            if (resolution.spec.role == HookRole::preview) {
-                capability.previewReady = true;
-            } else if (resolution.spec.role == HookRole::consume) {
-                capability.consumeReady = true;
-            }
+            ++resolvedRequiredCounts[operation_index(resolution.spec.operation)];
         } else {
             if (!capability.error.empty()) {
                 capability.error += "\n";
             }
             capability.error += "缺少必需接口：" + std::string{resolution.spec.path};
         }
+    }
+
+    for (const auto operation : {ResourceOperation::crafting, ResourceOperation::building}) {
+        const auto index = operation_index(operation);
+        const bool ready =
+            requiredCounts[index] != 0 && requiredCounts[index] == resolvedRequiredCounts[index];
+        result[index].previewReady = ready;
+        result[index].consumeReady = ready;
     }
 
     auto& repair = result[operation_index(ResourceOperation::repair)];

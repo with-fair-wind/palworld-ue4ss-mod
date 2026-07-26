@@ -135,59 +135,36 @@ void test_hook_capabilities_require_preview_and_consume_paths() {
     using namespace base_resource_sharing;
 
     auto resolved = all_hook_resolutions(false);
-    mark_resolved(resolved, "/Script/Pal.PalUIProductSettingModel:CalcMaxProductableNum");
-    mark_resolved(resolved, "/Script/Pal.PalUIConvertItemModel:StartProduction");
+    for (const auto& hook : palworld_1_0_1_hook_manifest()) {
+        if (hook.operation == ResourceOperation::crafting &&
+            hook.requirement == HookRequirement::required) {
+            mark_resolved(resolved, hook.path);
+        }
+    }
     auto capabilities = evaluate_capabilities(resolved);
     CHECK(capabilities[operation_index(ResourceOperation::crafting)].available());
     CHECK(!capabilities[operation_index(ResourceOperation::building)].available());
     CHECK(!capabilities[operation_index(ResourceOperation::repair)].available());
 
-    mark_resolved(resolved, "/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject");
-    mark_resolved(resolved, "/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer");
+    for (const auto& hook : palworld_1_0_1_hook_manifest()) {
+        if (hook.operation == ResourceOperation::building &&
+            hook.requirement == HookRequirement::required) {
+            mark_resolved(resolved, hook.path);
+        }
+    }
     capabilities = evaluate_capabilities(resolved);
     CHECK(capabilities[operation_index(ResourceOperation::building)].available());
     CHECK(capabilities[operation_index(ResourceOperation::repair)].error ==
           "Palworld 1.0.1 尚未验证安全的修理材料检查与扣除入口。");
 }
 
-void test_discovery_rejects_partially_resolved_container_sets() {
-    using namespace base_resource_sharing;
-
-    const GuidKey guild{{1, 0, 0, 0}};
-    const std::vector<ContainerDescriptor> registered{
-        {.baseId = {{10, 0, 0, 0}},
-         .groupId = guild,
-         .containerId = {{101, 0, 0, 0}},
-         .kind = ContainerKind::normal},
-        {.baseId = {{20, 0, 0, 0}},
-         .groupId = guild,
-         .containerId = {{201, 0, 0, 0}},
-         .kind = ContainerKind::normal},
-    };
-    const std::array firstOnly{registered[0].containerId};
-    const std::array both{registered[0].containerId, registered[1].containerId};
-
-    CHECK(validate_live_container_resolution(registered, firstOnly).error ==
-          "仅解析到 1/2 个已登记据点资源容器。");
-    CHECK(validate_live_container_resolution(registered, both).error.empty());
-}
-
-void test_union_restoration_accepts_only_the_recorded_tail() {
+void test_union_plan_appends_only_missing_container_ids() {
     using namespace base_resource_sharing;
 
     const GuidKey a{{1, 0, 0, 0}};
     const GuidKey b{{2, 0, 0, 0}};
     const GuidKey c{{3, 0, 0, 0}};
     const std::array original{a};
-    const std::array correctCurrent{a, b, c};
-    const std::array reorderedCurrent{a, c, b};
-    const std::array missingPrefix{b, c};
-    const std::array appended{b, c};
-
-    CHECK(verify_restoration_sequence(original, correctCurrent, appended));
-    CHECK(!verify_restoration_sequence(original, reorderedCurrent, appended));
-    CHECK(!verify_restoration_sequence(original, missingPrefix, appended));
-
     const std::array partialPlan{a, c};
     const std::array globalPlan{a, b, c};
     CHECK(missing_union_tail(original, globalPlan) == std::vector<GuidKey>({b, c}));
@@ -211,25 +188,6 @@ void test_recorded_injection_removal_preserves_runtime_native_changes() {
 
     const std::array missing{a, b};
     CHECK(!remove_recorded_injections(missing, original, injected).complete);
-}
-
-void test_request_guards_and_build_window_are_generation_safe() {
-    using namespace base_resource_sharing;
-
-    RequestGuard guard;
-    CHECK(guard.try_enter(ResourceOperation::crafting, 12));
-    CHECK(!guard.try_enter(ResourceOperation::crafting, 12));
-    guard.leave(ResourceOperation::crafting, 12);
-    CHECK(!guard.active());
-
-    BuildUnionWindow window;
-    CHECK(window.open(42));
-    CHECK(!window.advance(0.74F, 42));
-    CHECK(window.advance(0.01F, 42));
-    CHECK(!window.opened());
-    CHECK(window.open(43));
-    CHECK(window.advance(0.01F, 44));
-    CHECK(!window.opened());
 }
 
 void test_status_text_reports_partial_support() {
@@ -276,53 +234,35 @@ void test_disabled_resource_sharing_has_no_runtime_work() {
     CHECK(dirty.consume());
 }
 
-void test_preview_cache_expires_at_one_second_and_on_world_change() {
-    using namespace base_resource_sharing;
-
-    PreviewCacheGate cache;
-    cache.record(7, 10.0);
-    CHECK(cache.can_reuse(7, 10.999));
-    CHECK(!cache.can_reuse(7, 11.0));
-    CHECK(!cache.can_reuse(8, 10.1));
-    cache.invalidate();
-    CHECK(!cache.can_reuse(7, 10.1));
-}
-
-void test_preview_amounts_merge_duplicates_and_preserve_vanilla() {
-    using namespace base_resource_sharing;
-
-    const std::array raw{ItemAmount{"Wood", 7}, ItemAmount{"Wood", 5}, ItemAmount{"Stone", 2}};
-    const auto aggregated = aggregate_amounts(raw);
-    CHECK(aggregated.error.empty());
-    CHECK(aggregated.amounts.at("Wood") == 12);
-
-    const std::array requirements{ItemAmount{"Wood", 3}, ItemAmount{"Wood", 2},
-                                  ItemAmount{"Stone", 1}};
-    CHECK(max_productable_from_shared_counts(1, requirements, aggregated.amounts) == 2);
-    CHECK(shared_requirements_available(requirements, aggregated.amounts));
-
-    const std::array invalid{ItemAmount{"Wood", -1}};
-    CHECK(!aggregate_amounts(invalid).error.empty());
-}
-
-void test_hook_manifest_contains_only_top_level_preview_and_consume_paths() {
+void test_hook_manifest_separates_required_sessions_from_optional_events() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
-    CHECK(hooks.size() == 4);
-    CHECK(std::ranges::count(hooks, HookRole::preview, &HookSpec::role) == 2);
-    CHECK(std::ranges::count(hooks, HookRole::consume, &HookSpec::role) == 2);
-}
+    CHECK(std::ranges::count(hooks, HookAction::structureChanged, &HookSpec::action) == 4);
+    CHECK(std::ranges::count(hooks, HookAction::buildingModeChanged, &HookSpec::action) == 1);
+    CHECK(std::ranges::count(hooks, HookAction::buildingTouch, &HookSpec::action) == 1);
+    CHECK(std::ranges::count(hooks, HookAction::craftingAcquire, &HookSpec::action) == 1);
+    CHECK(std::ranges::count(hooks, HookAction::craftingTouch, &HookSpec::action) == 3);
 
-void test_preview_sources_combine_player_and_base_storage() {
-    using namespace base_resource_sharing;
+    auto resolved = all_hook_resolutions(false);
+    for (const auto& hook : hooks) {
+        if (hook.requirement == HookRequirement::optional) {
+            mark_resolved(resolved, hook.path);
+        }
+    }
+    auto capabilities = evaluate_capabilities(resolved);
+    CHECK(!capabilities[operation_index(ResourceOperation::crafting)].available());
+    CHECK(!capabilities[operation_index(ResourceOperation::building)].available());
 
-    const std::array player{ItemAmount{"Ingot", 4}};
-    const std::array bases{ItemAmount{"Ingot", 6}};
-    const auto total = combine_preview_sources(player, bases);
-    const std::array recipe{ItemAmount{"Ingot", 10}};
-    CHECK(total.error.empty());
-    CHECK(max_productable_from_shared_counts(0, recipe, total.amounts) == 1);
+    for (const auto& hook : hooks) {
+        if (hook.operation == ResourceOperation::building &&
+            hook.requirement == HookRequirement::required) {
+            mark_resolved(resolved, hook.path);
+        }
+    }
+    capabilities = evaluate_capabilities(resolved);
+    CHECK(!capabilities[operation_index(ResourceOperation::crafting)].available());
+    CHECK(capabilities[operation_index(ResourceOperation::building)].available());
 }
 
 void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
@@ -375,16 +315,11 @@ auto main() -> int {
     test_resource_pool_filters_deduplicates_and_orders();
     test_runtime_state_fails_closed_across_worlds();
     test_hook_capabilities_require_preview_and_consume_paths();
-    test_discovery_rejects_partially_resolved_container_sets();
-    test_union_restoration_accepts_only_the_recorded_tail();
+    test_union_plan_appends_only_missing_container_ids();
     test_recorded_injection_removal_preserves_runtime_native_changes();
-    test_request_guards_and_build_window_are_generation_safe();
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
-    test_preview_cache_expires_at_one_second_and_on_world_change();
-    test_preview_amounts_merge_duplicates_and_preserve_vanilla();
-    test_hook_manifest_contains_only_top_level_preview_and_consume_paths();
-    test_preview_sources_combine_player_and_base_storage();
+    test_hook_manifest_separates_required_sessions_from_optional_events();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
     test_union_leases_overlap_and_crafting_expires_after_idle();
     return failures == 0 ? 0 : 1;

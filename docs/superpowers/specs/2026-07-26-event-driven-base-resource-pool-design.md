@@ -132,9 +132,9 @@ EngineTick 合并处理；低频校准用于补偿遗漏事件。进入建造模
 
 建造会话：
 
-- `PalBuilderComponent:OnStartBuildingMode_Local` post-hook 请求建造租约并尝试建立联合；
+- `PalBuilderComponent:ChangeMode` post-hook 调用 `IsInBuildingMode`：进入建造模式时请求建造租约并尝试建立联合，
+  退出建造模式时释放建造租约；
 - `PalBuilderComponent:IsExistsMaterialForBuildObject` pre-hook 只在联合尚未建立时执行一次兜底建立，并刷新租约；
-- `PalBuilderComponent:OnEndBuildingMode_Local` post-hook 释放建造租约；
 - 若结束事件遗漏，LoadMap、关闭开关和卸载仍强制恢复。
 
 制作会话：

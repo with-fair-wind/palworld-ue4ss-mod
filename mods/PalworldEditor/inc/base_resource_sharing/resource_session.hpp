@@ -26,8 +26,8 @@ public:
         retryRemaining_ = 0.0F;
     }
 
-    [[nodiscard]] auto advance(const float deltaSeconds,
-                               const std::uint64_t generation) noexcept -> bool {
+    [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t generation) noexcept
+        -> bool {
         if (generation != generation_ || inFlight_) {
             return false;
         }
@@ -115,8 +115,8 @@ public:
         return changed;
     }
 
-    [[nodiscard]] auto advance(const float deltaSeconds,
-                               const std::uint64_t generation) noexcept -> bool {
+    [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t generation) noexcept
+        -> bool {
         if (generation != generation_ || !craftingActive_) {
             return false;
         }
