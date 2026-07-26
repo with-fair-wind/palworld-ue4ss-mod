@@ -24,7 +24,7 @@ enum class PalResolutionTrigger : std::uint8_t {
  * @details 选择优先于编辑；没有请求时始终不执行后台解析。
  */
 [[nodiscard]] constexpr auto decide_pal_resolution(const bool selectionRequested,
-                                                    const bool editRequested) noexcept
+                                                   const bool editRequested) noexcept
     -> PalResolutionTrigger {
     if (selectionRequested) {
         return PalResolutionTrigger::selectionRequest;
