@@ -235,10 +235,10 @@ void test_catalog_refresh_scheduler_throttles_automatic_retries() {
     skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
     const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
 
-    CHECK(scheduler.should_refresh(false, false, start));
-    CHECK(!scheduler.should_refresh(false, false, start + 1s));
-    CHECK(scheduler.should_refresh(false, false, start + 2s));
-    CHECK(!scheduler.should_refresh(false, true, start + 4s));
+    CHECK(scheduler.should_refresh(false, false, start, [] { return true; }));
+    CHECK(!scheduler.should_refresh(false, false, start + 1s, [] { return true; }));
+    CHECK(scheduler.should_refresh(false, false, start + 2s, [] { return true; }));
+    CHECK(!scheduler.should_refresh(false, true, start + 4s, [] { return true; }));
 }
 
 void test_catalog_refresh_scheduler_honors_manual_refresh_immediately() {
@@ -246,9 +246,55 @@ void test_catalog_refresh_scheduler_honors_manual_refresh_immediately() {
     skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
     const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
 
-    CHECK(scheduler.should_refresh(false, false, start));
-    CHECK(scheduler.should_refresh(true, false, start + 100ms));
-    CHECK(scheduler.should_refresh(true, true, start + 200ms));
+    CHECK(scheduler.should_refresh(false, false, start, [] { return true; }));
+    CHECK(scheduler.should_refresh(true, false, start + 100ms, [] { return true; }));
+    CHECK(scheduler.should_refresh(true, true, start + 200ms, [] { return true; }));
+}
+
+void test_catalog_refresh_scheduler_defers_unsafe_runtime_queries() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+    auto readinessChecks = 0;
+
+    CHECK(!scheduler.should_refresh(false, false, start, [&readinessChecks] {
+        ++readinessChecks;
+        return false;
+    }));
+    CHECK(readinessChecks == 1);
+    CHECK(!scheduler.should_refresh(false, false, start + 1s, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 1);
+    CHECK(scheduler.should_refresh(false, false, start + 2s, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 2);
+}
+
+void test_catalog_refresh_scheduler_never_bypasses_runtime_gate() {
+    using namespace std::chrono_literals;
+    skill_editor::SkillCatalogRefreshScheduler scheduler{2s};
+    const auto start = skill_editor::SkillCatalogRefreshScheduler::time_point{};
+    auto readinessChecks = 0;
+
+    CHECK(!scheduler.should_refresh(true, false, start, [&readinessChecks] {
+        ++readinessChecks;
+        return false;
+    }));
+    CHECK(readinessChecks == 1);
+    CHECK(scheduler.should_refresh(true, false, start + 1ms, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 2);
+    CHECK(!scheduler.should_refresh(false, true, start + 2s, [&readinessChecks] {
+        ++readinessChecks;
+        return true;
+    }));
+    CHECK(readinessChecks == 2);
 }
 
 void test_item_catalog_labels_and_search() {
@@ -851,6 +897,8 @@ auto main() -> int {
     test_catalog_fallback_preserves_established_runtime_readiness();
     test_catalog_refresh_scheduler_throttles_automatic_retries();
     test_catalog_refresh_scheduler_honors_manual_refresh_immediately();
+    test_catalog_refresh_scheduler_defers_unsafe_runtime_queries();
+    test_catalog_refresh_scheduler_never_bypasses_runtime_gate();
     test_item_catalog_labels_and_search();
     test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();

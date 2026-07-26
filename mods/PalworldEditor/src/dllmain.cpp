@@ -339,7 +339,8 @@ public:
             skill_editor::catalog_is_ready_for_editing(skillRuntimeSnapshot_.catalog);
         const bool refreshRequested = skillCatalogRefreshScheduler_.should_refresh(
             manualRefreshRequested, catalogReady,
-            skill_editor::SkillCatalogRefreshScheduler::clock::now());
+            skill_editor::SkillCatalogRefreshScheduler::clock::now(),
+            [] { return pal_game::is_valid(pal_game::get_main_container()); });
         if (refreshRequested) {
             skillRuntimeSnapshot_.catalog = skill_editor::with_catalog_fallback(
                 skillRuntimeSnapshot_.catalog, skillGateway_.load_catalog());

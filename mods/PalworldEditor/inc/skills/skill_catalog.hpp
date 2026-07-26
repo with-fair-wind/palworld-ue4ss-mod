@@ -93,7 +93,8 @@ struct SkillCatalogSnapshot {
 
 /**
  * @brief 对启动阶段的技能目录自动刷新进行节流。
- * @details 手动刷新始终立即通过；运行时就绪后停止自动刷新。
+ * @details 手动刷新会跳过时间节流，但仍必须先通过调用方提供的运行时安全检查；
+ *          运行时就绪后停止自动刷新。
  */
 class SkillCatalogRefreshScheduler {
 public:
@@ -112,21 +113,19 @@ public:
      * @param[in] manual 是否由用户手动请求刷新。
      * @param[in] ready 技能运行时是否已完成一次完整加载。
      * @param[in] now 当前稳定时钟时间点。
+     * @param[in] runtimeReady 仅在刷新到期时调用；返回是否可安全查询游戏技能运行时。
      * @return 本次更新应执行刷新时返回 `true`。
      */
-    [[nodiscard]] auto should_refresh(const bool manual, const bool ready, const time_point now)
-        -> bool {
-        if (manual) {
-            nextAutomaticRefresh_ = now + retryInterval_;
-            return true;
-        }
-        if (ready || (hasAttempted_ && now < nextAutomaticRefresh_)) {
+    template <typename RuntimeReady>
+    [[nodiscard]] auto should_refresh(const bool manual, const bool ready, const time_point now,
+                                      RuntimeReady&& runtimeReady) -> bool {
+        if (!manual && (ready || (hasAttempted_ && now < nextAutomaticRefresh_))) {
             return false;
         }
 
         hasAttempted_ = true;
         nextAutomaticRefresh_ = now + retryInterval_;
-        return true;
+        return std::forward<RuntimeReady>(runtimeReady)();
     }
 
 private:
