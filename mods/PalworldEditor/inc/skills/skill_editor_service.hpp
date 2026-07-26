@@ -304,8 +304,15 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
             return result(SkillEditStatus::succeeded, std::move(actual),
                           "Passive preset applied");
         }
-        return result(SkillEditStatus::failed, std::move(actual),
-                      "Game rejected passive preset");
+
+        apply_passive_difference(gateway, request.target, actual.passiveIds, original.passiveIds);
+        auto rolledBack = gateway.read_state(request.target);
+        if (same_passives(rolledBack.passiveIds, original.passiveIds)) {
+            return result(SkillEditStatus::rolledBack, std::move(rolledBack),
+                          "Preset failed; original passive skills restored");
+        }
+        return result(SkillEditStatus::rollbackFailed, std::move(rolledBack),
+                      "Preset and rollback both failed");
     }
 
     if (request.operation == SkillEditOperation::add) {

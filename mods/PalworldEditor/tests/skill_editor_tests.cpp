@@ -548,6 +548,38 @@ void test_passive_set_uses_only_required_difference_writes() {
         result.state.passiveIds, std::vector<std::string>{"A", "B", "New1", "New2"}));
 }
 
+void test_passive_set_rolls_back_after_partial_failure() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A", "B", "C", "D"};
+    gateway.addOutcomes = {true, false, true, true};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_set_request({"A", "B", "X", "Y"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::rolledBack);
+    CHECK(gateway.calls ==
+          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y",
+                                    "read", "remove:X", "add:C", "add:D", "read"}));
+    CHECK(skill_editor::detail::same_passives(
+        result.state.passiveIds, std::vector<std::string>{"A", "B", "C", "D"}));
+}
+
+void test_passive_set_reports_rollback_failure() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A", "B", "C", "D"};
+    gateway.addOutcomes = {true, false, false, true};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_set_request({"A", "B", "X", "Y"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
+    CHECK(gateway.calls ==
+          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y",
+                                    "read", "remove:X", "add:C", "add:D", "read"}));
+    CHECK(!skill_editor::detail::same_passives(
+        result.state.passiveIds, std::vector<std::string>{"A", "B", "C", "D"}));
+}
+
 auto active_request(const skill_editor::SkillEditOperation operation, const std::size_t slot,
                     std::optional<skill_editor::ActiveSkill> skill = std::nullopt)
     -> skill_editor::SkillEditRequest {
@@ -962,6 +994,8 @@ auto main() -> int {
     test_matching_passive_set_is_zero_write();
     test_passive_set_replaces_a_completely_different_set();
     test_passive_set_uses_only_required_difference_writes();
+    test_passive_set_rolls_back_after_partial_failure();
+    test_passive_set_reports_rollback_failure();
     test_active_edits_validate_three_compact_slots();
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();
