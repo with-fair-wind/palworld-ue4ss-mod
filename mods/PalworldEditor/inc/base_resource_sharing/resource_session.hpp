@@ -8,6 +8,24 @@ inline constexpr float kCatalogRetrySeconds = 1.0F;
 inline constexpr float kCatalogReconcileSeconds = 8.0F;
 inline constexpr float kCraftingLeaseIdleSeconds = 1.5F;
 
+struct ResourceToggleTransition {
+    bool disableRuntime{};
+    bool beginAccessibleWorld{};
+};
+
+[[nodiscard]] constexpr auto decide_resource_toggle(const bool wasEnabled,
+                                                    const bool requestedEnabled,
+                                                    const bool worldAccessible) noexcept
+    -> ResourceToggleTransition {
+    if (wasEnabled == requestedEnabled) {
+        return {};
+    }
+    if (!requestedEnabled) {
+        return {.disableRuntime = true};
+    }
+    return {.beginAccessibleWorld = worldAccessible};
+}
+
 class ReconcileScheduler {
 public:
     auto begin_world(const std::uint64_t generation) noexcept -> void {

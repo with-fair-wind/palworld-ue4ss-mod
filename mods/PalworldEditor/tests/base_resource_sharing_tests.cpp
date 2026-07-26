@@ -265,6 +265,30 @@ void test_hook_manifest_separates_required_sessions_from_optional_events() {
     CHECK(capabilities[operation_index(ResourceOperation::building)].available());
 }
 
+void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable() {
+    using namespace base_resource_sharing;
+
+    auto transition = decide_resource_toggle(false, false, true);
+    CHECK(!transition.disableRuntime);
+    CHECK(!transition.beginAccessibleWorld);
+
+    transition = decide_resource_toggle(true, true, true);
+    CHECK(!transition.disableRuntime);
+    CHECK(!transition.beginAccessibleWorld);
+
+    transition = decide_resource_toggle(true, false, true);
+    CHECK(transition.disableRuntime);
+    CHECK(!transition.beginAccessibleWorld);
+
+    transition = decide_resource_toggle(false, true, false);
+    CHECK(!transition.disableRuntime);
+    CHECK(!transition.beginAccessibleWorld);
+
+    transition = decide_resource_toggle(false, true, true);
+    CHECK(!transition.disableRuntime);
+    CHECK(transition.beginAccessibleWorld);
+}
+
 void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
     using namespace base_resource_sharing;
 
@@ -286,6 +310,13 @@ void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
     scheduler.complete(true, 7);
 
     CHECK(!scheduler.advance(8.0F, 8));
+
+    scheduler.reset();
+    CHECK(!scheduler.advance(0.0F, 7));
+    scheduler.begin_world(7);
+    CHECK(scheduler.advance(0.0F, 7));
+    scheduler.complete(true, 7);
+    CHECK(!scheduler.advance(0.0F, 7));
 }
 
 void test_union_leases_overlap_and_crafting_expires_after_idle() {
@@ -320,6 +351,7 @@ auto main() -> int {
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
     test_hook_manifest_separates_required_sessions_from_optional_events();
+    test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
     test_union_leases_overlap_and_crafting_expires_after_idle();
     return failures == 0 ? 0 : 1;
