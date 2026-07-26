@@ -260,10 +260,8 @@ public:
             editRequest = skillQueue_.try_pop();
         }
 
-        const auto trigger = palResolutionScheduler_.decide(
-            worldSession_.is_target_confirmed() && selectedTarget_.is_selected(),
-            selectionRequested, editRequest.has_value(),
-            skill_editor::PalResolutionScheduler::clock::now());
+        const auto trigger =
+            skill_editor::decide_pal_resolution(selectionRequested, editRequest.has_value());
         std::optional<pal_game::SelectedPalTarget> resolvedPal;
         if (trigger != skill_editor::PalResolutionTrigger::none) {
             resolvedPal = pal_game::resolve_selected_otomo();
@@ -422,7 +420,6 @@ private:
         }
 
         lastResolutionStatus_.reset();
-        palResolutionScheduler_.reset();
         targetResolutionState_.reset();
         skillRuntimeSnapshot_.targetGeneration = selectedTarget_.generation();
         skillRuntimeSnapshot_.worldGeneration = worldSession_.generation();
@@ -464,7 +461,6 @@ private:
         want_scan_items_.store(true);
         wantRefreshSkillCatalog_.store(true);
 
-        palResolutionScheduler_.reset();
         targetResolutionState_.reset();
         skillRuntimeSnapshot_.worldGeneration = worldSession_.generation();
         skillRuntimeSnapshot_.worldAccessible = true;
@@ -895,9 +891,8 @@ private:
     /**
      * @brief 渲染当前待出战帕鲁、技能目录状态和主动/被动技能编辑区域。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
-     * @details 未确认目标时不执行后台解析；确认后最多每 250 毫秒校验一次数字键当前高亮目标，
-     *          选择和编辑请求仍会在写入前立即解析。
-     *          用户点击“选择当前帕鲁”后才显示编辑区。
+     * @details 空闲时不执行后台解析；选择和编辑请求会在当次游戏线程回调立即解析并校验目标。
+     *          用户点击“选择当前帕鲁”后才显示编辑区，只有再次点击才会切换锁定目标。
      *          GUI 请求只携带目标代数，不传递 Unreal 对象地址。
      * @warning 只在 GUI 线程调用。
      */
@@ -1078,8 +1073,6 @@ private:
     skill_editor::WorldSessionState worldSession_;
     /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
     skill_editor::SelectedTargetState selectedTarget_;
-    /** @brief 选择/编辑时立即解析、确认目标后每 250 毫秒校验一次的纯值调度器。 */
-    skill_editor::PalResolutionScheduler palResolutionScheduler_;
     /** @brief 最近一次解析结果的纯值副本；不含任何 Unreal 指针。 */
     skill_editor::TargetResolutionState targetResolutionState_;
     /** @brief 最近一次输出日志的目标解析状态；仅由游戏线程访问。 */
