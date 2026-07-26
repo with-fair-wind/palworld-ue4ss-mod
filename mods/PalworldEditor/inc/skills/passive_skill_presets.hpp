@@ -2,8 +2,13 @@
 
 #include <array>
 #include <cstddef>
+#include <cstdint>
 #include <span>
+#include <string>
 #include <string_view>
+#include <vector>
+
+#include <skills/skill_editor_service.hpp>
 
 namespace skill_editor {
 struct PassiveSkillPreset {
@@ -16,14 +21,13 @@ inline constexpr std::array kPassiveSkillPresets{
     PassiveSkillPreset{
         .id = "work-perfect-1",
         .displayName = "工作毕业1",
-        .passiveIds =
-            {"WorldTree_CraftSpeed", "CraftSpeed_up3", "Vampire", "CraftSpeed_up2"},
+        .passiveIds = {"WorldTree_CraftSpeed", "CraftSpeed_up3", "Vampire", "CraftSpeed_up2"},
     },
     PassiveSkillPreset{
         .id = "work-perfect-2",
         .displayName = "工作毕业2",
-        .passiveIds =
-            {"WorldTree_CraftSpeed", "CraftSpeed_up3", "CraftSpeed_up2", "PAL_CorporateSlave"},
+        .passiveIds = {"WorldTree_CraftSpeed", "CraftSpeed_up3", "CraftSpeed_up2",
+                       "PAL_CorporateSlave"},
     },
 };
 
@@ -47,8 +51,7 @@ inline constexpr std::array kPassiveSkillPresets{
             if (preset.passiveIds[passiveIndex].empty()) {
                 return false;
             }
-            for (std::size_t previousPassive{}; previousPassive < passiveIndex;
-                 ++previousPassive) {
+            for (std::size_t previousPassive{}; previousPassive < passiveIndex; ++previousPassive) {
                 if (preset.passiveIds[previousPassive] == preset.passiveIds[passiveIndex]) {
                     return false;
                 }
@@ -59,4 +62,18 @@ inline constexpr std::array kPassiveSkillPresets{
 }
 
 static_assert(passive_skill_presets_are_valid());
+
+[[nodiscard]] inline auto make_passive_preset_request(const PassiveSkillPreset& preset,
+                                                      const std::uint64_t targetGeneration,
+                                                      const std::uint64_t worldGeneration)
+    -> SkillEditRequest {
+    return {
+        .targetGeneration = targetGeneration,
+        .worldGeneration = worldGeneration,
+        .kind = SkillKind::passive,
+        .operation = SkillEditOperation::replaceAllPassives,
+        .desiredPassiveIds =
+            std::vector<std::string>(preset.passiveIds.begin(), preset.passiveIds.end()),
+    };
+}
 }  // namespace skill_editor

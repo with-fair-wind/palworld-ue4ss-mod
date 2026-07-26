@@ -69,9 +69,9 @@ void test_passive_skill_presets_have_expected_palworld_1_0_ids() {
     const auto presets = skill_editor::passive_skill_presets();
     CHECK(presets.size() == 2);
     CHECK(presets[0].displayName == "工作毕业1");
-    CHECK((presets[0].passiveIds ==
-           std::array<std::string_view, 4>{"WorldTree_CraftSpeed", "CraftSpeed_up3", "Vampire",
-                                           "CraftSpeed_up2"}));
+    CHECK((presets[0].passiveIds == std::array<std::string_view, 4>{"WorldTree_CraftSpeed",
+                                                                    "CraftSpeed_up3", "Vampire",
+                                                                    "CraftSpeed_up2"}));
     CHECK(presets[1].displayName == "工作毕业2");
     CHECK((presets[1].passiveIds ==
            std::array<std::string_view, 4>{"WorldTree_CraftSpeed", "CraftSpeed_up3",
@@ -80,6 +80,24 @@ void test_passive_skill_presets_have_expected_palworld_1_0_ids() {
 
 void test_passive_skill_preset_definitions_are_valid() {
     CHECK(skill_editor::passive_skill_presets_are_valid());
+}
+
+void test_passive_skill_preset_builds_one_world_bound_request() {
+    skill_editor::SkillEditQueue queue;
+    const auto& preset = skill_editor::passive_skill_presets().front();
+
+    queue.push(skill_editor::make_passive_preset_request(preset, 17, 23));
+
+    CHECK(queue.size() == 1);
+    const auto request = queue.try_pop();
+    CHECK(request.has_value());
+    CHECK(request->targetGeneration == 17);
+    CHECK(request->worldGeneration == 23);
+    CHECK(request->kind == skill_editor::SkillKind::passive);
+    CHECK(request->operation == skill_editor::SkillEditOperation::replaceAllPassives);
+    CHECK((request->desiredPassiveIds == std::vector<std::string>{"WorldTree_CraftSpeed",
+                                                                  "CraftSpeed_up3", "Vampire",
+                                                                  "CraftSpeed_up2"}));
 }
 
 void test_active_skill_definitions_are_unique_and_known_values_match() {
@@ -510,8 +528,8 @@ void test_matching_passive_set_is_zero_write() {
     FakeSkillGateway gateway;
     gateway.state.passiveIds = {"D", "C", "B", "A"};
 
-    const auto result = skill_editor::execute_skill_edit(
-        gateway, passive_set_request({"A", "B", "C", "D"}));
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "C", "D"}));
 
     CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
     CHECK(gateway.calls == std::vector<std::string>({"read"}));
@@ -525,10 +543,9 @@ void test_passive_set_replaces_a_completely_different_set() {
         gateway, passive_set_request({"New1", "New2", "New3", "New4"}));
 
     CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
-    CHECK(gateway.calls ==
-          std::vector<std::string>({"read", "remove:Old1", "remove:Old2", "remove:Old3",
-                                    "remove:Old4", "add:New1", "add:New2", "add:New3",
-                                    "add:New4", "read"}));
+    CHECK(gateway.calls == std::vector<std::string>({"read", "remove:Old1", "remove:Old2",
+                                                     "remove:Old3", "remove:Old4", "add:New1",
+                                                     "add:New2", "add:New3", "add:New4", "read"}));
     CHECK(skill_editor::detail::same_passives(
         result.state.passiveIds, std::vector<std::string>{"New1", "New2", "New3", "New4"}));
 }
@@ -537,15 +554,14 @@ void test_passive_set_uses_only_required_difference_writes() {
     FakeSkillGateway gateway;
     gateway.state.passiveIds = {"A", "B", "Old1", "Old2"};
 
-    const auto result = skill_editor::execute_skill_edit(
-        gateway, passive_set_request({"A", "B", "New1", "New2"}));
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "New1", "New2"}));
 
     CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
-    CHECK(gateway.calls ==
-          std::vector<std::string>({"read", "remove:Old1", "remove:Old2", "add:New1",
-                                    "add:New2", "read"}));
-    CHECK(skill_editor::detail::same_passives(
-        result.state.passiveIds, std::vector<std::string>{"A", "B", "New1", "New2"}));
+    CHECK(gateway.calls == std::vector<std::string>({"read", "remove:Old1", "remove:Old2",
+                                                     "add:New1", "add:New2", "read"}));
+    CHECK(skill_editor::detail::same_passives(result.state.passiveIds,
+                                              std::vector<std::string>{"A", "B", "New1", "New2"}));
 }
 
 void test_passive_set_rolls_back_after_partial_failure() {
@@ -553,15 +569,15 @@ void test_passive_set_rolls_back_after_partial_failure() {
     gateway.state.passiveIds = {"A", "B", "C", "D"};
     gateway.addOutcomes = {true, false, true, true};
 
-    const auto result = skill_editor::execute_skill_edit(
-        gateway, passive_set_request({"A", "B", "X", "Y"}));
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "X", "Y"}));
 
     CHECK(result.status == skill_editor::SkillEditStatus::rolledBack);
     CHECK(gateway.calls ==
-          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y",
-                                    "read", "remove:X", "add:C", "add:D", "read"}));
-    CHECK(skill_editor::detail::same_passives(
-        result.state.passiveIds, std::vector<std::string>{"A", "B", "C", "D"}));
+          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y", "read",
+                                    "remove:X", "add:C", "add:D", "read"}));
+    CHECK(skill_editor::detail::same_passives(result.state.passiveIds,
+                                              std::vector<std::string>{"A", "B", "C", "D"}));
 }
 
 void test_passive_set_reports_rollback_failure() {
@@ -569,15 +585,15 @@ void test_passive_set_reports_rollback_failure() {
     gateway.state.passiveIds = {"A", "B", "C", "D"};
     gateway.addOutcomes = {true, false, false, true};
 
-    const auto result = skill_editor::execute_skill_edit(
-        gateway, passive_set_request({"A", "B", "X", "Y"}));
+    const auto result =
+        skill_editor::execute_skill_edit(gateway, passive_set_request({"A", "B", "X", "Y"}));
 
     CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
     CHECK(gateway.calls ==
-          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y",
-                                    "read", "remove:X", "add:C", "add:D", "read"}));
-    CHECK(!skill_editor::detail::same_passives(
-        result.state.passiveIds, std::vector<std::string>{"A", "B", "C", "D"}));
+          std::vector<std::string>({"read", "remove:C", "remove:D", "add:X", "add:Y", "read",
+                                    "remove:X", "add:C", "add:D", "read"}));
+    CHECK(!skill_editor::detail::same_passives(result.state.passiveIds,
+                                               std::vector<std::string>{"A", "B", "C", "D"}));
 }
 
 auto active_request(const skill_editor::SkillEditOperation operation, const std::size_t slot,
@@ -616,6 +632,12 @@ void test_active_edits_validate_three_compact_slots() {
     result = skill_editor::execute_skill_edit(
         gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{3, "WindCutter"}}));
     CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+
+    const auto originalActiveSkills = gateway.state.activeSkills;
+    result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::replaceAllPassives, 0));
+    CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+    CHECK(result.state.activeSkills == originalActiveSkills);
 }
 
 void test_active_add_replace_and_remove_preserve_order() {
@@ -974,6 +996,7 @@ auto main() -> int {
     test_skill_catalog_filter_and_deduplicate();
     test_passive_skill_presets_have_expected_palworld_1_0_ids();
     test_passive_skill_preset_definitions_are_valid();
+    test_passive_skill_preset_builds_one_world_bound_request();
     test_active_skill_definitions_are_unique_and_known_values_match();
     test_internal_active_skill_filter();
     test_active_skill_options_use_runtime_localization_with_raw_id_fallback();

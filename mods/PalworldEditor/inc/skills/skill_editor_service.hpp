@@ -301,8 +301,7 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
                                  request.desiredPassiveIds);
         auto actual = gateway.read_state(request.target);
         if (same_passives(actual.passiveIds, request.desiredPassiveIds)) {
-            return result(SkillEditStatus::succeeded, std::move(actual),
-                          "Passive preset applied");
+            return result(SkillEditStatus::succeeded, std::move(actual), "Passive preset applied");
         }
 
         apply_passive_difference(gateway, request.target, actual.passiveIds, original.passiveIds);
@@ -407,6 +406,10 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
     const auto reject = [&](std::string message) {
         return result(SkillEditStatus::rejected, original, std::move(message));
     };
+
+    if (request.operation == SkillEditOperation::replaceAllPassives) {
+        return reject("Passive preset operation cannot edit active skills");
+    }
 
     if (request.activeSlot >= 3 || original.activeSkills.size() > 3) {
         return reject("Active skill slot is outside the three EquipWaza slots");

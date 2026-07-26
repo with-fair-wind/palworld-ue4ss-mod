@@ -33,6 +33,7 @@
 #include <items/item_catalog.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
 #include <skills/pal_skills.hpp>
+#include <skills/passive_skill_presets.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/world_session_state.hpp>
 
@@ -535,6 +536,7 @@ private:
      * @warning 只在 GUI 线程调用。
      */
     static void reset_skill_editor_ui(PalworldEditorMod* self) {
+        self->passivePresetIndex_.reset();
         self->passiveEditIndex_ = -1;
         self->activeEditSlot_ = -1;
         self->passiveChoice_.reset();
@@ -692,6 +694,48 @@ private:
      */
     static void render_passive_skills(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
                                       const bool mutationsDisabled) {
+        const auto presets = skill_editor::passive_skill_presets();
+        const bool presetSelectionValid =
+            self->passivePresetIndex_.has_value() && *self->passivePresetIndex_ < presets.size();
+        const auto presetPreview = presetSelectionValid
+                                       ? presets[*self->passivePresetIndex_].displayName
+                                       : std::string_view{"请选择词条预设"};
+
+        ImGui::BeginDisabled(mutationsDisabled);
+        if (ImGui::BeginCombo("词条预设##passive-preset", presetPreview.data())) {
+            for (std::size_t index{}; index < presets.size(); ++index) {
+                const bool selected =
+                    self->passivePresetIndex_.has_value() && *self->passivePresetIndex_ == index;
+                if (ImGui::Selectable(presets[index].displayName.data(), selected)) {
+                    self->passivePresetIndex_ = index;
+                }
+                if (selected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        if (presetSelectionValid) {
+            const auto& preset = presets[*self->passivePresetIndex_];
+            for (const auto id : preset.passiveIds) {
+                const auto label = find_skill_label(snapshot.catalog.passive.skills, id);
+                ImGui::BulletText("%s", label.c_str());
+            }
+        }
+
+        ImGui::BeginDisabled(!presetSelectionValid);
+        if (ImGui::Button("应用预设")) {
+            self->skillQueue_.push(skill_editor::make_passive_preset_request(
+                presets[*self->passivePresetIndex_], snapshot.targetGeneration,
+                snapshot.worldGeneration));
+            self->passiveEditIndex_ = -1;
+            self->passiveChoice_.reset();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::Separator();
+
         ImGui::Text("被动技能 (%d/4)", static_cast<int>(snapshot.state.passiveIds.size()));
         std::unordered_set<std::string> excluded(snapshot.state.passiveIds.begin(),
                                                  snapshot.state.passiveIds.end());
@@ -906,8 +950,10 @@ private:
             const std::lock_guard lock(self->skillSnapshotMutex_);
             snapshot = self->skillSnapshot_;
         }
-        if (self->skillUiGeneration_ != snapshot.targetGeneration) {
+        if (self->skillUiGeneration_ != snapshot.targetGeneration ||
+            self->skillUiWorldGeneration_ != snapshot.worldGeneration) {
             self->skillUiGeneration_ = snapshot.targetGeneration;
+            self->skillUiWorldGeneration_ = snapshot.worldGeneration;
             reset_skill_editor_ui(self);
         }
         const auto choiceStillExists = [](const std::optional<skill_editor::SkillOption>& choice,
@@ -1111,8 +1157,12 @@ private:
     std::optional<skill_editor::SkillOption> passiveChoice_;
     /** @brief 主动技能下拉框当前选择的目录值；只由 GUI 线程访问。 */
     std::optional<skill_editor::SkillOption> activeChoice_;
+    /** @brief 词条预设下拉框当前选择的静态目录索引；只由 GUI 线程访问。 */
+    std::optional<std::size_t> passivePresetIndex_;
     /** @brief GUI 上一次渲染的目标代数；变化时重置临时编辑状态。 */
     std::uint64_t skillUiGeneration_{};
+    /** @brief GUI 上一次渲染的世界代次；变化时重置预设和临时编辑状态。 */
+    std::uint64_t skillUiWorldGeneration_{};
 
     /** @brief EngineTick 游戏线程回调 ID。 */
     Hook::GlobalCallbackId engineTickCallbackId_{Hook::ERROR_ID};
