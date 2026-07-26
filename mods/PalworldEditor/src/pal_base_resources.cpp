@@ -83,11 +83,14 @@ public:
     };
 
     auto set_enabled(const bool enabled) -> void {
-        if (runtime_.enabled() == enabled) {
+        const auto transition =
+            decide_resource_toggle(runtime_.enabled(), enabled, runtime_.accessible());
+        if (!transition.disableRuntime && !transition.beginAccessibleWorld &&
+            runtime_.enabled() == enabled) {
             return;
         }
 
-        if (!enabled) {
+        if (transition.disableRuntime) {
             leases_.reset();
             scheduler_.reset();
             restore_or_disable("关闭资源共享");
@@ -98,7 +101,14 @@ public:
             worldContextFullName_.clear();
             runtimeError_.clear();
         }
+
         runtime_.set_preference(enabled);
+        if (transition.beginAccessibleWorld) {
+            const auto generation = runtime_.generation();
+            leases_.begin_world(generation);
+            scheduler_.begin_world(generation);
+            runtimeError_.clear();
+        }
         snapshotDirty_.mark();
         publish_snapshot();
     }
