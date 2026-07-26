@@ -420,6 +420,15 @@ auto passive_request(const skill_editor::SkillEditOperation operation, std::stri
     };
 }
 
+auto passive_set_request(std::vector<std::string> ids) -> skill_editor::SkillEditRequest {
+    return {
+        .target = 0x1234,
+        .kind = skill_editor::SkillKind::passive,
+        .operation = skill_editor::SkillEditOperation::replaceAllPassives,
+        .desiredPassiveIds = std::move(ids),
+    };
+}
+
 void test_passive_edits_validate_target_and_limits() {
     FakeSkillGateway gateway;
     gateway.valid = false;
@@ -479,6 +488,64 @@ void test_passive_replace_rolls_back_on_failure() {
         gateway, passive_request(skill_editor::SkillEditOperation::replace, "A", "C"));
     CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
     CHECK(!std::ranges::contains(result.state.passiveIds, "A"));
+}
+
+void test_passive_set_rejects_invalid_definitions_before_writing() {
+    const std::array invalidSets{
+        std::vector<std::string>{},
+        std::vector<std::string>{"A", "B", "C"},
+        std::vector<std::string>{"A", "B", "C", "C"},
+        std::vector<std::string>{"A", "B", "C", ""},
+    };
+    for (const auto& ids : invalidSets) {
+        FakeSkillGateway gateway;
+        gateway.state.passiveIds = {"O1", "O2", "O3", "O4"};
+        const auto result = skill_editor::execute_skill_edit(gateway, passive_set_request(ids));
+        CHECK(result.status == skill_editor::SkillEditStatus::rejected);
+        CHECK(gateway.calls == std::vector<std::string>({"read"}));
+    }
+}
+
+void test_matching_passive_set_is_zero_write() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"D", "C", "B", "A"};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_set_request({"A", "B", "C", "D"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(gateway.calls == std::vector<std::string>({"read"}));
+}
+
+void test_passive_set_replaces_a_completely_different_set() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"Old1", "Old2", "Old3", "Old4"};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_set_request({"New1", "New2", "New3", "New4"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(gateway.calls ==
+          std::vector<std::string>({"read", "remove:Old1", "remove:Old2", "remove:Old3",
+                                    "remove:Old4", "add:New1", "add:New2", "add:New3",
+                                    "add:New4", "read"}));
+    CHECK(skill_editor::detail::same_passives(
+        result.state.passiveIds, std::vector<std::string>{"New1", "New2", "New3", "New4"}));
+}
+
+void test_passive_set_uses_only_required_difference_writes() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A", "B", "Old1", "Old2"};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_set_request({"A", "B", "New1", "New2"}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
+    CHECK(gateway.calls ==
+          std::vector<std::string>({"read", "remove:Old1", "remove:Old2", "add:New1",
+                                    "add:New2", "read"}));
+    CHECK(skill_editor::detail::same_passives(
+        result.state.passiveIds, std::vector<std::string>{"A", "B", "New1", "New2"}));
 }
 
 auto active_request(const skill_editor::SkillEditOperation operation, const std::size_t slot,
@@ -891,6 +958,10 @@ auto main() -> int {
     test_passive_edits_validate_target_and_limits();
     test_passive_add_remove_and_replace_reread_state();
     test_passive_replace_rolls_back_on_failure();
+    test_passive_set_rejects_invalid_definitions_before_writing();
+    test_matching_passive_set_is_zero_write();
+    test_passive_set_replaces_a_completely_different_set();
+    test_passive_set_uses_only_required_difference_writes();
     test_active_edits_validate_three_compact_slots();
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();

@@ -59,9 +59,10 @@ enum class SkillKind {
 
 /** @brief 对选定技能类别执行的编辑动作。 */
 enum class SkillEditOperation {
-    add,     /**< 新增一项技能。 */
-    replace, /**< 用新技能替换已有技能。 */
-    remove,  /**< 移除已有技能。 */
+    add,                /**< 新增一项技能。 */
+    replace,            /**< 用新技能替换已有技能。 */
+    remove,             /**< 移除已有技能。 */
+    replaceAllPassives, /**< 将被动技能精确替换为四项预设。 */
 };
 
 /** @brief 由 UI 提交、等待游戏线程执行的一次技能编辑请求。 */
@@ -82,6 +83,8 @@ struct SkillEditRequest {
     std::string oldPassiveId;
     /** @brief 仅当 `kind` 为 passive 且 `operation` 为 add/replace 时生效的新被动技能标识。 */
     std::string newPassiveId;
+    /** @brief 仅当 `operation` 为 replaceAllPassives 时生效的完整被动技能目标集。 */
+    std::vector<std::string> desiredPassiveIds;
     /** @brief 仅当 `kind` 为 active 且 `operation` 为 add/replace 时生效的新主动技能。 */
     std::optional<ActiveSkill> newActiveSkill;
 };
@@ -221,9 +224,41 @@ public:
 /** @brief 不对外暴露的请求验证、状态比较与执行辅助算法。 */
 namespace detail {
 /** @brief 判断被动技能列表是否包含给定标识。 */
-[[nodiscard]] inline auto contains_passive(const std::vector<std::string>& passives,
+[[nodiscard]] inline auto contains_passive(const std::span<const std::string> passives,
                                            const std::string_view id) -> bool {
     return std::ranges::find(passives, id) != passives.end();
+}
+
+[[nodiscard]] inline auto contains_passive(const std::vector<std::string>& passives,
+                                           const std::string_view id) -> bool {
+    return contains_passive(std::span<const std::string>{passives}, id);
+}
+
+/** @brief 验证预设目标恰好包含四个非空且不重复的标识。 */
+[[nodiscard]] inline auto valid_passive_set(const std::span<const std::string> passives) -> bool {
+    if (passives.size() != 4 ||
+        std::ranges::any_of(passives, [](const std::string& id) { return id.empty(); })) {
+        return false;
+    }
+
+    return std::unordered_set<std::string>(passives.begin(), passives.end()).size() ==
+           passives.size();
+}
+
+/** @brief 只写入两组被动技能之间的必要差异。 */
+inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget target,
+                                     const std::span<const std::string> from,
+                                     const std::span<const std::string> to) -> void {
+    for (const auto& id : from) {
+        if (!contains_passive(to, id)) {
+            gateway.remove_passive(target, id);
+        }
+    }
+    for (const auto& id : to) {
+        if (!contains_passive(from, id)) {
+            gateway.add_passive(target, id);
+        }
+    }
 }
 
 /** @brief 比较两份被动技能列表；忽略顺序但保留每个标识的重复次数。 */
@@ -253,6 +288,25 @@ namespace detail {
     const auto reject = [&](std::string message) {
         return result(SkillEditStatus::rejected, original, std::move(message));
     };
+
+    if (request.operation == SkillEditOperation::replaceAllPassives) {
+        if (!valid_passive_set(request.desiredPassiveIds)) {
+            return reject("Passive preset must contain four unique non-empty skill IDs");
+        }
+        if (same_passives(original.passiveIds, request.desiredPassiveIds)) {
+            return result(SkillEditStatus::succeeded, original, "Passive preset already applied");
+        }
+
+        apply_passive_difference(gateway, request.target, original.passiveIds,
+                                 request.desiredPassiveIds);
+        auto actual = gateway.read_state(request.target);
+        if (same_passives(actual.passiveIds, request.desiredPassiveIds)) {
+            return result(SkillEditStatus::succeeded, std::move(actual),
+                          "Passive preset applied");
+        }
+        return result(SkillEditStatus::failed, std::move(actual),
+                      "Game rejected passive preset");
+    }
 
     if (request.operation == SkillEditOperation::add) {
         if (request.newPassiveId.empty()) {
