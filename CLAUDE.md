@@ -6,7 +6,7 @@ instructions live in `README.md`; repository-wide agent rules live in `AGENTS.md
 ## 项目概览
 
 这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`
-（版本 1.6.0），提供：
+（版本 1.6.1），提供：
 
 - 运行时物品目录、本地化搜索、给予物品和主背包数量修改；
 - 数字键当前高亮、下一次按 E 会召唤的队伍帕鲁主动/被动技能编辑；
@@ -64,6 +64,10 @@ ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反
 退出建造模式或制作空闲 1.5 秒后按注入次数恢复。跨帧只保存 GUID、对象全名和标准库恢复账本。
 关闭开关、LoadMap 前和卸载时都必须先恢复再注销 Hook。
 
+同一可访问世界内关闭后重新开启共享时，必须以当前世界代次重新初始化会话和目录调度器，由后续 EngineTick
+自动校准。该路径不得增加线程、全局扫描、槽位扫描或逐帧任务；恢复失败造成的本世界安全禁用不能用开关绕过。
+1.6.1 仅修复该开关生命周期，不包含建筑/制作首次资格计算的前置 Hook 重构。
+
 本地权限门为 `IsServer && !IsDedicatedServer`。修理共享仍不可用。不要与 IntegratedStorage、
 UBIM Lite、BlueprintResearch 或其他修改相同资源路径的 mod 同时测试。
 
@@ -77,9 +81,10 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内应看到 `PalworldEditor loaded (v1.6.0)`。除物品、技能和世界切换回归外，还要验证：
+游戏内应看到 `PalworldEditor loaded (v1.6.1)`。除物品、技能和世界切换回归外，还要验证：
 
 - 关闭资源共享时，工厂和建造界面性能与未启用资源功能一致；
+- 同一世界内关闭后重新开启会自动恢复非零计数，每次重新开启只产生一次成功目录校准；
 - 开启后反复进入制作/建造会话不持续掉帧；
 - 据点 A 能预览并真实消费据点 B 已加载普通箱子的材料；
 - 材料不足不扣除，退出会话、关闭开关和 LoadMap 后恢复原版行为；
