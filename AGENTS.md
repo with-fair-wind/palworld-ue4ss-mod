@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.3），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.6.4），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -92,6 +92,7 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
   建立可逆临时资源联合并按账本恢复；
 - `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和索引；
 - `inc/skills/active_skill_definitions.hpp`：生成的 Palworld 1.0 主动技能数值/Raw ID 表；
+- `inc/skills/passive_skill_presets.hpp`：编译期四词条预设目录及单请求工厂；
 - `inc/skills/skill_catalog.hpp`：可搜索的主动/被动技能目录；
 - `inc/skills/skill_editor_service.hpp`：编辑校验、FIFO 请求、重读和回滚；
 - `inc/skills/selected_target_state.hpp`：显式锁定目标的一致性检测和过期编辑请求保护；
@@ -152,7 +153,7 @@ BlueprintResearch 或等价的资源路径 mod 同时启用。
 EngineTick 自动执行一次既有的管理器目录校准。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局
 UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
 开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
-入口和活动会话校准抑制。
+入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的差量应用和失败回滚，不增加逐帧工作。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -185,11 +186,12 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.3)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.4)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
-主动/被动名称跟随游戏语言、已装备主动技能数值可映射为标签、被动技能新增/替换/删除，以及主动技能
+主动/被动名称跟随游戏语言、已装备主动技能数值可映射为标签、被动技能新增/替换/删除、两个四词条预设
+只在点击“应用预设”后执行且可差量写入/失败回滚，以及主动技能
 装备/替换/清空。场景中保留一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
 检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。还应重复退出世界/重进存档，确认
 加载期间请求被清空、原目标仅保留显示、重新选择前无法写入，并且 LoadMap 不再崩溃。还应确认无论是否已确认
@@ -206,7 +208,7 @@ git diff --check
 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时测试。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common 主背包
-就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。1.6.3 保留技能目录启动安全门和按需帕鲁解析，
+就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。1.6.4 保留技能目录启动安全门和按需帕鲁解析，
 并把材料联合提前到原版资格计算前；资源开关在同一世界内重新开启时仍会重启目录调度器。
 
 ## 权威参考资料
