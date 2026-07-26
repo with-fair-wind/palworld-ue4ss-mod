@@ -1,40 +1,33 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-> 本文件为 Claude Code 在本仓库中工作时提供指引。详细的用户文档以 `README.md` 为准。
+This file provides guidance to Claude Code when working in this repository. Detailed user-facing
+instructions live in `README.md`; repository-wide agent rules live in `AGENTS.md`.
 
 ## 项目概览
 
-这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`（版本 1.4.5），通过
-UE4SS GUI 提供：
+这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`
+（版本 1.6.0），提供：
 
-- 运行时物品目录和当前语言名称搜索；
-- 给予物品、读取主背包和修改槽位数量；
-- 用数字键高亮并通过按钮显式确认下一次按 E 会召唤的队伍帕鲁；
-- 被动技能新增、替换、删除；
-- 三个 `EquipWaza` 主动技能槽位的装备、替换和清空。
+- 运行时物品目录、本地化搜索、给予物品和主背包数量修改；
+- 数字键当前高亮、下一次按 E 会召唤的队伍帕鲁主动/被动技能编辑；
+- 默认关闭、仅支持单人/本地房主的同公会跨据点制作与建造材料共享。
 
-mod 本体通过 `/Script/Pal.*` 路径和 Palworld 类型进行反射调用，因此是 Palworld 专用实现。Palworld 1.0
-需要 UE4SS Experimental (Palworld) + PalSchema（含 `MemberVariableLayout.ini`）。F10 游戏控制台不可用，
-所有用户交互通过 UE4SS GUI 的 `PalworldEditor` 页签完成。
+Palworld 1.0 需要 UE4SS Experimental (Palworld) + PalSchema（含
+`MemberVariableLayout.ini`）。F10 游戏控制台不可用，所有用户交互都通过 UE4SS GUI 的
+`PalworldEditor` 页签完成。
 
-## 前置依赖与命令
+## 构建
 
-- Visual Studio 2022 最新版，安装“使用 C++ 的桌面开发”工作负载；
-- CMake ≥ 3.22、Git；
-- Rust stable（`cargo` / `rustc`）；RE-UE4SS 的 `UE4SS` target 会构建 Rust 实现的 PatternSleuth；
-- 所有 CMake 构建命令必须在 VS x64 开发者环境中运行。
+所有 CMake 命令都必须在 Visual Studio x64 开发者环境中运行。还需要 CMake ≥ 3.22、
+Ninja、Git 和 Rust stable。
 
 ```powershell
 pwsh scripts/setup.ps1
 $env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"  # 可选；必须在配置前设置
 cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
-
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests
 ctest --test-dir build --output-on-failure
-
 cmake --build --preset ninja-msvc-x64 --target deploy
 ```
 
@@ -43,69 +36,53 @@ DLL 输出为 `build/Game__Shipping__Win64/bin/PalworldEditor.dll`；部署目�
 
 ## 架构
 
-```text
-mods/PalworldEditor/
-├── inc/
-│   ├── game/pal_game.hpp
-│   ├── items/item_catalog.hpp
-│   ├── skills/active_skill_definitions.hpp
-│   ├── skills/pal_skills.hpp
-│   ├── skills/selected_target_state.hpp
-│   ├── skills/skill_catalog.hpp
-│   ├── skills/skill_editor_service.hpp
-│   └── support/text_encoding.hpp
-├── src/
-│   ├── dllmain.cpp
-│   └── pal_skills.cpp
-└── tests/
-    └── skill_editor_tests.cpp
-```
+- `inc/game/pal_game.hpp`：背包、物品和当前待出战队伍帕鲁的反射访问；
+- `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和 Raw ID 索引；
+- `inc/skills/`：技能定义、目录、编辑服务、显式目标锁定与世界代次状态；
+- `src/pal_skills.cpp`：技能领域接口到 Palworld UFunction 的游戏线程适配；
+- `inc/base_resource_sharing/resource_pool.hpp`：资源过滤、能力和恢复纯逻辑；
+- `inc/base_resource_sharing/resource_session.hpp`：目录校准调度与制作/建造会话租约；
+- `inc/base_resource_sharing/hook_manifest.hpp`：结构事件和制作/建造会话 Hook 清单；
+- `src/pal_base_resource_runtime.*`：通过 Palworld 管理器发现普通仓储、应用和恢复临时联合；
+- `src/pal_base_resources.cpp`：事件合并、租约、Hook 和 GUI 值快照编排；
+- `src/dllmain.cpp`：mod 生命周期、ImGui、EngineTick/LoadMap 和线程间请求交接。
 
-- `pal_game.hpp`：背包、物品定义、当前待出战帕鲁和诊断扫描的反射访问；
-- `item_catalog.hpp`：物品标签、搜索、去重、排序和 Raw ID 索引；
-- `active_skill_definitions.hpp`：从 Palworld 1.0 UHT dump 生成的主动技能数值/Raw ID 表；
-- `skill_catalog.hpp`：主动/被动技能目录的纯逻辑；
-- `skill_editor_service.hpp`：编辑校验、FIFO 请求、操作后重读和失败回滚；
-- `selected_target_state.hpp`：显式锁定目标的一致性检测和过期编辑请求保护；
-- `pal_skills.*`：领域接口到 Palworld UFunction 的适配；
-- `dllmain.cpp`：`PalworldEditorMod` 生命周期、ImGui 和线程间请求交接。
+ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反射读写只允许在 EngineTick
+或相应 UFunction 的游戏线程 Hook 内执行；跨帧状态不得持有 UObject 指针或 Unreal 数组地址。
 
-ImGui 回调只读写标准库 UI 状态、原子请求标志以及互斥锁保护的快照/参数。所有 UObject 反射读取和修改都在
-`on_update()` 所在游戏线程执行。当前目标从唯一属于本地控制器的队伍 Holder 解析；用户点击
-“选择当前帕鲁”后以 `FPalInstanceID.InstanceId` 和目标代数锁定；只有再次点击按钮才切换编辑目标。
-数字键切换或瞬时解析失败只暂停写入，不自动清空选择，消费请求时仍重新校验当前 GUID。
-扫描结果中的 UObject 指针不会跨帧缓存，也不再依赖帕鲁详情页 Hook。
+当前技能目标只在用户点击“选择当前帕鲁”后锁定。数字键切换不会自动切换编辑对象；修改前仍会重新校验
+当前 GUID。LoadMap 前必须清空请求并撤销写权限，进入新世界后必须重新选择。
 
-物品和技能界面显示 `本地化名称 [RawId]`，但游戏调用始终使用 Raw ID；背包修改使用槽位索引。主动技能通过
-`ClearEquipWaza()` 后按顺序调用 `AddEquipWaza()` 重写完整装备列表，失败时由领域服务尝试恢复原状态。
-主动技能目录不读取运行时 `UEnum` 内存布局；名称通过 `PalUIUtility` 跟随游戏当前语言，
-`PalPlayerInventoryData` 只提供当帧本地化上下文。本地化失败时回退为 Raw ID，主动和被动目录分别保留
-可用状态和刷新错误。更新 UHT dump 后运行 `scripts/generate-active-skill-definitions.ps1` 更新定义表。
+## 资源共享契约
 
-## 工具链与验证
+资源目录通过 `PalBaseCampManager:GetBaseCampIds` / `TryGetModel`、`PalBaseCampModel.ModuleArray`、
+`PalBaseCampModuleItemStorage.ContainerInfos` 和 `PalMapObjectManager:FindConcreteModel` 直接建立。
+只接受同公会、已加载、类型为 `Chest` 的普通仓储。不得使用全局 `FindAllOf`，不得扫描或修改
+`ItemSlotArray` / `StackCount`。
 
-clangd 读取 `build/compile_commands.json`；`.clang-format`、`.clang-tidy`、`.clangd`、`.editorconfig` 和
-`.gitattributes` 位于仓库根目录。常用手动 target：
+结构事件立即请求目录校准，8 秒低频校准作为事件遗漏兜底。进入建造模式或制作界面时才建立资源联合；
+退出建造模式或制作空闲 1.5 秒后按注入次数恢复。跨帧只保存 GUID、对象全名和标准库恢复账本。
+关闭开关、LoadMap 前和卸载时都必须先恢复再注销 Hook。
+
+本地权限门为 `IsServer && !IsDedicatedServer`。修理共享仍不可用。不要与 IntegratedStorage、
+UBIM Lite、BlueprintResearch 或其他修改相同资源路径的 mod 同时测试。
+
+## 验证
+
+提交前至少运行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format
-cmake --build --preset ninja-msvc-x64 --target format-check
-cmake --build --preset ninja-msvc-x64 --target tidy
-cmake --build --preset ninja-msvc-x64 --target tidy-check
-```
-
-Windows 下 `tidy-check` 会用单进程解析所有 `mods/` 翻译单元及其 RE-UE4SS/Unreal 依赖，可能长时间没有输出。
-提交前至少执行：
-
-```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内验证时，UE4SS 控制台应出现 `PalworldEditor loaded (v1.4.5)`；打开 `PalworldEditor` 页签后验证物品、
-背包、启动后自动重试完整技能目录、刷新技能目录不崩溃、主动/被动下拉框可选择且名称跟随游戏语言、
-装备数值显示为技能标签、数字键高亮队伍帕鲁后点击“选择当前帕鲁”、切换目标后保持锁定但暂停写入，
-以及主动/被动技能写入。场景中有野生帕鲁时，目标仍必须
-是下一次按 E 会召唤的队伍帕鲁。反射签名和 UFunction 参数布局来自 Palworld 1.0，游戏更新后可能需要结合本地
-`UHTHeaderDump/` 重新核对并重新生成主动技能定义表。
+游戏内应看到 `PalworldEditor loaded (v1.6.0)`。除物品、技能和世界切换回归外，还要验证：
+
+- 关闭资源共享时，工厂和建造界面性能与未启用资源功能一致；
+- 开启后反复进入制作/建造会话不持续掉帧；
+- 据点 A 能预览并真实消费据点 B 已加载普通箱子的材料；
+- 材料不足不扣除，退出会话、关闭开关和 LoadMap 后恢复原版行为；
+- 食物箱、运输、自动生产、箱子 UI 和修理不共享；
+- 每个联合都有匹配的恢复日志，目录校准不超过每 8 秒一次；
+- 连续冷启动多次，进入主界面前不发生反射调用崩溃。

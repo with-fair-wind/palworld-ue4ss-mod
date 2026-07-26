@@ -1,4 +1,4 @@
-# PalworldEditor 1.5.3 — Palworld 物品、帕鲁技能与据点资源编辑器
+# PalworldEditor 1.6.0 — Palworld 物品、帕鲁技能与据点资源编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
 提供游戏内物品编辑、当前选中帕鲁的主动/被动技能编辑，以及可选的同公会跨据点制作/建造材料共享。
@@ -143,16 +143,19 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 4. 当前据点/当前资源助手已有的容器保持在队列前部，因此优先遵循原版本地消耗顺序。
 5. 关闭开关或切换世界时，mod 会先恢复并验证所有临时容器引用，再恢复原版行为。
 
-关闭共享时不会注册任何资源 UFunction Hook，也不会扫描据点容器。开启后，制作和建造预览使用一份
-有效期 1 秒的纯数值缓存，数量范围为玩家 Common 主背包加同公会全部已加载普通仓库；缓存中不保留
-`UObject*` 或 Unreal 数组地址。实际点击制作或建造时不依赖缓存，而是重新发现实时容器、临时联合，
-随后立即或在建造请求窗口结束时恢复。第一次打开预览、缓存重建或实际消费可能产生一次短暂扫描开销，
-但不再逐帧执行完整容器扫描。UE4SS Verbose 日志会分别记录预览缓存重建、实时联合准备和恢复耗时。
-1.5.2 的当前帕鲁常驻性能修复及 1.5.3 的启动安全门都没有改变上述据点发现、预览、临时联合或实际扣料行为。
+关闭共享时不会注册任何资源 UFunction Hook，也不会发现据点容器。开启后，mod 通过
+`PalBaseCampManager`、`PalBaseCampModel`、`PalBaseCampModuleItemStorage` 和 `PalMapObjectManager`
+直接取得同公会普通箱子，不使用全局 `FindAllOf`，也不扫描 `ItemSlotArray` 或统计每个槽位数量。
+据点/箱子结构事件会立即使目录失效，并以 8 秒低频校准作为事件遗漏时的安全兜底。
+
+进入建造模式或打开制作界面时，mod 才建立短生命周期资源联合；会话期间 Palworld 原生的预览、校验和扣料
+都看到同一组容器。退出建造模式或制作界面空闲 1.5 秒后会按记录的注入次数恢复引用。跨帧只保存 GUID、
+对象全名和序列账本，不保存 `UObject*` 或 Unreal 数组地址。UE4SS Verbose 日志只记录目录校准、联合建立和
+恢复耗时，不会逐帧或逐次预览刷屏。
 
 此功能只处理制作与建造材料，不共享食物箱、帕鲁运输、自动生产或箱子 UI。修理材料共享目前明确显示
-“不可用”，因为 Palworld 1.0.1 尚未验证安全的修理检查与扣除入口。不要同时启用 UBIM Lite 或其他会修改
-相同制作/建造资源请求路径的 mod。
+“不可用”，因为 Palworld 1.0.1 尚未验证安全的修理检查与扣除入口。不要同时启用 IntegratedStorage、
+UBIM Lite、BlueprintResearch 或其他会修改相同制作/建造资源路径的 mod。
 
 配置文件只接受：
 
@@ -181,7 +184,8 @@ mods/PalworldEditor/
 │   ├── base_resource_sharing/
 │   │   ├── hook_manifest.hpp         Palworld 1.0.1 Hook 能力清单
 │   │   ├── pal_base_resources.hpp    跨据点资源桥值接口
-│   │   ├── resource_pool.hpp         过滤、排序、恢复账本和生命周期纯逻辑
+│   │   ├── resource_pool.hpp         过滤、排序、能力与恢复纯逻辑
+│   │   ├── resource_session.hpp      目录校准调度与制作/建造会话租约
 │   │   └── settings.hpp              默认关闭的持久化配置
 │   ├── items/
 │   │   └── item_catalog.hpp          物品标签、搜索、去重、排序与索引
@@ -198,7 +202,8 @@ mods/PalworldEditor/
 ├── src/
 │   ├── base_resource_settings.cpp 配置解析与原子保存
 │   ├── dllmain.cpp                Mod 类 + GUI + EngineTick/LoadMap 请求分发
-│   ├── pal_base_resources.cpp     同公会仓储发现、Hook 与可逆临时联合
+│   ├── pal_base_resource_runtime.* 管理器发现与可逆临时联合
+│   ├── pal_base_resources.cpp     事件调度、会话租约与 Hook
 │   └── pal_skills.cpp             技能目录与游戏函数实现
 └── tests/
     ├── base_resource_sharing_tests.cpp 资源共享纯 C++ 安全契约
