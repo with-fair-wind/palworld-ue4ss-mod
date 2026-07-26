@@ -6,6 +6,7 @@
 
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
+#include <base_resource_sharing/resource_session.hpp>
 #include <base_resource_sharing/settings.hpp>
 
 namespace {
@@ -305,6 +306,50 @@ void test_preview_sources_combine_player_and_base_storage() {
     CHECK(max_productable_from_shared_counts(0, recipe, total.amounts) == 1);
 }
 
+void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
+    using namespace base_resource_sharing;
+
+    ReconcileScheduler scheduler;
+    scheduler.begin_world(7);
+    CHECK(scheduler.advance(0.0F, 7));
+    scheduler.complete(true, 7);
+    CHECK(!scheduler.advance(7.999F, 7));
+    CHECK(scheduler.advance(0.001F, 7));
+    scheduler.complete(true, 7);
+
+    scheduler.request_immediate(7);
+    scheduler.request_immediate(7);
+    CHECK(scheduler.advance(0.0F, 7));
+    CHECK(!scheduler.advance(0.0F, 7));
+    scheduler.complete(false, 7);
+    CHECK(!scheduler.advance(0.999F, 7));
+    CHECK(scheduler.advance(0.001F, 7));
+    scheduler.complete(true, 7);
+
+    CHECK(!scheduler.advance(8.0F, 8));
+}
+
+void test_union_leases_overlap_and_crafting_expires_after_idle() {
+    using namespace base_resource_sharing;
+
+    ResourceUnionLeaseState leases;
+    leases.begin_world(11);
+    CHECK(leases.acquire_building(11));
+    CHECK(leases.touch_crafting(11));
+    CHECK(leases.desired(11));
+    CHECK(!leases.advance(1.5F, 11));
+    CHECK(leases.desired(11));
+    CHECK(!leases.release_building(12));
+    CHECK(leases.release_building(11));
+    CHECK(!leases.desired(11));
+
+    CHECK(leases.touch_crafting(11));
+    CHECK(!leases.advance(1.499F, 11));
+    CHECK(leases.advance(0.001F, 11));
+    CHECK(!leases.desired(11));
+    CHECK(!leases.touch_crafting(12));
+}
+
 auto main() -> int {
     test_settings_default_off_and_round_trip();
     test_settings_file_round_trip();
@@ -320,5 +365,7 @@ auto main() -> int {
     test_preview_amounts_merge_duplicates_and_preserve_vanilla();
     test_hook_manifest_contains_only_top_level_preview_and_consume_paths();
     test_preview_sources_combine_player_and_base_storage();
+    test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
+    test_union_leases_overlap_and_crafting_expires_after_idle();
     return failures == 0 ? 0 : 1;
 }
