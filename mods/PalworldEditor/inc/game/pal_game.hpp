@@ -616,14 +616,20 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
 inline auto set_grapple_no_cooldown(const bool enabled) -> void {
     auto* const debug = UObjectGlobals::FindFirstOf(STR("PalDebugSetting"));
     if (!is_valid(debug)) {
+        Output::send<LogLevel::Warning>(
+            STR("PalworldEditor: grapple no-CD: PalDebugSetting not found via FindFirstOf\n"));
         return;
     }
     auto* const property = debug->GetPropertyByNameInChain(STR("bDisableGrapplingCoolDown"));
     auto* const boolProperty = CastField<FBoolProperty>(property);
     if (boolProperty == nullptr) {
+        Output::send<LogLevel::Warning>(
+            STR("PalworldEditor: grapple no-CD: bDisableGrapplingCoolDown property not found\n"));
         return;
     }
     boolProperty->SetPropertyValueInContainer(debug, enabled);
+    Output::send<LogLevel::Warning>(
+        STR("PalworldEditor: grapple no-CD applied ({})\n"), static_cast<int32>(enabled));
 }
 
 /**
