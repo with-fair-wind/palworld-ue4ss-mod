@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -63,6 +64,187 @@ void test_skill_catalog_filter_and_deduplicate() {
         unique, "passive", std::unordered_set<std::string>{"Passive_Swift"});
     CHECK(visible.size() == 1);
     CHECK(visible[0].id == "Passive_Workaholic");
+}
+
+void test_passive_skill_categories_follow_runtime_metadata() {
+    using enum skill_editor::PassiveSkillCategory;
+
+    CHECK(skill_editor::classify_passive_skill(0, false) == normal);
+    CHECK(skill_editor::classify_passive_skill(2, false) == normal);
+    CHECK(skill_editor::classify_passive_skill(3, false) == rare);
+    CHECK(skill_editor::classify_passive_skill(4, false) == premium);
+    CHECK(skill_editor::classify_passive_skill(9, false) == premium);
+    CHECK(skill_editor::classify_passive_skill(-1, false) == negative);
+    CHECK(skill_editor::classify_passive_skill(-1, true) == legendary);
+    CHECK(skill_editor::classify_passive_skill(2, true) == legendary);
+}
+
+void test_passive_filter_combines_category_exclusion_and_search() {
+    using enum skill_editor::PassiveSkillCategory;
+
+    const std::vector<skill_editor::SkillOption> skills{
+        {.id = "Passive_Normal",
+         .localizedName = "普通技能",
+         .passiveMetadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 1, .addWorldTreePal = false, .category = normal}},
+        {.id = "Passive_Rare",
+         .localizedName = "稀有采矿",
+         .passiveMetadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 3, .addWorldTreePal = false, .category = rare}},
+        {.id = "Passive_Legend",
+         .localizedName = "传说采矿",
+         .passiveMetadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 1, .addWorldTreePal = true, .category = legendary}},
+        {.id = "Passive_Unknown", .localizedName = "未知采矿"},
+    };
+    const std::unordered_set<std::string> equipped{"Passive_Legend"};
+
+    const auto rareSkills =
+        skill_editor::filter_passive_skills(skills, rare, "采矿", equipped);
+    CHECK(rareSkills.size() == 1);
+    CHECK(rareSkills.front().id == "Passive_Rare");
+
+    const auto allSkills =
+        skill_editor::filter_passive_skills(skills, std::nullopt, "Passive_", equipped);
+    CHECK(allSkills.size() == 3);
+    CHECK(std::ranges::any_of(allSkills, [](const skill_editor::SkillOption& option) {
+        return option.id == "Passive_Unknown";
+    }));
+}
+
+void test_passive_picker_category_change_clears_only_selection() {
+    skill_editor::PassiveSkillPickerState state{
+        .category = std::nullopt,
+        .selected =
+            skill_editor::SkillOption{.id = "Passive_Rare", .localizedName = "稀有采矿"},
+    };
+
+    CHECK(state.set_category(skill_editor::PassiveSkillCategory::rare));
+    CHECK(state.category == skill_editor::PassiveSkillCategory::rare);
+    CHECK(!state.selected.has_value());
+    CHECK(!state.set_category(skill_editor::PassiveSkillCategory::rare));
+}
+
+void test_passive_classification_job_reuses_success_cache_and_retries_unknowns() {
+    using enum skill_editor::PassiveSkillCategory;
+
+    const std::vector<skill_editor::SkillOption> skills{
+        {.id = "Cached", .localizedName = "已缓存"},
+        {.id = "Retry", .localizedName = "待重试"},
+        {.id = "New", .localizedName = "新增"},
+    };
+    std::unordered_map<std::string, skill_editor::PassiveSkillMetadata> cache{
+        {"Cached",
+         skill_editor::PassiveSkillMetadata{
+             .rank = 3, .addWorldTreePal = false, .category = rare}},
+    };
+
+    skill_editor::PassiveSkillClassificationJob job;
+    job.start(skills, cache);
+    CHECK(job.status().total == 3);
+    CHECK(job.status().completed == 1);
+    CHECK(job.next_batch(8) == std::vector<std::string>({"Retry", "New"}));
+
+    const std::vector<skill_editor::PassiveSkillMetadataReadResult> firstBatch{
+        {.id = "Retry", .metadata = std::nullopt},
+        {.id = "New",
+         .metadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 4, .addWorldTreePal = false, .category = premium}},
+    };
+    CHECK(job.complete_batch(firstBatch, cache));
+    CHECK(job.status().ready);
+    CHECK(cache.contains("New"));
+    CHECK(!cache.contains("Retry"));
+
+    job.start(skills, cache);
+    CHECK(job.next_batch(8) == std::vector<std::string>({"Retry"}));
+}
+
+void test_passive_classification_job_honors_batch_limit_and_reports_failure() {
+    std::vector<skill_editor::SkillOption> skills;
+    for (int index = 0; index < 10; ++index) {
+        skills.push_back(
+            {.id = "Passive_" + std::to_string(index), .localizedName = "技能"});
+    }
+    std::unordered_map<std::string, skill_editor::PassiveSkillMetadata> cache;
+
+    skill_editor::PassiveSkillClassificationJob job;
+    job.start(skills, cache);
+    CHECK(job.next_batch(8).size() == 8);
+
+    job.fail("missing Rank property");
+    CHECK(!job.active());
+    CHECK(!job.status().ready);
+    CHECK(job.status().error == "missing Rank property");
+}
+
+void test_passive_metadata_merge_keeps_unknown_skills_in_catalog() {
+    const std::vector<skill_editor::SkillOption> original{
+        {.id = "Known", .localizedName = "已知"},
+        {.id = "Unknown", .localizedName = "未知"},
+    };
+    auto skills = original;
+    const std::unordered_map<std::string, skill_editor::PassiveSkillMetadata> cache{
+        {"Known",
+         skill_editor::PassiveSkillMetadata{
+             .rank = 3,
+             .addWorldTreePal = false,
+             .category = skill_editor::PassiveSkillCategory::rare}},
+    };
+
+    skill_editor::apply_passive_metadata(skills, cache);
+    CHECK(skills.size() == original.size());
+    CHECK(skills[0].passiveMetadata.has_value());
+    CHECK(!skills[1].passiveMetadata.has_value());
+}
+
+void test_catalog_fallback_preserves_previous_passive_classification() {
+    const skill_editor::SkillCatalogSnapshot previous{
+        .passive =
+            {
+                .skills = {{.id = "Old", .localizedName = "旧技能"}},
+                .ready = true,
+            },
+        .passiveClassification =
+            {
+                .completed = 1,
+                .total = 1,
+                .ready = true,
+            },
+    };
+    const skill_editor::SkillCatalogSnapshot failedRefresh{
+        .passive = {.error = "refresh failed"},
+    };
+
+    const auto merged = skill_editor::with_catalog_fallback(previous, failedRefresh);
+    CHECK(merged.passive.skills.front().id == "Old");
+    CHECK(merged.passiveClassification.ready);
+    CHECK(merged.passive.error == "refresh failed");
+}
+
+void test_passive_classification_cancel_does_not_mutate_success_cache() {
+    const std::vector<skill_editor::SkillOption> skills{
+        {.id = "Known", .localizedName = "已知"},
+        {.id = "Pending", .localizedName = "待处理"},
+    };
+    std::unordered_map<std::string, skill_editor::PassiveSkillMetadata> cache{
+        {"Known",
+         skill_editor::PassiveSkillMetadata{
+             .rank = 3,
+             .addWorldTreePal = false,
+             .category = skill_editor::PassiveSkillCategory::rare}},
+    };
+
+    skill_editor::PassiveSkillClassificationJob job;
+    job.start(skills, cache);
+    job.cancel();
+
+    CHECK(!job.active());
+    CHECK(cache.contains("Known"));
 }
 
 void test_passive_skill_presets_have_expected_palworld_1_0_ids() {
@@ -994,6 +1176,14 @@ void test_stale_generation_never_reaches_apply_callback() {
 auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
+    test_passive_skill_categories_follow_runtime_metadata();
+    test_passive_filter_combines_category_exclusion_and_search();
+    test_passive_picker_category_change_clears_only_selection();
+    test_passive_classification_job_reuses_success_cache_and_retries_unknowns();
+    test_passive_classification_job_honors_batch_limit_and_reports_failure();
+    test_passive_metadata_merge_keeps_unknown_skills_in_catalog();
+    test_catalog_fallback_preserves_previous_passive_classification();
+    test_passive_classification_cancel_does_not_mutate_success_cache();
     test_passive_skill_presets_have_expected_palworld_1_0_ids();
     test_passive_skill_preset_definitions_are_valid();
     test_passive_skill_preset_builds_one_world_bound_request();

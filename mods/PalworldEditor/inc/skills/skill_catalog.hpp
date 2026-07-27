@@ -5,12 +5,17 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <chrono>
+#include <compare>
+#include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -22,13 +27,255 @@
  */
 namespace skill_editor {
 /**
+ * @brief 表示被动技能在编辑器中的品质分类。
+ * @details “全部”属于界面过滤条件，不是被动技能自身的分类值。
+ */
+enum class PassiveSkillCategory {
+    normal,    /**< 普通技能：`Rank` 为 0 到 2。 */
+    rare,      /**< 稀有技能：`Rank` 为 3。 */
+    premium,   /**< 极品技能：`Rank` 不小于 4。 */
+    legendary, /**< 传说技能：`AddWorldTreePal` 为 `true`。 */
+    negative,  /**< 负面技能：`Rank` 小于 0。 */
+};
+
+/**
+ * @brief 保存分类被动技能所需的稳定运行时元数据。
+ */
+struct PassiveSkillMetadata {
+    std::int32_t rank{};             /**< 数据表中的技能 Rank。 */
+    bool addWorldTreePal{};          /**< 是否属于世界树被动技能池。 */
+    PassiveSkillCategory category{}; /**< 根据运行时字段推导出的编辑器分类。 */
+
+    auto operator<=>(const PassiveSkillMetadata&) const = default;
+};
+
+/**
+ * @brief 根据 Palworld 运行时字段推导被动技能分类。
+ * @param[in] rank 技能数据表中的 Rank。
+ * @param[in] addWorldTreePal 技能是否属于世界树技能池。
+ * @return 传说优先，其次依次判断负面、极品、稀有和普通。
+ */
+[[nodiscard]] constexpr auto classify_passive_skill(const std::int32_t rank,
+                                                    const bool addWorldTreePal) noexcept
+    -> PassiveSkillCategory {
+    if (addWorldTreePal) {
+        return PassiveSkillCategory::legendary;
+    }
+    if (rank < 0) {
+        return PassiveSkillCategory::negative;
+    }
+    if (rank >= 4) {
+        return PassiveSkillCategory::premium;
+    }
+    if (rank == 3) {
+        return PassiveSkillCategory::rare;
+    }
+    return PassiveSkillCategory::normal;
+}
+
+/**
  * @brief 表示一个可供技能编辑界面展示的技能。
  */
 struct SkillOption {
     std::string id;            /**< 技能的 Raw ID。 */
     std::string localizedName; /**< 当前游戏语言的展示名称；为空时界面回退到 `id`。 */
     std::optional<std::uint16_t> activeValue; /**< 仅主动技能具有的 `EPalWazaID` 数值。 */
+    std::optional<PassiveSkillMetadata> passiveMetadata; /**< 仅被动技能具有的分类元数据。 */
 };
+
+/**
+ * @brief 保存被动技能两级选择器的类别和技能选择。
+ * @details 搜索文本由界面独立保存，因此切换类别只清空已选技能。
+ */
+struct PassiveSkillPickerState {
+    std::optional<PassiveSkillCategory> category; /**< 空值表示“全部”。 */
+    std::optional<SkillOption> selected;          /**< 当前待新增或替换的技能。 */
+
+    /**
+     * @brief 切换类别，并在实际变化时清空已选技能。
+     * @param[in] nextCategory 新类别；空值表示“全部”。
+     * @return 类别发生变化时返回 `true`。
+     */
+    [[nodiscard]] auto set_category(
+        const std::optional<PassiveSkillCategory> nextCategory) noexcept -> bool {
+        if (category == nextCategory) {
+            return false;
+        }
+        category = nextCategory;
+        selected.reset();
+        return true;
+    }
+
+    /** @brief 清空技能选择但保留类别。 */
+    void clear_selection() noexcept {
+        selected.reset();
+    }
+
+    /** @brief 同时恢复“全部”类别并清空技能选择。 */
+    void reset() noexcept {
+        category.reset();
+        selected.reset();
+    }
+};
+
+/**
+ * @brief 表示一次被动技能元数据读取的纯值结果。
+ */
+struct PassiveSkillMetadataReadResult {
+    std::string id;                             /**< 已尝试读取的技能 Raw ID。 */
+    std::optional<PassiveSkillMetadata> metadata; /**< 成功时的元数据；空值表示该 ID 未找到。 */
+};
+
+/**
+ * @brief 表示一个受限反射批次的结果。
+ */
+struct PassiveSkillMetadataBatchResult {
+    std::vector<PassiveSkillMetadataReadResult> entries; /**< 已实际完成的 ID 结果。 */
+    std::string error; /**< 阻止后续读取的结构性反射错误。 */
+    std::chrono::microseconds elapsed{}; /**< 本批次在游戏线程中的总耗时。 */
+};
+
+/**
+ * @brief 表示被动技能分类任务可发布给界面的状态。
+ */
+struct PassiveSkillClassificationStatus {
+    std::size_t completed{}; /**< 已完成或命中缓存的技能数量。 */
+    std::size_t total{};     /**< 本次目录中的技能总数。 */
+    std::string error;       /**< 结构性错误；为空表示未发生结构错误。 */
+    bool ready{};            /**< 本轮所有 ID 均已尝试且没有结构错误。 */
+};
+
+/**
+ * @brief 管理跨 EngineTick 的被动技能分类纯值状态。
+ * @details 该类不接触 Unreal，也不拥有成功缓存；LoadMap 可安全取消任务而保留外部缓存。
+ */
+class PassiveSkillClassificationJob {
+public:
+    /**
+     * @brief 为一个新目录建立分类任务。
+     * @param[in] options 当前被动技能目录。
+     * @param[in] successCache mod 生命周期内的成功元数据缓存。
+     */
+    void start(
+        const std::span<const SkillOption> options,
+        const std::unordered_map<std::string, PassiveSkillMetadata>& successCache) {
+        cancel();
+        started_ = true;
+        total_ = options.size();
+        for (const auto& option : options) {
+            if (successCache.contains(option.id)) {
+                ++completed_;
+            } else {
+                pending_.push_back(option.id);
+            }
+        }
+        active_ = !pending_.empty();
+    }
+
+    /** @brief 取消当前任务且不修改调用方持有的成功缓存。 */
+    void cancel() noexcept {
+        pending_.clear();
+        completed_ = 0;
+        total_ = 0;
+        error_.clear();
+        active_ = false;
+        started_ = false;
+    }
+
+    /**
+     * @brief 以结构性错误终止当前任务。
+     * @param[in] error 可供日志和界面展示的错误。
+     */
+    void fail(std::string error) {
+        error_ = std::move(error);
+        active_ = false;
+    }
+
+    /**
+     * @brief 查看下一批待处理 ID，不提前修改队列。
+     * @param[in] limit 本批允许返回的最大 ID 数。
+     * @return 与目录顺序一致的 Raw ID 副本。
+     */
+    [[nodiscard]] auto next_batch(const std::size_t limit) const -> std::vector<std::string> {
+        const auto count = std::min(limit, pending_.size());
+        return {pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(count)};
+    }
+
+    /**
+     * @brief 提交已实际执行的批次结果。
+     * @param[in] entries 与待处理队首顺序一致的结果。
+     * @param[in,out] successCache 仅写入成功取得的元数据。
+     * @return 批次顺序合法时返回 `true`。
+     */
+    [[nodiscard]] auto complete_batch(
+        const std::span<const PassiveSkillMetadataReadResult> entries,
+        std::unordered_map<std::string, PassiveSkillMetadata>& successCache) -> bool {
+        if (entries.size() > pending_.size()) {
+            fail("passive classification batch order mismatch");
+            return false;
+        }
+
+        auto pending = pending_.begin();
+        for (const auto& entry : entries) {
+            if (entry.id != *pending) {
+                fail("passive classification batch order mismatch");
+                return false;
+            }
+            ++pending;
+        }
+
+        for (const auto& entry : entries) {
+            pending_.pop_front();
+            ++completed_;
+            if (entry.metadata.has_value()) {
+                successCache.insert_or_assign(entry.id, *entry.metadata);
+            }
+        }
+        active_ = !pending_.empty();
+        return true;
+    }
+
+    /** @return 当前任务是否仍有待处理 ID。 */
+    [[nodiscard]] auto active() const noexcept -> bool {
+        return active_;
+    }
+
+    /** @return 当前进度、总数、结构错误和可用状态的纯值快照。 */
+    [[nodiscard]] auto status() const -> PassiveSkillClassificationStatus {
+        return {
+            .completed = completed_,
+            .total = total_,
+            .error = error_,
+            .ready = started_ && !active_ && error_.empty() && completed_ == total_,
+        };
+    }
+
+private:
+    std::deque<std::string> pending_; /**< 尚未尝试读取的 Raw ID。 */
+    std::size_t completed_{};         /**< 已完成或命中缓存的数量。 */
+    std::size_t total_{};             /**< 当前目录技能总数。 */
+    std::string error_;               /**< 最近结构性错误。 */
+    bool active_{};                   /**< 队列是否仍需在后续 EngineTick 推进。 */
+    bool started_{};                  /**< 是否已经通过 `start()` 建立本轮任务。 */
+};
+
+/**
+ * @brief 把成功缓存合并到当前被动技能目录。
+ * @param[in,out] skills 当前被动技能目录；所有旧元数据会先按缓存结果更新。
+ * @param[in] successCache mod 生命周期内的成功元数据缓存。
+ */
+inline void apply_passive_metadata(
+    std::vector<SkillOption>& skills,
+    const std::unordered_map<std::string, PassiveSkillMetadata>& successCache) {
+    for (auto& skill : skills) {
+        const auto found = successCache.find(skill.id);
+        if (found != successCache.end()) {
+            skill.passiveMetadata = found->second;
+        } else {
+            skill.passiveMetadata.reset();
+        }
+    }
+}
 
 /**
  * @brief Returns whether a stable active-skill Raw ID is clearly game-internal.
@@ -78,6 +325,7 @@ struct SkillCatalogSection {
 struct SkillCatalogSnapshot {
     SkillCatalogSection passive; /**< 被动技能目录区段。 */
     SkillCatalogSection active;  /**< 主动技能目录区段。 */
+    PassiveSkillClassificationStatus passiveClassification; /**< 被动技能分类任务状态。 */
     bool runtimeReady{};         /**< 游戏技能与本地化运行时已完成一次完整加载。 */
 };
 
@@ -164,6 +412,9 @@ private:
     return {
         .passive = with_section_fallback(previous.passive, refreshed.passive),
         .active = with_section_fallback(previous.active, refreshed.active),
+        .passiveClassification =
+            refreshed.passive.ready ? refreshed.passiveClassification
+                                    : previous.passiveClassification,
         .runtimeReady = previous.runtimeReady || refreshed.runtimeReady,
     };
 }
@@ -246,6 +497,33 @@ private:
         if (!excludedIds.contains(option.id) && matches_skill(option, query)) {
             result.push_back(option);
         }
+    }
+    return result;
+}
+
+/**
+ * @brief 按类别、排除集合和搜索词筛选被动技能。
+ * @param[in] options 待筛选的被动技能目录。
+ * @param[in] category 具体类别；空值表示“全部”。
+ * @param[in] query 中文名或 Raw ID 搜索文本。
+ * @param[in] excludedIds 已装备且不应再次选择的被动技能 Raw ID。
+ * @return 按“类别、排除、搜索”顺序过滤后的技能值副本。
+ */
+[[nodiscard]] inline auto filter_passive_skills(
+    const std::span<const SkillOption> options,
+    const std::optional<PassiveSkillCategory> category, const std::string_view query,
+    const std::unordered_set<std::string>& excludedIds) -> std::vector<SkillOption> {
+    std::vector<SkillOption> result;
+    for (const auto& option : options) {
+        if (category.has_value() &&
+            (!option.passiveMetadata.has_value() ||
+             option.passiveMetadata->category != *category)) {
+            continue;
+        }
+        if (excludedIds.contains(option.id) || !matches_skill(option, query)) {
+            continue;
+        }
+        result.push_back(option);
     }
     return result;
 }
