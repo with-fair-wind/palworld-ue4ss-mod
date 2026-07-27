@@ -43,20 +43,20 @@ struct PalStatValues {
 
 /** @brief 由 UI 提交、等待游戏线程执行的一次属性编辑请求。 */
 struct PalStatEditRequest {
-    PalStatValues values;               /**< 期望写入的属性值。 */
-    std::uint64_t targetGeneration{};   /**< GUI 提交时观察到的已确认目标代数。 */
-    std::uint64_t worldGeneration{};    /**< GUI 提交时观察到的世界代次。 */
+    PalStatValues values;             /**< 期望写入的属性值。 */
+    std::uint64_t targetGeneration{}; /**< GUI 提交时观察到的已确认目标代数。 */
+    std::uint64_t worldGeneration{};  /**< GUI 提交时观察到的世界代次。 */
 };
 
 /** @brief 从游戏读取到的当前属性值，供 GUI 显示。 */
 struct PalStatSnapshot {
-    int level{};          /**< 当前等级。 */
-    int talentHp{};       /**< 当前个体值·HP。 */
-    int talentShot{};     /**< 当前个体值·攻击。 */
-    int talentDefense{};  /**< 当前个体值·防御。 */
-    int friendshipRank{}; /**< 当前亲密度 rank。 */
+    int level{};           /**< 当前等级。 */
+    int talentHp{};        /**< 当前个体值·HP。 */
+    int talentShot{};      /**< 当前个体值·攻击。 */
+    int talentDefense{};   /**< 当前个体值·防御。 */
+    int friendshipRank{};  /**< 当前亲密度 rank。 */
     int friendshipPoint{}; /**< 当前亲密度原始点数。 */
-    bool readable{};      /**< 是否已成功读取过一次（目标选中后）。 */
+    bool readable{};       /**< 是否已成功读取过一次（目标选中后）。 */
 };
 
 /** @brief 把等级限制到 `[kLevelMin, kLevelMax]`。 */
@@ -111,7 +111,7 @@ public:
     }
 
 private:
-    mutable std::mutex mutex_;                   /**< 保护 `requests_` 的唯一互斥量。 */
-    std::deque<PalStatEditRequest> requests_;    /**< 按提交顺序保存待执行请求。 */
+    mutable std::mutex mutex_;                /**< 保护 `requests_` 的唯一互斥量。 */
+    std::deque<PalStatEditRequest> requests_; /**< 按提交顺序保存待执行请求。 */
 };
 }  // namespace pal_stats

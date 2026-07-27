@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(${TARGET} SHARED
     src/dllmain.cpp
     src/pal_skills.cpp
+    src/pal_stats.cpp
     src/base_resource_settings.cpp
     src/pal_base_resource_runtime.cpp
     src/pal_base_resources.cpp
