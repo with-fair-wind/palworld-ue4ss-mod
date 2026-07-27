@@ -6,7 +6,7 @@ instructions live in `README.md`; repository-wide agent rules live in `AGENTS.md
 ## 项目概览
 
 这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`
-（版本 1.6.4），提供：
+（版本 1.6.6），提供：
 
 - 运行时物品目录、本地化搜索、给予物品和主背包数量修改；
 - 数字键当前高亮、下一次按 E 会召唤的队伍帕鲁主动/被动技能编辑和四词条预设；
@@ -39,6 +39,7 @@ DLL 输出为 `build/Game__Shipping__Win64/bin/PalworldEditor.dll`；部署目�
 - `inc/game/pal_game.hpp`：背包、物品和当前待出战队伍帕鲁的反射访问；
 - `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和 Raw ID 索引；
 - `inc/skills/`：技能定义、目录、编辑服务、显式目标锁定与世界代次状态；
+- `inc/pal_stats/`：帕鲁属性编辑领域与 `SaveParameter` 反射适配；
 - `src/pal_skills.cpp`：技能领域接口到 Palworld UFunction 的游戏线程适配；
 - `inc/base_resource_sharing/resource_pool.hpp`：资源过滤、能力和恢复纯逻辑；
 - `inc/base_resource_sharing/resource_session.hpp`：目录校准调度与制作/建造会话租约；
@@ -70,7 +71,8 @@ ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反
 同一可访问世界内关闭后重新开启共享时，必须以当前世界代次重新初始化会话和目录调度器，由后续 EngineTick
 自动校准。该路径不得增加线程、全局扫描、槽位扫描或逐帧任务；恢复失败造成的本世界安全禁用不能用开关绕过。
 1.6.1 修复该开关生命周期；1.6.2 移除确认帕鲁后的空闲后台解析；1.6.3 增加首次资格计算前的资源联合、
-制作唯一 Helper 入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚。
+制作唯一 Helper 入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚；
+1.6.6 增加帕鲁属性编辑（等级/个体值/亲密度），按需在游戏线程直接写 `SaveParameter`，不增加常驻工作。
 
 本地权限门为 `IsServer && !IsDedicatedServer`。修理共享仍不可用。不要与 IntegratedStorage、
 UBIM Lite、BlueprintResearch 或其他修改相同资源路径的 mod 同时测试。
@@ -85,7 +87,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内应看到 `PalworldEditor loaded (v1.6.4)`。除物品、技能和世界切换回归外，还要验证：
+游戏内应看到 `PalworldEditor loaded (v1.6.6)`。除物品、技能和世界切换回归外，还要验证：
 
 - 关闭资源共享时，工厂和建造界面性能与未启用资源功能一致；
 - 同一世界内关闭后重新开启会自动恢复非零计数，每次重新开启只产生一次成功目录校准；
