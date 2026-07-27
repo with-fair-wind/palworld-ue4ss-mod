@@ -609,29 +609,32 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
 }
 
 /**
- * @brief 翻转游戏自带「爪钩枪无冷却」调试开关。
- * @param[in] enabled `true` 关闭爪钩枪冷却；`false` 恢复默认。
- * @warning 只能在游戏线程调用。`PalDebugSetting` 或属性不可用时静默返回（下个 dirty 周期重试）。
+ * @brief 把所有 `PalWeaponBase` 的 `CoolDownTime` 设为 ~0（开启）或默认 8（关闭）。
+ * @param[in] enabled `true` 关闭冷却；`false` 恢复默认。
+ * @details 与参考 mod 一致：爪钩枪是一个 `PalWeaponBase`，写它的 `CoolDownTime` 即可去冷却。
+ *          只用 `FindAllOf` + `FFloatProperty` 写，不调用 UFunction，避免崩溃风险。
+ *          对当前已存在的武器生效；切换装备/重进存档后由世界就绪重应用兜底。
+ * @warning 只能在游戏线程调用。
  */
 inline auto set_grapple_no_cooldown(const bool enabled) -> void {
-    // 仅用 StaticFindObject（纯查找）+ 属性写；不调用任何 UFunction，避免崩溃风险。
-    auto* const debug = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalDebugSetting"));
-    if (!is_valid(debug)) {
-        Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: grapple no-CD: PalDebugSetting CDO unavailable (no-op)\n"));
-        return;
+    std::vector<UObject*> weapons;
+    UObjectGlobals::FindAllOf(STR("PalWeaponBase"), weapons);
+    const float targetCoolDown = enabled ? 0.1F : 8.0F;
+    int32 applied{};
+    for (auto* weapon : weapons) {
+        if (!is_valid(weapon)) {
+            continue;
+        }
+        auto* const property = weapon->GetPropertyByNameInChain(STR("CoolDownTime"));
+        auto* const floatProperty = CastField<FFloatProperty>(property);
+        if (floatProperty != nullptr) {
+            floatProperty->SetPropertyValueInContainer(weapon, targetCoolDown);
+            ++applied;
+        }
     }
-    auto* const property = debug->GetPropertyByNameInChain(STR("bDisableGrapplingCoolDown"));
-    auto* const boolProperty = CastField<FBoolProperty>(property);
-    if (boolProperty == nullptr) {
-        Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: grapple no-CD: bDisableGrapplingCoolDown property not found\n"));
-        return;
-    }
-    boolProperty->SetPropertyValueInContainer(debug, enabled);
     Output::send<LogLevel::Warning>(
-        STR("PalworldEditor: grapple no-CD applied ({})\n"), static_cast<int32>(enabled));
+        STR("PalworldEditor: grapple no-CD: set {} weapons, enabled={}\n"), applied,
+        static_cast<int32>(enabled));
 }
 
 /**
