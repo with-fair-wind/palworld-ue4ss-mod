@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.4），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.6.7），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -145,15 +145,16 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 
 本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先恢复活动联合再注销
 资源 Hook。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
-校准、联合建立及恢复耗时。配置位于 `ue4ss/Mods/PalworldEditor/config.ini`，仅包含
-`[BaseResourceSharing]` 下的 `Enabled=true|false`。不要与 IntegratedStorage、UBIM Lite、
+校准、联合建立及恢复耗时。配置位于 `ue4ss/Mods/PalworldEditor/config.ini`，包含
+`[BaseResourceSharing]` 的 `Enabled` 与 `[GrapplingHook]` 的 `NoCooldown`（均 `true|false`，缺省回退关闭）。不要与 IntegratedStorage、UBIM Lite、
 BlueprintResearch 或等价的资源路径 mod 同时启用。
 
 同一可访问世界内从关闭切换为开启时，资源桥必须按当前世界代次重新初始化会话和目录调度器，并由后续
 EngineTick 自动执行一次既有的管理器目录校准。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局
 UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
 开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
-入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的差量应用和失败回滚，不增加逐帧工作。
+入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的差量应用和失败回滚，不增加逐帧工作；
+1.6.7 增加爪钩枪无冷却开关（翻转 `PalDebugSetting.bDisableGrapplingCoolDown`），按需游戏线程应用、世界就绪重应用，不增加逐帧工作。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -186,7 +187,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.4)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.7)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
