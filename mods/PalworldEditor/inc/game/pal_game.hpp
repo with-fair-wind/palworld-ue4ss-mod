@@ -614,10 +614,21 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
  * @warning 只能在游戏线程调用。`PalDebugSetting` 或属性不可用时静默返回（下个 dirty 周期重试）。
  */
 inline auto set_grapple_no_cooldown(const bool enabled) -> void {
-    auto* const debug = UObjectGlobals::FindFirstOf(STR("PalDebugSetting"));
+    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const getter = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalUtility:GetPalDebugSetting"));
+    UObject* debug{};
+    if (utility != nullptr && getter != nullptr) {
+        struct Params {
+            UObject* ReturnValue{};
+        } params;
+        utility->ProcessEvent(getter, &params);
+        debug = params.ReturnValue;
+    }
     if (!is_valid(debug)) {
         Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: grapple no-CD: PalDebugSetting not found via FindFirstOf\n"));
+            STR("PalworldEditor: grapple no-CD: GetPalDebugSetting returned null\n"));
         return;
     }
     auto* const property = debug->GetPropertyByNameInChain(STR("bDisableGrapplingCoolDown"));
