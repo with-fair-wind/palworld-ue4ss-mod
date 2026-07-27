@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -36,6 +37,7 @@
 #include <skills/passive_skill_presets.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/world_session_state.hpp>
+#include <support/text_encoding.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;
@@ -54,18 +56,18 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.6.4");
+        ModVersion = STR("1.6.5");
         ModDescription =
             STR("Item, Pal skill, and same-guild base resource editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.4)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.5)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.6.4", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.6.5", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -341,10 +343,9 @@ public:
             skill_editor::SkillCatalogRefreshScheduler::clock::now(),
             [] { return pal_game::is_valid(pal_game::get_main_container()); });
         if (refreshRequested) {
-            skillRuntimeSnapshot_.catalog = skill_editor::with_catalog_fallback(
-                skillRuntimeSnapshot_.catalog, skillGateway_.load_catalog());
-            skillSnapshotDirty_ = true;
+            refresh_skill_catalog_on_game_thread();
         }
+        advance_passive_classification_on_game_thread();
 
         const auto update_runtime_value = [this](auto& current, auto next) {
             if (current != next) {
@@ -383,6 +384,11 @@ public:
     }
 
 private:
+    /** @brief 每个 EngineTick 最多尝试分类的被动技能数量。 */
+    static constexpr std::size_t kPassiveMetadataBatchSize = 8;
+    /** @brief 每个 EngineTick 被动技能分类反射的软时间预算。 */
+    static constexpr auto kPassiveMetadataBudget = std::chrono::microseconds{500};
+
     /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
     static auto unregister_callback(Hook::GlobalCallbackId& callbackId) -> void {
         if (callbackId == Hook::ERROR_ID) {
@@ -395,10 +401,113 @@ private:
         callbackId = Hook::ERROR_ID;
     }
 
+    /**
+     * @brief 在游戏线程刷新技能目录，并为成功的被动目录建立增量分类任务。
+     * @details 目录失败时沿用既有分类任务和回退快照；成功时先合并生命周期缓存，
+     *          仅把未缓存 ID 排入后续 EngineTick。
+     */
+    auto refresh_skill_catalog_on_game_thread() -> void {
+        const auto previous = skillRuntimeSnapshot_.catalog;
+        auto refreshed = skillGateway_.load_catalog();
+        const bool passiveRefreshSucceeded = refreshed.passive.ready;
+        skillRuntimeSnapshot_.catalog = skill_editor::with_catalog_fallback(previous, refreshed);
+
+        if (passiveRefreshSucceeded) {
+            hadUsablePassiveClassificationBeforeRefresh_ = previous.passiveClassification.ready;
+            skill_editor::apply_passive_metadata(skillRuntimeSnapshot_.catalog.passive.skills,
+                                                 passiveSkillMetadataCache_);
+            passiveClassificationJob_.start(skillRuntimeSnapshot_.catalog.passive.skills,
+                                            passiveSkillMetadataCache_);
+            const auto status = passiveClassificationJob_.status();
+            skillRuntimeSnapshot_.catalog.passiveClassification = status;
+            passiveClassificationCompleted_.store(status.completed, std::memory_order_relaxed);
+            passiveClassificationTotal_.store(status.total, std::memory_order_relaxed);
+            passiveClassificationElapsed_ = {};
+            passiveClassificationTicks_ = 0;
+            if (!passiveClassificationJob_.active()) {
+                finish_passive_classification_on_game_thread();
+            }
+        }
+        skillSnapshotDirty_ = true;
+    }
+
+    /**
+     * @brief 在当前 EngineTick 推进最多一个受数量和时间约束的分类批次。
+     */
+    auto advance_passive_classification_on_game_thread() -> void {
+        if (!passiveClassificationJob_.active()) {
+            return;
+        }
+
+        const auto ids = passiveClassificationJob_.next_batch(kPassiveMetadataBatchSize);
+        const auto batch = skillGateway_.load_passive_skill_metadata_batch(
+            ids, kPassiveMetadataBatchSize, kPassiveMetadataBudget);
+        passiveClassificationElapsed_ += batch.elapsed;
+        ++passiveClassificationTicks_;
+
+        if (!batch.error.empty()) {
+            passiveClassificationJob_.fail(batch.error);
+            finish_passive_classification_on_game_thread();
+            return;
+        }
+        if (batch.entries.empty()) {
+            passiveClassificationJob_.fail("passive metadata batch made no progress");
+            finish_passive_classification_on_game_thread();
+            return;
+        }
+        if (!passiveClassificationJob_.complete_batch(batch.entries, passiveSkillMetadataCache_)) {
+            finish_passive_classification_on_game_thread();
+            return;
+        }
+
+        const auto status = passiveClassificationJob_.status();
+        passiveClassificationCompleted_.store(status.completed, std::memory_order_relaxed);
+        if (!passiveClassificationJob_.active()) {
+            finish_passive_classification_on_game_thread();
+        }
+    }
+
+    /**
+     * @brief 合并分类结果、应用失败回退并只发布一次最终目录快照。
+     */
+    auto finish_passive_classification_on_game_thread() -> void {
+        skill_editor::apply_passive_metadata(skillRuntimeSnapshot_.catalog.passive.skills,
+                                             passiveSkillMetadataCache_);
+        auto status = skill_editor::with_passive_classification_fallback(
+            passiveClassificationJob_.status(), hadUsablePassiveClassificationBeforeRefresh_);
+        skillRuntimeSnapshot_.catalog.passiveClassification = status;
+        passiveClassificationCompleted_.store(status.completed, std::memory_order_relaxed);
+        passiveClassificationTotal_.store(status.total, std::memory_order_relaxed);
+        skillSnapshotDirty_ = true;
+
+        const auto known = std::ranges::count_if(skillRuntimeSnapshot_.catalog.passive.skills,
+                                                 [](const skill_editor::SkillOption& option) {
+                                                     return option.passiveMetadata.has_value();
+                                                 });
+        const auto unknown =
+            skillRuntimeSnapshot_.catalog.passive.skills.size() - static_cast<std::size_t>(known);
+        if (status.error.empty()) {
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: passive classification completed: known={}, "
+                    "unknown={}, ticks={}, elapsed_us={}\n"),
+                known, unknown, passiveClassificationTicks_, passiveClassificationElapsed_.count());
+        } else {
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: passive classification failed after {}/{}: {}; "
+                    "ticks={}, elapsed_us={}\n"),
+                status.completed, status.total, text_encoding::widen_ascii(status.error),
+                passiveClassificationTicks_, passiveClassificationElapsed_.count());
+        }
+    }
+
     /** @brief Invalidates all work and write authorization before Unreal replaces the world. */
     auto begin_world_transition() -> void {
         baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
+        passiveClassificationJob_.cancel();
+        passiveClassificationCompleted_.store(0, std::memory_order_relaxed);
+        passiveClassificationTotal_.store(0, std::memory_order_relaxed);
+        hadUsablePassiveClassificationBeforeRefresh_ = false;
         skillQueue_.clear();
         {
             const std::lock_guard lock(selectionRequestMutex_);
@@ -531,6 +640,19 @@ private:
     }
 
     /**
+     * @brief 在技能目录中查找 Raw ID 对应的目录项。
+     * @param[in] options 要搜索的技能目录值列表。
+     * @param[in] id 技能 Raw ID。
+     * @return 找到时返回非空、非拥有的目录项指针；未找到时返回 `nullptr`。
+     */
+    [[nodiscard]] static auto find_skill_option(
+        const std::vector<skill_editor::SkillOption>& options, const std::string_view id)
+        -> const skill_editor::SkillOption* {
+        const auto found = std::ranges::find(options, id, &skill_editor::SkillOption::id);
+        return found == options.end() ? nullptr : &*found;
+    }
+
+    /**
      * @brief 清空与上一个技能目标相关的 GUI 临时编辑状态。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
      * @warning 只在 GUI 线程调用。
@@ -539,7 +661,7 @@ private:
         self->passivePresetIndex_.reset();
         self->passiveEditIndex_ = -1;
         self->activeEditSlot_ = -1;
-        self->passiveChoice_.reset();
+        self->passivePickerState_.reset();
         self->activeChoice_.reset();
         self->passiveSearch_[0] = '\0';
         self->activeSearch_[0] = '\0';
@@ -685,6 +807,165 @@ private:
     }
 
     /**
+     * @brief 返回被动技能分类在界面上的固定中文名称。
+     * @param[in] category 具体类别；空值表示“全部”。
+     * @return 类别名称字面量；调用方无需释放。
+     */
+    [[nodiscard]] static auto passive_category_label(
+        const std::optional<skill_editor::PassiveSkillCategory> category) -> const char* {
+        if (!category.has_value()) {
+            return "全部";
+        }
+        switch (*category) {
+            case skill_editor::PassiveSkillCategory::normal:
+                return "普通";
+            case skill_editor::PassiveSkillCategory::rare:
+                return "稀有";
+            case skill_editor::PassiveSkillCategory::premium:
+                return "极品";
+            case skill_editor::PassiveSkillCategory::legendary:
+                return "传说";
+            case skill_editor::PassiveSkillCategory::negative:
+                return "负面";
+        }
+        return "全部";
+    }
+
+    /**
+     * @brief 返回被动技能分类在界面上的着色。
+     * @param[in] category 具体类别。
+     * @return 普通/稀有/极品/传说/负面分别对应白/黄/蓝/紫/红的 ImGui 颜色。
+     */
+    [[nodiscard]] static auto passive_category_color(
+        const skill_editor::PassiveSkillCategory category) -> ImVec4 {
+        switch (category) {
+            case skill_editor::PassiveSkillCategory::normal:
+                return {0.92F, 0.92F, 0.92F, 1.0F};
+            case skill_editor::PassiveSkillCategory::rare:
+                return {1.0F, 0.82F, 0.20F, 1.0F};
+            case skill_editor::PassiveSkillCategory::premium:
+                return {0.30F, 0.65F, 1.0F, 1.0F};
+            case skill_editor::PassiveSkillCategory::legendary:
+                return {0.72F, 0.40F, 1.0F, 1.0F};
+            case skill_editor::PassiveSkillCategory::negative:
+                return {1.0F, 0.30F, 0.30F, 1.0F};
+        }
+        return {1.0F, 1.0F, 1.0F, 1.0F};
+    }
+
+    /**
+     * @brief 渲染被动技能类别下拉框和分类进度/错误提示。
+     * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
+     * @param[in] catalog 当前技能目录快照。
+     * @details 顺序固定为“全部”与五个具体类别；分类未就绪时具体类别禁用。进度和错误直接
+     *          读取原子字段与分类状态，不复制完整技能目录。结构性失败但已有旧分类时具体类别
+     *          仍可用，并提示“正在使用上一次成功分类”。
+     * @warning 只在 GUI 线程调用。
+     */
+    static void render_passive_category_picker(PalworldEditorMod* self,
+                                               const skill_editor::SkillCatalogSnapshot& catalog) {
+        const auto& classification = catalog.passiveClassification;
+        const bool ready = classification.ready;
+        const auto completed =
+            self->passiveClassificationCompleted_.load(std::memory_order_relaxed);
+        const auto total = self->passiveClassificationTotal_.load(std::memory_order_relaxed);
+
+        ImGui::SetNextItemWidth(160.0F);
+        if (ImGui::BeginCombo("类别##passive-category",
+                              passive_category_label(self->passivePickerState_.category))) {
+            if (ImGui::Selectable("全部", !self->passivePickerState_.category.has_value())) {
+                (void)self->passivePickerState_.set_category(std::nullopt);
+            }
+            const skill_editor::PassiveSkillCategory concreteCategories[] = {
+                skill_editor::PassiveSkillCategory::normal,
+                skill_editor::PassiveSkillCategory::rare,
+                skill_editor::PassiveSkillCategory::premium,
+                skill_editor::PassiveSkillCategory::legendary,
+                skill_editor::PassiveSkillCategory::negative,
+            };
+            ImGui::BeginDisabled(!ready);
+            for (const auto category : concreteCategories) {
+                const bool isCurrent = self->passivePickerState_.category == category;
+                ImGui::PushStyleColor(ImGuiCol_Text, passive_category_color(category));
+                if (ImGui::Selectable(passive_category_label(category), isCurrent)) {
+                    (void)self->passivePickerState_.set_category(category);
+                }
+                ImGui::PopStyleColor();
+            }
+            ImGui::EndDisabled();
+            ImGui::EndCombo();
+        }
+
+        if (!ready && classification.error.empty()) {
+            ImGui::TextDisabled("正在读取被动技能分类：%d/%d", static_cast<int>(completed),
+                                static_cast<int>(total));
+        } else if (!classification.error.empty()) {
+            if (ready) {
+                ImGui::TextColored(passive_category_color(skill_editor::PassiveSkillCategory::rare),
+                                   "正在使用上一次成功分类（本次读取失败：%s）",
+                                   classification.error.c_str());
+            } else {
+                ImGui::TextColored(
+                    passive_category_color(skill_editor::PassiveSkillCategory::negative),
+                    "被动技能分类失败：%s（仅“全部”可用）", classification.error.c_str());
+            }
+        }
+    }
+
+    /**
+     * @brief 渲染按类别、排除集合和搜索词过滤的被动技能下拉框。
+     * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
+     * @param[in] options 当前被动技能目录。
+     * @param[in] excludedIds 已装备且不应再次选择的被动技能 Raw ID。
+     * @retval true 本帧用户选择了不同的目录项。
+     * @retval false 选择未发生变化。
+     * @details 搜索同时匹配中文名与 Raw ID；有分类元数据的条目按类别着色，未知元数据在“全部”
+     *          中使用默认文本色。当前选择不可见时不自动改写其 ID，仅类别变化按规则清空选择。
+     * @warning 搜索缓冲区和选择状态只由 GUI 线程访问。
+     */
+    static auto render_passive_skill_picker(PalworldEditorMod* self,
+                                            const std::vector<skill_editor::SkillOption>& options,
+                                            const std::unordered_set<std::string>& excludedIds)
+        -> bool {
+        const auto& selected = self->passivePickerState_.selected;
+        const std::string preview =
+            selected.has_value() ? skill_editor::skill_label(*selected) : "请选择技能";
+        const bool coloredPreview = selected.has_value() && selected->passiveMetadata.has_value();
+        if (coloredPreview) {
+            ImGui::PushStyleColor(ImGuiCol_Text,
+                                  passive_category_color(selected->passiveMetadata->category));
+        }
+        bool changed = false;
+        if (ImGui::BeginCombo("##passive-skill-picker", preview.c_str())) {
+            ImGui::SetNextItemWidth(340.0F);
+            ImGui::InputText("搜索##passive-skill-search", self->passiveSearch_,
+                             sizeof(self->passiveSearch_));
+            const auto visible = skill_editor::filter_passive_skills(
+                options, self->passivePickerState_.category, self->passiveSearch_, excludedIds);
+            for (const auto& option : visible) {
+                const auto label = skill_editor::skill_label(option);
+                const bool isSelected = selected.has_value() && selected->id == option.id;
+                if (option.passiveMetadata.has_value()) {
+                    ImGui::PushStyleColor(ImGuiCol_Text,
+                                          passive_category_color(option.passiveMetadata->category));
+                }
+                if (ImGui::Selectable(label.c_str(), isSelected)) {
+                    self->passivePickerState_.selected = option;
+                    changed = true;
+                }
+                if (option.passiveMetadata.has_value()) {
+                    ImGui::PopStyleColor();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        if (coloredPreview) {
+            ImGui::PopStyleColor();
+        }
+        return changed;
+    }
+
+    /**
      * @brief 渲染被动技能列表及新增、替换、删除工作流。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
      * @param[in] snapshot 当前技能目标、目录和实际状态的值快照。
@@ -730,7 +1011,7 @@ private:
                 presets[*self->passivePresetIndex_], snapshot.targetGeneration,
                 snapshot.worldGeneration));
             self->passiveEditIndex_ = -1;
-            self->passiveChoice_.reset();
+            self->passivePickerState_.clear_selection();
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
@@ -743,14 +1024,20 @@ private:
         ImGui::BeginDisabled(mutationsDisabled);
         for (std::size_t index = 0; index < snapshot.state.passiveIds.size(); ++index) {
             const auto& id = snapshot.state.passiveIds[index];
-            const auto label = find_skill_label(snapshot.catalog.passive.skills, id);
-            ImGui::Text("%d. %s", static_cast<int>(index + 1), label.c_str());
+            const auto* option = find_skill_option(snapshot.catalog.passive.skills, id);
+            const auto label =
+                option != nullptr ? skill_editor::skill_label(*option) : std::string(id);
+            if (option != nullptr && option->passiveMetadata.has_value()) {
+                ImGui::TextColored(passive_category_color(option->passiveMetadata->category),
+                                   "%d. %s", static_cast<int>(index + 1), label.c_str());
+            } else {
+                ImGui::Text("%d. %s", static_cast<int>(index + 1), label.c_str());
+            }
             ImGui::SameLine();
             const auto replaceId = "替换##passive-" + std::to_string(index);
             if (ImGui::Button(replaceId.c_str())) {
                 self->passiveEditIndex_ = static_cast<int>(index);
-                self->passiveChoice_.reset();
-                self->passiveSearch_[0] = '\0';
+                self->passivePickerState_.clear_selection();
             }
             ImGui::SameLine();
             const auto removeId = "删除##passive-" + std::to_string(index);
@@ -761,7 +1048,7 @@ private:
                                         .operation = skill_editor::SkillEditOperation::remove,
                                         .oldPassiveId = id});
                 self->passiveEditIndex_ = -1;
-                self->passiveChoice_.reset();
+                self->passivePickerState_.clear_selection();
             }
         }
 
@@ -770,8 +1057,7 @@ private:
         }
         if (snapshot.state.passiveIds.size() < 4 && ImGui::Button("新增被动技能")) {
             self->passiveEditIndex_ = -2;
-            self->passiveChoice_.reset();
-            self->passiveSearch_[0] = '\0';
+            self->passivePickerState_.clear_selection();
         }
         ImGui::EndDisabled();
 
@@ -782,11 +1068,10 @@ private:
         const bool replacing = self->passiveEditIndex_ >= 0;
         ImGui::TextUnformatted(replacing ? "选择替换后的被动技能：" : "选择要新增的被动技能：");
         ImGui::BeginDisabled(mutationsDisabled || !snapshot.catalog.passive.ready);
-        render_skill_picker("##passive-picker", snapshot.catalog.passive.skills, excluded,
-                            self->passiveSearch_, sizeof(self->passiveSearch_),
-                            self->passiveChoice_);
+        render_passive_category_picker(self, snapshot.catalog);
+        render_passive_skill_picker(self, snapshot.catalog.passive.skills, excluded);
         const bool canConfirm =
-            self->passiveChoice_.has_value() &&
+            self->passivePickerState_.selected.has_value() &&
             (!replacing ||
              self->passiveEditIndex_ < static_cast<int>(snapshot.state.passiveIds.size()));
         ImGui::BeginDisabled(!canConfirm);
@@ -797,7 +1082,7 @@ private:
                 .kind = skill_editor::SkillKind::passive,
                 .operation = replacing ? skill_editor::SkillEditOperation::replace
                                        : skill_editor::SkillEditOperation::add,
-                .newPassiveId = self->passiveChoice_->id,
+                .newPassiveId = self->passivePickerState_.selected->id,
             };
             if (replacing) {
                 request.oldPassiveId =
@@ -805,14 +1090,14 @@ private:
             }
             self->skillQueue_.push(std::move(request));
             self->passiveEditIndex_ = -1;
-            self->passiveChoice_.reset();
+            self->passivePickerState_.clear_selection();
         }
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("取消##passive")) {
             self->passiveEditIndex_ = -1;
-            self->passiveChoice_.reset();
+            self->passivePickerState_.clear_selection();
         }
     }
 
@@ -963,8 +1248,8 @@ private:
                        return option.id == choice->id;
                    });
         };
-        if (!choiceStillExists(self->passiveChoice_, snapshot.catalog.passive)) {
-            self->passiveChoice_.reset();
+        if (!choiceStillExists(self->passivePickerState_.selected, snapshot.catalog.passive)) {
+            self->passivePickerState_.clear_selection();
         }
         if (!choiceStillExists(self->activeChoice_, snapshot.catalog.active)) {
             self->activeChoice_.reset();
@@ -1142,6 +1427,20 @@ private:
     /** @brief 启动阶段每两秒重试一次完整技能目录加载。 */
     skill_editor::SkillCatalogRefreshScheduler skillCatalogRefreshScheduler_{
         std::chrono::seconds{2}};
+    /** @brief 跨 EngineTick 但不含 Unreal 指针的被动技能分类任务。 */
+    skill_editor::PassiveSkillClassificationJob passiveClassificationJob_;
+    /** @brief mod 生命周期内成功读取的被动技能分类纯值缓存。 */
+    std::unordered_map<std::string, skill_editor::PassiveSkillMetadata> passiveSkillMetadataCache_;
+    /** @brief GUI 可无锁读取的当前分类完成数。 */
+    std::atomic<std::size_t> passiveClassificationCompleted_{0};
+    /** @brief GUI 可无锁读取的当前分类总数。 */
+    std::atomic<std::size_t> passiveClassificationTotal_{0};
+    /** @brief 本轮刷新前是否已有可供失败回退的具体类别快照。 */
+    bool hadUsablePassiveClassificationBeforeRefresh_{};
+    /** @brief 本轮所有分类批次累计占用的游戏线程时间。 */
+    std::chrono::microseconds passiveClassificationElapsed_{};
+    /** @brief 本轮分类实际消耗的 EngineTick 数。 */
+    std::size_t passiveClassificationTicks_{};
     /** @brief 被动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */
     char passiveSearch_[96]{};
     /** @brief 主动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */
@@ -1153,8 +1452,8 @@ private:
     int passiveEditIndex_ = -1;
     /** @brief 主动技能编辑槽位；`-1` 表示未编辑，非负值表示 `EquipWaza` 槽位。 */
     int activeEditSlot_ = -1;
-    /** @brief 被动技能下拉框当前选择的目录值；只由 GUI 线程访问。 */
-    std::optional<skill_editor::SkillOption> passiveChoice_;
+    /** @brief 被动技能两级选择器的类别与当前选择；只由 GUI 线程访问。 */
+    skill_editor::PassiveSkillPickerState passivePickerState_;
     /** @brief 主动技能下拉框当前选择的目录值；只由 GUI 线程访问。 */
     std::optional<skill_editor::SkillOption> activeChoice_;
     /** @brief 词条预设下拉框当前选择的静态目录索引；只由 GUI 线程访问。 */
