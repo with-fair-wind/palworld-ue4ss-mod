@@ -96,8 +96,8 @@ struct PassiveSkillPickerState {
      * @param[in] nextCategory 新类别；空值表示“全部”。
      * @return 类别发生变化时返回 `true`。
      */
-    [[nodiscard]] auto set_category(
-        const std::optional<PassiveSkillCategory> nextCategory) noexcept -> bool {
+    [[nodiscard]] auto set_category(const std::optional<PassiveSkillCategory> nextCategory) noexcept
+        -> bool {
         if (category == nextCategory) {
             return false;
         }
@@ -122,7 +122,7 @@ struct PassiveSkillPickerState {
  * @brief 表示一次被动技能元数据读取的纯值结果。
  */
 struct PassiveSkillMetadataReadResult {
-    std::string id;                             /**< 已尝试读取的技能 Raw ID。 */
+    std::string id;                               /**< 已尝试读取的技能 Raw ID。 */
     std::optional<PassiveSkillMetadata> metadata; /**< 成功时的元数据；空值表示该 ID 未找到。 */
 };
 
@@ -131,8 +131,8 @@ struct PassiveSkillMetadataReadResult {
  */
 struct PassiveSkillMetadataBatchResult {
     std::vector<PassiveSkillMetadataReadResult> entries; /**< 已实际完成的 ID 结果。 */
-    std::string error; /**< 阻止后续读取的结构性反射错误。 */
-    std::chrono::microseconds elapsed{}; /**< 本批次在游戏线程中的总耗时。 */
+    std::string error;                                   /**< 阻止后续读取的结构性反射错误。 */
+    std::chrono::microseconds elapsed{};                 /**< 本批次在游戏线程中的总耗时。 */
 };
 
 /**
@@ -146,6 +146,21 @@ struct PassiveSkillClassificationStatus {
 };
 
 /**
+ * @brief 在刷新分类失败时决定具体类别是否仍可使用。
+ * @param[in] status 本轮分类任务的最终状态。
+ * @param[in] hadUsableSnapshot 刷新开始前是否已有完整可用的分类快照。
+ * @return 保留原错误和进度；仅在已有旧分类时恢复具体类别可用状态。
+ */
+[[nodiscard]] inline auto with_passive_classification_fallback(
+    PassiveSkillClassificationStatus status, const bool hadUsableSnapshot)
+    -> PassiveSkillClassificationStatus {
+    if (!status.error.empty() && hadUsableSnapshot) {
+        status.ready = true;
+    }
+    return status;
+}
+
+/**
  * @brief 管理跨 EngineTick 的被动技能分类纯值状态。
  * @details 该类不接触 Unreal，也不拥有成功缓存；LoadMap 可安全取消任务而保留外部缓存。
  */
@@ -156,9 +171,8 @@ public:
      * @param[in] options 当前被动技能目录。
      * @param[in] successCache mod 生命周期内的成功元数据缓存。
      */
-    void start(
-        const std::span<const SkillOption> options,
-        const std::unordered_map<std::string, PassiveSkillMetadata>& successCache) {
+    void start(const std::span<const SkillOption> options,
+               const std::unordered_map<std::string, PassiveSkillMetadata>& successCache) {
         cancel();
         started_ = true;
         total_ = options.size();
@@ -323,10 +337,10 @@ struct SkillCatalogSection {
  * @brief 保存相互独立的被动与主动技能目录刷新状态。
  */
 struct SkillCatalogSnapshot {
-    SkillCatalogSection passive; /**< 被动技能目录区段。 */
-    SkillCatalogSection active;  /**< 主动技能目录区段。 */
+    SkillCatalogSection passive;                            /**< 被动技能目录区段。 */
+    SkillCatalogSection active;                             /**< 主动技能目录区段。 */
     PassiveSkillClassificationStatus passiveClassification; /**< 被动技能分类任务状态。 */
-    bool runtimeReady{};         /**< 游戏技能与本地化运行时已完成一次完整加载。 */
+    bool runtimeReady{}; /**< 游戏技能与本地化运行时已完成一次完整加载。 */
 };
 
 /**
@@ -412,9 +426,8 @@ private:
     return {
         .passive = with_section_fallback(previous.passive, refreshed.passive),
         .active = with_section_fallback(previous.active, refreshed.active),
-        .passiveClassification =
-            refreshed.passive.ready ? refreshed.passiveClassification
-                                    : previous.passiveClassification,
+        .passiveClassification = refreshed.passive.ready ? refreshed.passiveClassification
+                                                         : previous.passiveClassification,
         .runtimeReady = previous.runtimeReady || refreshed.runtimeReady,
     };
 }
@@ -509,15 +522,15 @@ private:
  * @param[in] excludedIds 已装备且不应再次选择的被动技能 Raw ID。
  * @return 按“类别、排除、搜索”顺序过滤后的技能值副本。
  */
-[[nodiscard]] inline auto filter_passive_skills(
-    const std::span<const SkillOption> options,
-    const std::optional<PassiveSkillCategory> category, const std::string_view query,
-    const std::unordered_set<std::string>& excludedIds) -> std::vector<SkillOption> {
+[[nodiscard]] inline auto filter_passive_skills(const std::span<const SkillOption> options,
+                                                const std::optional<PassiveSkillCategory> category,
+                                                const std::string_view query,
+                                                const std::unordered_set<std::string>& excludedIds)
+    -> std::vector<SkillOption> {
     std::vector<SkillOption> result;
     for (const auto& option : options) {
-        if (category.has_value() &&
-            (!option.passiveMetadata.has_value() ||
-             option.passiveMetadata->category != *category)) {
+        if (category.has_value() && (!option.passiveMetadata.has_value() ||
+                                     option.passiveMetadata->category != *category)) {
             continue;
         }
         if (excludedIds.contains(option.id) || !matches_skill(option, query)) {
