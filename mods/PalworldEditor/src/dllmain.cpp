@@ -257,14 +257,17 @@ public:
             worldLifecycleCallbacksReady_.load();
 
         std::optional<skill_editor::SkillEditRequest> editRequest;
+        std::optional<pal_stats::PalStatEditRequest> statRequest;
         if (selectionRequested) {
             skillQueue_.clear();
+            statQueue_.clear();
         } else {
             editRequest = skillQueue_.try_pop();
+            statRequest = statQueue_.try_pop();
         }
 
-        const auto trigger =
-            skill_editor::decide_pal_resolution(selectionRequested, editRequest.has_value());
+        const auto trigger = skill_editor::decide_pal_resolution(
+            selectionRequested, editRequest.has_value() || statRequest.has_value());
         std::optional<pal_game::SelectedPalTarget> resolvedPal;
         if (trigger != skill_editor::PalResolutionTrigger::none) {
             resolvedPal = pal_game::resolve_selected_otomo();
@@ -338,10 +341,6 @@ public:
             skillSnapshotDirty_ = true;
         }
 
-        std::optional<pal_stats::PalStatEditRequest> statRequest;
-        if (!selectionRequested) {
-            statRequest = statQueue_.try_pop();
-        }
         if (statRequest.has_value()) {
             const bool generationCurrent =
                 selectedTarget_.generation() == statRequest->targetGeneration &&
