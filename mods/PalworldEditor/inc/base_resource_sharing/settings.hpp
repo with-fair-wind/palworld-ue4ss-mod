@@ -7,6 +7,7 @@
 namespace base_resource_sharing {
 struct Settings {
     bool enabled{};
+    bool grappleNoCooldown{};
 };
 
 struct SettingsParseResult {

@@ -25,22 +25,53 @@ void check(const bool condition, const char* expression, const int line) {
 void test_settings_default_off_and_round_trip() {
     using namespace base_resource_sharing;
 
-    const auto missing = parse_settings("");
-    CHECK(!missing.settings.enabled);
-    CHECK(!missing.error.empty());
+    // 空配置：两节均缺省，不再视为错误（失败安全回退为全关）。
+    const auto empty = parse_settings("");
+    CHECK(!empty.settings.enabled);
+    CHECK(!empty.settings.grappleNoCooldown);
+    CHECK(empty.error.empty());
 
-    const auto enabled = parse_settings(
+    // 仅资源共享节。
+    const auto sharing = parse_settings(
         "[BaseResourceSharing]\n"
         "Enabled=true\n");
-    CHECK(enabled.settings.enabled);
-    CHECK(enabled.error.empty());
-    CHECK(serialize_settings(enabled.settings) == "[BaseResourceSharing]\nEnabled=true\n");
+    CHECK(sharing.settings.enabled);
+    CHECK(!sharing.settings.grappleNoCooldown);
+    CHECK(sharing.error.empty());
 
+    // 仅爪钩枪节。
+    const auto grapple = parse_settings(
+        "[GrapplingHook]\n"
+        "NoCooldown=true\n");
+    CHECK(!grapple.settings.enabled);
+    CHECK(grapple.settings.grappleNoCooldown);
+    CHECK(grapple.error.empty());
+
+    // 两节共存、任意顺序。
+    const auto both = parse_settings(
+        "[GrapplingHook]\n"
+        "NoCooldown=true\n"
+        "[BaseResourceSharing]\n"
+        "Enabled=true\n");
+    CHECK(both.settings.enabled);
+    CHECK(both.settings.grappleNoCooldown);
+    CHECK(both.error.empty());
+    CHECK(serialize_settings(both.settings) ==
+          "[BaseResourceSharing]\nEnabled=true\n[GrapplingHook]\nNoCooldown=true\n");
+
+    // 节内非法值仍失败安全。
     const auto invalid = parse_settings(
         "[BaseResourceSharing]\n"
         "Enabled=maybe\n");
     CHECK(!invalid.settings.enabled);
     CHECK(!invalid.error.empty());
+
+    // 未知键仍拒绝。
+    const auto unknown = parse_settings(
+        "[GrapplingHook]\n"
+        "Bogus=true\n");
+    CHECK(!unknown.settings.grappleNoCooldown);
+    CHECK(!unknown.error.empty());
 }
 
 void test_settings_file_round_trip() {
@@ -54,12 +85,14 @@ void test_settings_file_round_trip() {
 
     const auto missing = load_settings(path);
     CHECK(!missing.settings.enabled);
+    CHECK(!missing.settings.grappleNoCooldown);
     CHECK(!missing.error.empty());
     CHECK(!std::filesystem::exists(path));
 
-    CHECK(save_settings(path, Settings{.enabled = true}).empty());
+    CHECK(save_settings(path, Settings{.enabled = true, .grappleNoCooldown = true}).empty());
     const auto loaded = load_settings(path);
     CHECK(loaded.settings.enabled);
+    CHECK(loaded.settings.grappleNoCooldown);
     CHECK(loaded.error.empty());
 
     std::filesystem::remove_all(root, ignored);
