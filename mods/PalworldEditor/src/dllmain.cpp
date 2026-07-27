@@ -74,6 +74,8 @@ public:
                 ImGui::Separator();
                 render_base_resource_sharing(self);
                 ImGui::Separator();
+                render_grapple_no_cooldown(self);
+                ImGui::Separator();
                 render_pal_editor(self);
                 ImGui::Separator();
                 if (ImGui::Button("Discover")) {
@@ -99,6 +101,8 @@ public:
         const auto loaded = base_resource_sharing::load_settings(configPath_);
         requestedBaseSharingEnabled_.store(loaded.settings.enabled);
         baseSharingSettingDirty_.store(true);
+        requestedGrappleNoCooldown_.store(loaded.settings.grappleNoCooldown);
+        grappleSettingDirty_.store(true);
         baseResourceBridge_.set_config_error(loaded.error);
     }
 
@@ -180,6 +184,9 @@ public:
 
         if (baseSharingSettingDirty_.exchange(false)) {
             baseResourceBridge_.set_enabled(requestedBaseSharingEnabled_.load());
+        }
+        if (grappleSettingDirty_.exchange(false)) {
+            pal_game::set_grapple_no_cooldown(requestedGrappleNoCooldown_.load());
         }
         baseResourceBridge_.ensure_hooks_registered();
         baseResourceBridge_.tick(deltaSeconds);
@@ -458,6 +465,7 @@ private:
         }
         worldSession_.finish_transition();
         baseResourceBridge_.on_world_ready(worldSession_.generation());
+        grappleSettingDirty_.store(true);
         want_read_.store(true);
         want_scan_items_.store(true);
         wantRefreshSkillCatalog_.store(true);
@@ -921,7 +929,10 @@ private:
                 self->configPath_.empty()
                     ? std::string{"配置路径尚未初始化，设置未持久化。"}
                     : base_resource_sharing::save_settings(
-                          self->configPath_, base_resource_sharing::Settings{.enabled = enabled});
+                          self->configPath_,
+                          base_resource_sharing::Settings{
+                              .enabled = enabled,
+                              .grappleNoCooldown = self->requestedGrappleNoCooldown_.load()});
             self->baseResourceBridge_.set_config_error(error);
         }
 
@@ -930,6 +941,28 @@ private:
             ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s", snapshot.configError.c_str());
         }
         ImGui::TextDisabled("仅支持单人世界/本地房主；只影响制作和建造材料消耗，不合并箱子界面。");
+    }
+
+    /** @brief 渲染爪钩枪无冷却开关；切换时立即应用并持久化。 */
+    static void render_grapple_no_cooldown(PalworldEditorMod* self) {
+        bool enabled = self->requestedGrappleNoCooldown_.load();
+        if (ImGui::Checkbox("爪钩枪无冷却", &enabled)) {
+            self->requestedGrappleNoCooldown_.store(enabled);
+            self->grappleSettingDirty_.store(true);
+            self->grappleConfigError_ =
+                self->configPath_.empty()
+                    ? std::string{"配置路径尚未初始化，设置未持久化。"}
+                    : base_resource_sharing::save_settings(
+                          self->configPath_,
+                          base_resource_sharing::Settings{
+                              .enabled = self->requestedBaseSharingEnabled_.load(),
+                              .grappleNoCooldown = enabled});
+        }
+        if (!self->grappleConfigError_.empty()) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s",
+                               self->grappleConfigError_.c_str());
+        }
+        ImGui::TextDisabled("全局生效；开启后爪钩枪射击无冷却。");
     }
 
     /**
@@ -1112,6 +1145,12 @@ private:
     std::atomic<bool> requestedBaseSharingEnabled_{false};
     /** @brief 通知 EngineTick 消费最新资源共享偏好。 */
     std::atomic<bool> baseSharingSettingDirty_{false};
+    /** @brief 用户期望的爪钩枪无冷却偏好；EngineTick 应用到 PalDebugSetting。 */
+    std::atomic<bool> requestedGrappleNoCooldown_{false};
+    /** @brief 通知 EngineTick 把爪钩枪偏好应用到游戏（切换与世界就绪重应用）。 */
+    std::atomic<bool> grappleSettingDirty_{false};
+    /** @brief 爪钩枪配置持久化的最近错误（仅 GUI 显示）。 */
+    std::string grappleConfigError_;
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
