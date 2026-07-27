@@ -4,6 +4,10 @@
  */
 #pragma once
 
+#include <chrono>
+#include <cstddef>
+#include <span>
+
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
 
@@ -62,6 +66,20 @@ public:
      */
     auto rewrite_active(skill_editor::SkillTarget target,
                         std::span<const skill_editor::ActiveSkill> skills) -> bool override;
+
+    /**
+     * @brief 在数量和时间软预算内读取一批被动技能分类元数据。
+     * @param[in] ids 按目录顺序排列的待读取 Raw ID。
+     * @param[in] maxItems 本批最多实际调用 `GetSkillData` 的 ID 数。
+     * @param[in] budget 本批游戏线程软时间预算；每次 `ProcessEvent` 后检查。
+     * @return 已完成条目、结构性错误和实际耗时组成的纯值结果。
+     * @details manager、函数、属性和参数缓冲区均只在本次调用内有效，不跨 EngineTick 缓存。
+     *          单个 ID 未找到以空 metadata 返回，不会中止批次。
+     */
+    [[nodiscard]] auto load_passive_skill_metadata_batch(std::span<const std::string> ids,
+                                                         std::size_t maxItems,
+                                                         std::chrono::microseconds budget) const
+        -> skill_editor::PassiveSkillMetadataBatchResult;
 
     /**
      * @brief 加载全部可分配被动技能和生成的 Palworld 1.0 主动技能定义。
