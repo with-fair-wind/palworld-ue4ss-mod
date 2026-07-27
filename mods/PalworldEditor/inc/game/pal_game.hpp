@@ -609,6 +609,24 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
 }
 
 /**
+ * @brief 翻转游戏自带「爪钩枪无冷却」调试开关。
+ * @param[in] enabled `true` 关闭爪钩枪冷却；`false` 恢复默认。
+ * @warning 只能在游戏线程调用。`PalDebugSetting` 或属性不可用时静默返回（下个 dirty 周期重试）。
+ */
+inline auto set_grapple_no_cooldown(const bool enabled) -> void {
+    auto* const debug = UObjectGlobals::FindFirstOf(STR("PalDebugSetting"));
+    if (!is_valid(debug)) {
+        return;
+    }
+    auto* const property = debug->GetPropertyByNameInChain(STR("bDisableGrapplingCoolDown"));
+    auto* const boolProperty = CastField<FBoolProperty>(property);
+    if (boolProperty == nullptr) {
+        return;
+    }
+    boolProperty->SetPropertyValueInContainer(debug, enabled);
+}
+
+/**
  * @brief 输出与 PalworldEditor 关注对象相关的 UObject 类名直方图。
  * @details 扫描全部已加载 UObject，只统计类名包含 kDiscoveryKeywords 任一关键字的对象，
  *          并按类名最多输出 200 条计数记录。
