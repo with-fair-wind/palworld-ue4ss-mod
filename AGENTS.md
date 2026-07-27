@@ -154,7 +154,7 @@ EngineTick 自动执行一次既有的管理器目录校准。不得在 GUI 回�
 UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
 开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
 入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的差量应用和失败回滚，不增加逐帧工作；
-1.6.7 增加爪钩枪无冷却开关（翻转 `PalDebugSetting.bDisableGrapplingCoolDown`），按需游戏线程应用、世界就绪重应用，不增加逐帧工作。
+1.6.7 增加爪钩枪无冷却开关（写 `PalWeaponBase.CoolDownTime`，与参考 mod 一致），按需游戏线程应用、世界就绪重应用，不增加逐帧工作。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在

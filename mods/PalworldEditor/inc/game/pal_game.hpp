@@ -620,7 +620,6 @@ inline auto set_grapple_no_cooldown(const bool enabled) -> void {
     std::vector<UObject*> weapons;
     UObjectGlobals::FindAllOf(STR("PalWeaponBase"), weapons);
     const float targetCoolDown = enabled ? 0.1F : 8.0F;
-    int32 applied{};
     for (auto* weapon : weapons) {
         if (!is_valid(weapon)) {
             continue;
@@ -629,12 +628,8 @@ inline auto set_grapple_no_cooldown(const bool enabled) -> void {
         auto* const floatProperty = CastField<FFloatProperty>(property);
         if (floatProperty != nullptr) {
             floatProperty->SetPropertyValueInContainer(weapon, targetCoolDown);
-            ++applied;
         }
     }
-    Output::send<LogLevel::Warning>(
-        STR("PalworldEditor: grapple no-CD: set {} weapons, enabled={}\n"), applied,
-        static_cast<int32>(enabled));
 }
 
 /**

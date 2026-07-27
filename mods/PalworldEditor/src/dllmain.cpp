@@ -962,7 +962,7 @@ private:
             ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s",
                                self->grappleConfigError_.c_str());
         }
-        ImGui::TextDisabled("全局生效；开启后爪钩枪射击无冷却。");
+        ImGui::TextDisabled("全局生效；开启后爪钩枪射击无冷却。重新装备爪钩枪后请重新点一次开关。");
     }
 
     /**

@@ -71,7 +71,7 @@ ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反
 自动校准。该路径不得增加线程、全局扫描、槽位扫描或逐帧任务；恢复失败造成的本世界安全禁用不能用开关绕过。
 1.6.1 修复该开关生命周期；1.6.2 移除确认帕鲁后的空闲后台解析；1.6.3 增加首次资格计算前的资源联合、
 制作唯一 Helper 入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚；
-1.6.7 增加爪钩枪无冷却开关，翻转 `PalDebugSetting.bDisableGrapplingCoolDown`，按需游戏线程应用、世界就绪重应用。
+1.6.7 增加爪钩枪无冷却开关，写 `PalWeaponBase.CoolDownTime`（与参考 mod 一致），按需游戏线程应用、世界就绪重应用。
 
 本地权限门为 `IsServer && !IsDedicatedServer`。修理共享仍不可用。不要与 IntegratedStorage、
 UBIM Lite、BlueprintResearch 或其他修改相同资源路径的 mod 同时测试。
