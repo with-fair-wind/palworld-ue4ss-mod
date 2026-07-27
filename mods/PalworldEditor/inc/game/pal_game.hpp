@@ -614,36 +614,12 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
  * @warning 只能在游戏线程调用。`PalDebugSetting` 或属性不可用时静默返回（下个 dirty 周期重试）。
  */
 inline auto set_grapple_no_cooldown(const bool enabled) -> void {
-    UObject* debug = UObjectGlobals::StaticFindObject<UObject*>(
+    // 仅用 StaticFindObject（纯查找）+ 属性写；不调用任何 UFunction，避免崩溃风险。
+    auto* const debug = UObjectGlobals::StaticFindObject<UObject*>(
         nullptr, nullptr, STR("/Script/Pal.Default__PalDebugSetting"));
-    Output::send<LogLevel::Warning>(STR("grapple diag: Default__PalDebugSetting={}\n"),
-                                    static_cast<int32>(is_valid(debug)));
-    if (!is_valid(debug)) {
-        auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-            nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
-        auto* const getter = UObjectGlobals::StaticFindObject<UFunction*>(
-            nullptr, nullptr, STR("/Script/Pal.PalUtility:GetPalDebugSetting"));
-        Output::send<LogLevel::Warning>(
-            STR("grapple diag: Default__PalUtility={}, getter={}\n"),
-            static_cast<int32>(is_valid(utility)), static_cast<int32>(getter != nullptr));
-        if (utility != nullptr && getter != nullptr) {
-            struct Params {
-                UObject* ReturnValue{};
-            } params;
-            utility->ProcessEvent(getter, &params);
-            debug = params.ReturnValue;
-            Output::send<LogLevel::Warning>(STR("grapple diag: GetPalDebugSetting()={}\n"),
-                                            static_cast<int32>(is_valid(debug)));
-        }
-    }
-    if (!is_valid(debug)) {
-        debug = UObjectGlobals::FindFirstOf(STR("PalDebugSetting"));
-        Output::send<LogLevel::Warning>(STR("grapple diag: FindFirstOf={}\n"),
-                                        static_cast<int32>(is_valid(debug)));
-    }
     if (!is_valid(debug)) {
         Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: grapple no-CD: all accessors returned null\n"));
+            STR("PalworldEditor: grapple no-CD: PalDebugSetting CDO unavailable (no-op)\n"));
         return;
     }
     auto* const property = debug->GetPropertyByNameInChain(STR("bDisableGrapplingCoolDown"));
