@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <items/item_catalog.hpp>
+#include <pal_stats/pal_stat_editor.hpp>
 #include <skills/active_skill_definitions.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
 #include <skills/passive_skill_presets.hpp>
@@ -991,6 +992,36 @@ void test_stale_generation_never_reaches_apply_callback() {
     CHECK(applyCalls == 1);
 }
 
+void test_pal_stat_clamp_respects_policy_bounds() {
+    using namespace pal_stats;
+    // 等级 1–80
+    CHECK(clamp_level(0) == 1);
+    CHECK(clamp_level(1) == 1);
+    CHECK(clamp_level(50) == 50);
+    CHECK(clamp_level(80) == 80);
+    CHECK(clamp_level(81) == 80);
+    CHECK(clamp_level(255) == 80);
+    // 个体值 0–255（突破游戏 100 上限）
+    CHECK(clamp_talent(-5) == 0);
+    CHECK(clamp_talent(0) == 0);
+    CHECK(clamp_talent(100) == 100);
+    CHECK(clamp_talent(255) == 255);
+    CHECK(clamp_talent(256) == 255);
+    // 亲密度 rank 0–10
+    CHECK(clamp_friendship_rank(-1) == 0);
+    CHECK(clamp_friendship_rank(0) == 0);
+    CHECK(clamp_friendship_rank(10) == 10);
+    CHECK(clamp_friendship_rank(11) == 10);
+}
+
+void test_pal_stat_values_detects_any_change() {
+    using namespace pal_stats;
+    CHECK(!has_any_change(PalStatValues{}));
+    CHECK(has_any_change(PalStatValues{.level = 1}));
+    CHECK(has_any_change(PalStatValues{.talentHp = 0}));
+    CHECK(has_any_change(PalStatValues{.friendshipRank = 10}));
+}
+
 auto main() -> int {
     test_skill_catalog_search_and_labels();
     test_skill_catalog_filter_and_deduplicate();
@@ -1039,5 +1070,7 @@ auto main() -> int {
     test_local_candidate_selection_reports_each_unavailable_stage();
     test_multiple_local_candidates_are_rejected();
     test_stale_generation_never_reaches_apply_callback();
+    test_pal_stat_clamp_respects_policy_bounds();
+    test_pal_stat_values_detects_any_change();
     return failures == 0 ? 0 : 1;
 }
