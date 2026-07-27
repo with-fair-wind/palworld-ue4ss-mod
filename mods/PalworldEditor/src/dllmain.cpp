@@ -31,6 +31,8 @@
 #include <game/pal_game.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
+#include <pal_stats/pal_stat_editor.hpp>
+#include <pal_stats/pal_stats.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
 #include <skills/pal_skills.hpp>
 #include <skills/passive_skill_presets.hpp>
@@ -300,8 +302,11 @@ public:
                 selectedTarget_.confirm(resolution.observation) && worldSession_.confirm_target()) {
                 skillRuntimeSnapshot_.state = skillGateway_.read_state(
                     reinterpret_cast<skill_editor::SkillTarget>(resolvedPal->parameter));
+                skillRuntimeSnapshot_.palStat = statGateway_.read_stats(
+                    reinterpret_cast<pal_stats::PalStatTarget>(resolvedPal->parameter));
                 skillRuntimeSnapshot_.lastResult.clear();
             } else {
+                skillRuntimeSnapshot_.palStat = {};
                 const auto reason = skill_editor::resolution_status_message(resolution.status);
                 skillRuntimeSnapshot_.lastResult = "选择失败：";
                 skillRuntimeSnapshot_.lastResult.append(reason.data(), reason.size());
@@ -330,6 +335,29 @@ public:
                 skillRuntimeSnapshot_.state = editResult->state;
             }
             skillRuntimeSnapshot_.lastResult = editResult->message;
+            skillSnapshotDirty_ = true;
+        }
+
+        std::optional<pal_stats::PalStatEditRequest> statRequest;
+        if (!selectionRequested) {
+            statRequest = statQueue_.try_pop();
+        }
+        if (statRequest.has_value()) {
+            const bool generationCurrent =
+                selectedTarget_.generation() == statRequest->targetGeneration &&
+                worldSession_.generation() == statRequest->worldGeneration &&
+                resolvedPal.has_value() && resolution.resolved;
+            const auto target =
+                generationCurrent
+                    ? reinterpret_cast<pal_stats::PalStatTarget>(resolvedPal->parameter)
+                    : pal_stats::PalStatTarget{};
+            if (generationCurrent && pal_stats::has_any_change(statRequest->values) &&
+                statGateway_.is_valid(target)) {
+                statGateway_.apply_stat_edit(target, *statRequest);
+                skillRuntimeSnapshot_.palStat = statGateway_.read_stats(target);
+            } else if (!generationCurrent) {
+                statQueue_.clear();
+            }
             skillSnapshotDirty_ = true;
         }
 
@@ -400,6 +428,7 @@ private:
         baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
         skillQueue_.clear();
+        statQueue_.clear();
         {
             const std::lock_guard lock(selectionRequestMutex_);
             selectCurrentPalRequest_.reset();
@@ -427,6 +456,7 @@ private:
         skillRuntimeSnapshot_.palName =
             selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
         skillRuntimeSnapshot_.state = {};
+        skillRuntimeSnapshot_.palStat = {};
         skillRuntimeSnapshot_.catalog = {};
         skillRuntimeSnapshot_.lastResult =
             "世界切换已取消所有待处理操作；进入存档后请重新选择当前帕鲁。";
@@ -496,6 +526,7 @@ private:
         bool worldAccessible{true};           /**< 当前是否不处于 LoadMap 过渡阶段。 */
         bool worldLifecycleCallbacksReady{};  /**< LoadMap 前后回调是否均已注册。 */
         bool targetConfirmedForWorld{};       /**< 当前世界是否已由用户重新确认目标。 */
+        pal_stats::PalStatSnapshot palStat;   /**< 最近一次从游戏重读的实际属性值。 */
     };
 
     /** @brief 仅在可观察技能状态变化时把游戏线程快照发布给 GUI。 */
@@ -1115,6 +1146,10 @@ private:
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
+    /** @brief 在游戏线程执行帕鲁属性反射读写的无 UObject 所有权网关。 */
+    pal_stats::PalStatGateway statGateway_;
+    /** @brief GUI 生产、游戏线程 FIFO 消费的线程安全属性编辑请求队列。 */
+    pal_stats::PalStatEditQueue statQueue_;
     /** @brief 仅由 EngineTick/LoadMap 游戏线程回调访问的世界代次与确认状态。 */
     skill_editor::WorldSessionState worldSession_;
     /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
