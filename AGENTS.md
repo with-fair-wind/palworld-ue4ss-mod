@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.7），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.6.8），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -82,8 +82,6 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 **PalworldEditor 内部分层。**
 
 - `inc/game/pal_game.hpp`：背包、物品和帕鲁 UObject 反射访问；
-- `inc/base_resource_sharing/settings.hpp`：默认关闭的资源共享独立配置值；
-- `inc/editor/settings.hpp` + `src/editor_settings.cpp`：聚合各模块配置、解析 `config.ini` 并原子持久化；
 - `inc/base_resource_sharing/resource_pool.hpp`：公会资源过滤/排序、能力与按注入次数恢复的纯逻辑；
 - `inc/base_resource_sharing/resource_session.hpp`：8 秒目录校准调度与固定大小制作/建造操作会话；
 - `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 分阶段制作/建造 Hook 清单；
@@ -108,7 +106,7 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 
 **Mod 入口点契约**（`mods/PalworldEditor/src/dllmain.cpp`）：`PalworldEditorMod` 继承
 `RC::CppUserModBase`，设置元数据并重写 `on_update`、`on_unreal_init`；`on_update()` 保持为空，
-`on_program_start()` 读取资源共享配置，`on_unreal_init()` 注册 EngineTick 与 LoadMap 前/后回调；
+`on_unreal_init()` 注册 EngineTick 与 LoadMap 前/后回调；
 DLL 导出 `start_mod()`（构造实例）
 和 `uninstall_mod()`（销毁实例）。日志用
 `RC::Output::send<LogLevel::Verbose>(STR("...{ }...\n"))`（底层是 std::format；`STR()` 会选择正确的字符
@@ -152,28 +150,27 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 `OnRep_ContainerInfos`、仓储 ConcreteModel 可用性和 `OnRep_ModuleArray` 只负责合并目录失效标记；活动材料
 会话期间目录调度器不得执行校准或拆装联合，会话结束后处理一次失效，8 秒校准仅为空闲兜底。
 `PalUIBuildModel:OnOpenMenu` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前获取
-会话并建立联合。制作只向本地主背包 `InventoryMultiHelper` 追加同公会普通箱子，避免与据点模块重复计数；
-建造同时扩展据点仓储模块和材料助手。高频列表、配方和资格 Hook 只刷新固定大小状态，不做 UObject 查找、
-反射、目录发现、数组修改或日志。`StartProduction` post-hook 在原请求返回后释放制作会话，1.5 秒只作为未提交
-请求的空闲兜底；退出建造模式释放建造会话。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用
-会保留。首次菜单早于目录初始化时保存对象全名并在下一 EngineTick 完成一次目录发现和联合，不允许逐帧重试。
-跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
+会话并建立联合。制作只向本地主背包 `InventoryMultiHelper` 追加去重后的同公会普通箱子；建造只扩展当前据点
+仓储模块。制作与建造会话互斥，新操作必须先恢复旧联合再抢占。高频列表、配方和资格 Hook 只刷新固定大小状态，
+不做 UObject 查找、反射、目录发现、数组修改或日志。`StartProduction` 只续租，制作会话由 1.5 秒空闲租约释放；
+退出建造模式释放建造会话。写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
+停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。首次资格回调早于目录
+初始化时在该次 pre-hook 同步完成一次有界目录发现和联合，不允许逐帧重试。只有终端而没有普通仓储模块的据点
+计入据点数但不贡献材料。跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
 
 本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先恢复活动联合再注销
 资源 Hook。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
-校准、联合建立及恢复耗时。配置位于 `ue4ss/Mods/PalworldEditor/config.ini`，包含
-`[BaseResourceSharing]` 的 `Enabled` 与 `[GrapplingHook]` 的 `NoCooldown`（均 `true|false`，缺省回退关闭）。不要与 IntegratedStorage、UBIM Lite、
-BlueprintResearch 或等价的资源路径 mod 同时启用。
+校准、联合建立及恢复耗时。资源共享与爪钩无冷却都是本次游戏进程内的动态开关，每次 DLL 加载默认关闭，
+不读取、创建或写入 `config.ini`。不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 或等价的资源路径
+mod 同时启用。
 
 同一可访问世界内从关闭切换为开启时，资源桥必须按当前世界代次重新初始化会话和目录调度器，并由后续
 EngineTick 自动执行一次既有的管理器目录校准。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局
 UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
 开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
-入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的差量应用和失败回滚，不增加逐帧工作；
-1.6.5 增加有界批次的被动技能分类；1.6.6 增加带目标授权、预检、重读和恢复的帕鲁属性编辑；
-1.6.7 增加默认关闭、按需应用且按原值恢复的爪钩枪无冷却开关。仅在开关变化或新世界需要重应用时执行一次
-精确目标扫描；关闭和 LoadMap 前在游戏线程按账本恢复。热卸载前必须先关闭开关，析构不得访问 Unreal。
-三者均不增加空闲逐帧工作。
+入口和活动会话校准抑制。1.6.8 增加进程内动态开关、资源单一消费面、首次资格同步 bootstrap、联合序列验证
+及有界诊断；爪钩等待 Common 主背包就绪后只执行一次精确目标扫描，未找到时仅允许显式重试。关闭和 LoadMap
+前在游戏线程按账本恢复。热卸载前必须先关闭开关，析构不得访问 Unreal。相关功能均不增加空闲逐帧工作。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -206,7 +203,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.7)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.8)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
@@ -218,7 +215,7 @@ git diff --check
 加载期间请求被清空、原目标仅保留显示、重新选择前无法写入，并且 LoadMap 不再崩溃。还应确认无论是否已确认
 目标，空闲等待至少 10 秒都不再解析队伍 Holder；数字键切换不会静默改变锁定目标，提交修改时会立即重查并拒绝
 错误目标。实际帧时间改善必须在游戏内测量。资源共享还应验证：
-默认关闭且配置可持久化；关闭时工厂/建造界面性能与未启用资源功能一致；开启后反复打开工厂和建造菜单不再
+默认关闭且不跨进程持久化；关闭时工厂/建造界面性能与未启用资源功能一致；开启后反复打开工厂和建造菜单不再
 持续卡顿，另一据点箱子中的材料变化能由原生容器引用直接反映到预览；首次打开建筑菜单时图标即可选择，
 无需先打开炉子；制作最大数量与真实可制作数量一致且不会把同一箱子计算两次；制作/建造能消费同公会另一
 已加载据点的普通箱子材料；
