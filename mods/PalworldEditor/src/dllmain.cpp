@@ -1388,6 +1388,40 @@ private:
         }
 
         ImGui::TextWrapped("%s", snapshot.status.c_str());
+        const auto operationLabel = [&snapshot]() -> const char* {
+            if (!snapshot.foregroundOperation.has_value()) {
+                return "无";
+            }
+            switch (*snapshot.foregroundOperation) {
+                case base_resource_sharing::ResourceOperation::crafting:
+                    return "制作";
+                case base_resource_sharing::ResourceOperation::building:
+                    return "建造";
+                case base_resource_sharing::ResourceOperation::repair:
+                    return "修理";
+            }
+            return "未知";
+        }();
+        const auto surfaceLabel = [&snapshot]() -> const char* {
+            switch (snapshot.consumerSurface) {
+                case base_resource_sharing::ResourceConsumerSurface::none:
+                    return "无";
+                case base_resource_sharing::ResourceConsumerSurface::playerHelper:
+                    return "玩家主背包 Helper";
+                case base_resource_sharing::ResourceConsumerSurface::currentBaseModule:
+                    return "当前据点仓储模块";
+            }
+            return "未知";
+        }();
+        ImGui::TextDisabled("前台材料会话：%s；联合入口：%s", operationLabel, surfaceLabel);
+        ImGui::TextDisabled("当前据点：%s；最近目录/联合耗时：%.2f / %.2f ms",
+                            snapshot.currentBaseId.has_value() ? "已确认" : "未确认",
+                            snapshot.lastCatalogMilliseconds, snapshot.lastUnionMilliseconds);
+        if (snapshot.safetyDisabled) {
+            ImGui::TextColored(
+                ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                "检测到联合序列或恢复异常；相关能力已在本世界安全停用，切换开关不会绕过。");
+        }
         ImGui::TextDisabled("仅本次游戏进程有效；重新启动游戏后默认关闭。");
         ImGui::TextDisabled("仅支持单人世界/本地房主；只影响制作和建造材料消耗，不合并箱子界面。");
     }

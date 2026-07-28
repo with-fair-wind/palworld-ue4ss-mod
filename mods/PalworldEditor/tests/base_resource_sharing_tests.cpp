@@ -334,6 +334,17 @@ void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
     CHECK(!scheduler.advance(0.0F, 7, true));
 }
 
+void test_catalog_bootstrap_rejects_stale_or_unavailable_acquires() {
+    using namespace base_resource_sharing;
+
+    CHECK(should_bootstrap_catalog(true, true, true, false, 7, 7));
+    CHECK(!should_bootstrap_catalog(false, true, true, false, 7, 7));
+    CHECK(!should_bootstrap_catalog(true, false, true, false, 7, 7));
+    CHECK(!should_bootstrap_catalog(true, true, false, false, 7, 7));
+    CHECK(!should_bootstrap_catalog(true, true, true, true, 7, 7));
+    CHECK(!should_bootstrap_catalog(true, true, true, false, 7, 8));
+}
+
 void test_foreground_session_preempts_instead_of_combining_operations() {
     using namespace base_resource_sharing;
 
@@ -584,6 +595,7 @@ auto main() -> int {
     test_missing_current_base_hook_disables_only_building();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
+    test_catalog_bootstrap_rejects_stale_or_unavailable_acquires();
     test_foreground_session_preempts_instead_of_combining_operations();
     test_foreground_session_ignores_stale_touch_and_release();
     test_foreground_crafting_session_expires_only_after_idle_lease();

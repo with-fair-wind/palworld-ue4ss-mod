@@ -3,6 +3,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 #include <base_resource_sharing/resource_pool.hpp>
@@ -15,6 +16,12 @@ struct BaseResourceSharingSnapshot {
     std::size_t baseCount{};
     std::size_t containerCount{};
     std::array<CapabilityState, 3> capabilities{};
+    std::optional<ResourceOperation> foregroundOperation;
+    ResourceConsumerSurface consumerSurface{ResourceConsumerSurface::none};
+    std::optional<GuidKey> currentBaseId;
+    double lastCatalogMilliseconds{};
+    double lastUnionMilliseconds{};
+    bool safetyDisabled{};
     std::string status;
 };
 

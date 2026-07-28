@@ -28,6 +28,15 @@ struct ResourceToggleTransition {
     return {.beginAccessibleWorld = worldAccessible};
 }
 
+/** @brief 判断首次资格回调是否获准同步执行一次目录 bootstrap。 */
+[[nodiscard]] constexpr auto should_bootstrap_catalog(
+    const bool enabled, const bool worldAccessible, const bool capabilityReady,
+    const bool catalogReady, const std::uint64_t currentGeneration,
+    const std::uint64_t requestedGeneration) noexcept -> bool {
+    return enabled && worldAccessible && capabilityReady && !catalogReady &&
+           currentGeneration == requestedGeneration;
+}
+
 class ReconcileScheduler {
 public:
     auto begin_world(const std::uint64_t generation) noexcept -> void {
