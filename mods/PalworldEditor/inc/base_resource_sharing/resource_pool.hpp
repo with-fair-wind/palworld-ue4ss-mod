@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <utility>
@@ -86,6 +87,47 @@ enum class ResourceOperation : std::uint8_t { crafting, building, repair };
 [[nodiscard]] constexpr auto operation_index(const ResourceOperation operation) noexcept
     -> std::size_t {
     return static_cast<std::size_t>(operation);
+}
+
+/** @brief 一次材料操作唯一允许注入的 Palworld 消费面。 */
+enum class ResourceConsumerSurface : std::uint8_t {
+    none,
+    playerHelper,
+    currentBaseModule,
+};
+
+/** @brief 前台材料操作及其唯一消费面；不会组合多个入口。 */
+struct ResourceExposurePlan {
+    ResourceOperation operation{ResourceOperation::repair};
+    ResourceConsumerSurface surface{ResourceConsumerSurface::none};
+    std::optional<GuidKey> targetBaseId;
+
+    auto operator<=>(const ResourceExposurePlan&) const = default;
+};
+
+/** @brief 为制作或建造选择唯一消费面；缺少有效当前据点时建造拒绝扩展。 */
+[[nodiscard]] inline auto make_exposure_plan(
+    const ResourceOperation operation,
+    const std::optional<GuidKey> currentBaseId = std::nullopt) noexcept -> ResourceExposurePlan {
+    switch (operation) {
+        case ResourceOperation::crafting:
+            return {
+                .operation = operation,
+                .surface = ResourceConsumerSurface::playerHelper,
+            };
+        case ResourceOperation::building:
+            if (currentBaseId.has_value() && currentBaseId->valid()) {
+                return {
+                    .operation = operation,
+                    .surface = ResourceConsumerSurface::currentBaseModule,
+                    .targetBaseId = currentBaseId,
+                };
+            }
+            return {.operation = operation};
+        case ResourceOperation::repair:
+            return {.operation = operation};
+    }
+    return {.operation = operation};
 }
 
 struct UnionTargets {
@@ -257,6 +299,77 @@ struct InjectionRemovalPlan {
         }
     }
     return missing;
+}
+
+/** @brief 注入后的序列验证结果。 */
+enum class SequenceValidationStatus : std::uint8_t {
+    valid,
+    originalPrefixChanged,
+    injectedCountMismatch,
+    duplicateInjectedId,
+    unexpectedTail,
+};
+
+/** @brief 精确指出序列验证失败类别及首个相关容器。 */
+struct SequenceValidationResult {
+    SequenceValidationStatus status{SequenceValidationStatus::valid};
+    std::optional<GuidKey> offendingId;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return status == SequenceValidationStatus::valid;
+    }
+};
+
+/**
+ * @brief 验证当前序列严格等于原序列加按记录顺序追加的一份唯一注入。
+ * @details 原序列中的既有重复允许保留；注入不得重复原序列或其他注入项。
+ */
+[[nodiscard]] inline auto validate_applied_sequence(const std::span<const GuidKey> original,
+                                                    const std::span<const GuidKey> injected,
+                                                    const std::span<const GuidKey> current) noexcept
+    -> SequenceValidationResult {
+    for (std::size_t index = 0; index < injected.size(); ++index) {
+        const auto id = injected[index];
+        if (std::ranges::find(original, id) != original.end() ||
+            std::ranges::find(injected.first(index), id) != injected.first(index).end()) {
+            return {
+                .status = SequenceValidationStatus::duplicateInjectedId,
+                .offendingId = id,
+            };
+        }
+    }
+
+    if (current.size() < original.size()) {
+        return {.status = SequenceValidationStatus::originalPrefixChanged};
+    }
+    for (std::size_t index = 0; index < original.size(); ++index) {
+        if (current[index] != original[index]) {
+            return {
+                .status = SequenceValidationStatus::originalPrefixChanged,
+                .offendingId = current[index],
+            };
+        }
+    }
+
+    const auto expectedSize = original.size() + injected.size();
+    if (current.size() < expectedSize) {
+        return {.status = SequenceValidationStatus::injectedCountMismatch};
+    }
+    for (std::size_t index = 0; index < injected.size(); ++index) {
+        if (current[original.size() + index] != injected[index]) {
+            return {
+                .status = SequenceValidationStatus::injectedCountMismatch,
+                .offendingId = current[original.size() + index],
+            };
+        }
+    }
+    if (current.size() > expectedSize) {
+        return {
+            .status = SequenceValidationStatus::unexpectedTail,
+            .offendingId = current[expectedSize],
+        };
+    }
+    return {};
 }
 
 struct BaseResourceSharingStatus {

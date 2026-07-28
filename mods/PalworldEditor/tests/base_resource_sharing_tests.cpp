@@ -358,14 +358,44 @@ void test_material_sessions_can_cancel_a_failed_union_without_losing_world_gener
     CHECK(sessions.acquire(ResourceOperation::crafting, 14).unionBecameDesired);
 }
 
-void test_union_targets_do_not_double_expose_crafting_containers() {
+void test_resource_exposure_uses_exactly_one_consumer_surface() {
     using namespace base_resource_sharing;
 
-    CHECK((union_targets_for_operation(ResourceOperation::crafting) ==
-           UnionTargets{.baseModules = false, .playerHelper = true}));
-    CHECK((union_targets_for_operation(ResourceOperation::building) ==
-           UnionTargets{.baseModules = true, .playerHelper = true}));
-    CHECK(union_targets_for_operation(ResourceOperation::repair) == UnionTargets{});
+    const GuidKey base{{10, 0, 0, 0}};
+    const auto crafting = make_exposure_plan(ResourceOperation::crafting);
+    CHECK(crafting.surface == ResourceConsumerSurface::playerHelper);
+    CHECK(!crafting.targetBaseId.has_value());
+
+    const auto building = make_exposure_plan(ResourceOperation::building, base);
+    CHECK(building.surface == ResourceConsumerSurface::currentBaseModule);
+    CHECK(building.targetBaseId == base);
+
+    CHECK(make_exposure_plan(ResourceOperation::building).surface == ResourceConsumerSurface::none);
+    CHECK(make_exposure_plan(ResourceOperation::repair).surface == ResourceConsumerSurface::none);
+}
+
+void test_applied_sequence_rejects_duplicate_remote_container() {
+    using namespace base_resource_sharing;
+
+    const GuidKey local{{1, 0, 0, 0}};
+    const GuidKey remote{{2, 0, 0, 0}};
+    const std::array original{local};
+    const std::array injected{remote};
+    const std::array valid{local, remote};
+    const std::array doubled{local, remote, remote};
+
+    CHECK(static_cast<bool>(validate_applied_sequence(original, injected, valid)));
+    CHECK(!validate_applied_sequence(original, injected, doubled));
+}
+
+void test_applied_sequence_rejects_injection_of_existing_id() {
+    using namespace base_resource_sharing;
+
+    const GuidKey local{{1, 0, 0, 0}};
+    const std::array original{local};
+    const std::array injected{local};
+    const std::array current{local, local};
+    CHECK(!validate_applied_sequence(original, injected, current));
 }
 
 void test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent() {
@@ -520,7 +550,9 @@ auto main() -> int {
     test_material_sessions_open_once_overlap_and_close_once();
     test_material_session_touch_does_not_acquire_and_wrong_generation_is_ignored();
     test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation();
-    test_union_targets_do_not_double_expose_crafting_containers();
+    test_resource_exposure_uses_exactly_one_consumer_surface();
+    test_applied_sequence_rejects_duplicate_remote_container();
+    test_applied_sequence_rejects_injection_of_existing_id();
     test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent();
     test_grapple_target_unavailable_waits_for_explicit_retry();
     test_grapple_terminal_failure_is_not_reenabled_by_retry_or_toggle();
