@@ -15,6 +15,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -28,8 +29,9 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
-#include <base_resource_sharing/settings.hpp>
+#include <editor/settings.hpp>
 #include <game/pal_game.hpp>
+#include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
@@ -58,18 +60,18 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.6.6");
+        ModVersion = STR("1.6.7");
         ModDescription =
             STR("Item, Pal skill, and same-guild base resource editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.6)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.7)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.6.6", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.6.7", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -77,6 +79,8 @@ public:
                 render_inventory(self);
                 ImGui::Separator();
                 render_base_resource_sharing(self);
+                ImGui::Separator();
+                render_grapple_no_cooldown(self);
                 ImGui::Separator();
                 render_pal_editor(self);
                 ImGui::Separator();
@@ -100,10 +104,13 @@ public:
     auto on_program_start() -> void override {
         configPath_ = std::filesystem::path{UE4SSProgram::get_program().get_mods_directory()} /
                       "PalworldEditor" / "config.ini";
-        const auto loaded = base_resource_sharing::load_settings(configPath_);
-        requestedBaseSharingEnabled_.store(loaded.settings.enabled);
+        const auto loaded = editor_settings::load_settings(configPath_);
+        requestedBaseSharingEnabled_.store(loaded.settings.baseResourceSharing.enabled);
         baseSharingSettingDirty_.store(true);
+        requestedGrappleNoCooldown_.store(loaded.settings.grapplingHook.noCooldown);
+        grappleSettingDirty_.store(loaded.settings.grapplingHook.noCooldown);
         baseResourceBridge_.set_config_error(loaded.error);
+        grappleConfigError_ = loaded.error;
     }
 
     /**
@@ -151,6 +158,7 @@ public:
         wantProbeObject_.store(true);
         want_scan_items_.store(true);
         baseResourceBridge_.on_world_ready(worldSession_.generation());
+        static_cast<void>(grappleLedger_.begin_world(worldSession_.generation()));
 
         if (engineTickCallbackId_ == Hook::ERROR_ID || !worldLifecycleCallbacksReady_.load()) {
             baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
@@ -185,6 +193,10 @@ public:
         if (baseSharingSettingDirty_.exchange(false)) {
             baseResourceBridge_.set_enabled(requestedBaseSharingEnabled_.load());
         }
+        if (grappleSettingDirty_.exchange(false)) {
+            grappleLedger_.set_desired(requestedGrappleNoCooldown_.load());
+        }
+        process_grapple_work();
         baseResourceBridge_.ensure_hooks_registered();
         baseResourceBridge_.tick(deltaSeconds);
 
@@ -535,8 +547,85 @@ private:
         }
     }
 
+    /** @brief 把爪钩游戏线程结果发布为 GUI 可安全复制的纯字符串。 */
+    auto set_grapple_runtime_status(std::string status) -> void {
+        const std::lock_guard lock(grappleStatusMutex_);
+        grappleRuntimeStatus_ = std::move(status);
+    }
+
+    /**
+     * @brief 在 EngineTick 执行一次由纯值账本决定的爪钩应用或恢复工作。
+     * @details 默认关闭、已应用和世界不可访问时立即返回，不扫描 UObject。
+     */
+    auto process_grapple_work() -> void {
+        if (!worldLifecycleCallbacksReady_.load() || grappleSafetyDisabled_.load()) {
+            return;
+        }
+        const auto work =
+            grappleLedger_.next_work(worldSession_.generation(), worldSession_.can_access_unreal());
+        if (work == grappling_hook::CooldownWork::none) {
+            return;
+        }
+        if (work == grappling_hook::CooldownWork::restore) {
+            const auto result = grappleGateway_.restore(grappleLedger_.records());
+            grappleLedger_.complete_restore(result.succeeded());
+            set_grapple_runtime_status(result.message);
+            if (!result.succeeded()) {
+                grappleSafetyDisabled_.store(true);
+                requestedGrappleNoCooldown_.store(false);
+                grappleLedger_.set_desired(false);
+            }
+            return;
+        }
+
+        auto result = grappleGateway_.apply();
+        auto records = std::move(result.records);
+        if (!grappleLedger_.mark_apply_attempted(worldSession_.generation(), records)) {
+            if (!records.empty()) {
+                const auto restoreResult = grappleGateway_.restore(records);
+                set_grapple_runtime_status(restoreResult.succeeded()
+                                               ? "爪钩应用请求已过期；刚建立的覆盖已按原值恢复。"
+                                               : "爪钩应用请求已过期，且即时恢复未能完整验证。");
+            }
+            return;
+        }
+        set_grapple_runtime_status(std::move(result.message));
+    }
+
+    /**
+     * @brief 在关闭开关或切图前恢复全部活动爪钩覆盖。
+     * @param[in] reason 用于错误消息的生命周期阶段。
+     * @return 没有覆盖或恢复验证成功时返回 true。
+     */
+    [[nodiscard]] auto restore_grapple_overrides(const std::string_view reason) -> bool {
+        if (grappleLedger_.records().empty()) {
+            return true;
+        }
+        const auto result = grappleGateway_.restore(grappleLedger_.records());
+        grappleLedger_.complete_restore(result.succeeded());
+        if (result.succeeded()) {
+            set_grapple_runtime_status(result.message);
+            return true;
+        }
+
+        std::string message{"爪钩冷却在"};
+        message.append(reason);
+        message.append("前未能完整恢复；已停用后续覆盖。");
+        set_grapple_runtime_status(std::move(message));
+        return false;
+    }
+
     /** @brief Invalidates all work and write authorization before Unreal replaces the world. */
     auto begin_world_transition() -> void {
+        const auto nextWorldGeneration = worldSession_.generation() + 1;
+        if (!restore_grapple_overrides("世界切换")) {
+            grappleSafetyDisabled_.store(true);
+            requestedGrappleNoCooldown_.store(false);
+            grappleLedger_.set_desired(false);
+            // 当前世界即将销毁，无法恢复的对象不会跨世界存活；清除旧路径但保留安全停用状态。
+            grappleLedger_.complete_restore(true);
+        }
+        static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
         baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
         statWritesDisabledForWorld_ = false;
@@ -1247,8 +1336,12 @@ private:
             const auto error =
                 self->configPath_.empty()
                     ? std::string{"配置路径尚未初始化，设置未持久化。"}
-                    : base_resource_sharing::save_settings(
-                          self->configPath_, base_resource_sharing::Settings{.enabled = enabled});
+                    : editor_settings::save_settings(
+                          self->configPath_,
+                          editor_settings::Settings{
+                              .baseResourceSharing = {.enabled = enabled},
+                              .grapplingHook = {.noCooldown =
+                                                    self->requestedGrappleNoCooldown_.load()}});
             self->baseResourceBridge_.set_config_error(error);
         }
 
@@ -1257,6 +1350,44 @@ private:
             ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s", snapshot.configError.c_str());
         }
         ImGui::TextDisabled("仅支持单人世界/本地房主；只影响制作和建造材料消耗，不合并箱子界面。");
+    }
+
+    /** @brief 渲染爪钩枪无冷却开关；切换时立即应用并持久化。 */
+    static void render_grapple_no_cooldown(PalworldEditorMod* self) {
+        bool enabled = self->requestedGrappleNoCooldown_.load();
+        ImGui::BeginDisabled(self->grappleSafetyDisabled_.load());
+        if (ImGui::Checkbox("爪钩枪无冷却", &enabled)) {
+            self->requestedGrappleNoCooldown_.store(enabled);
+            self->grappleSettingDirty_.store(true);
+            self->grappleConfigError_ =
+                self->configPath_.empty()
+                    ? std::string{"配置路径尚未初始化，设置未持久化。"}
+                    : editor_settings::save_settings(
+                          self->configPath_,
+                          editor_settings::Settings{
+                              .baseResourceSharing =
+                                  {.enabled = self->requestedBaseSharingEnabled_.load()},
+                              .grapplingHook = {.noCooldown = enabled}});
+        }
+        ImGui::EndDisabled();
+        if (!self->grappleConfigError_.empty()) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s",
+                               self->grappleConfigError_.c_str());
+        }
+        std::string runtimeStatus;
+        {
+            const std::lock_guard lock(self->grappleStatusMutex_);
+            runtimeStatus = self->grappleRuntimeStatus_;
+        }
+        if (!runtimeStatus.empty()) {
+            ImGui::TextWrapped("%s", runtimeStatus.c_str());
+        }
+        if (self->grappleSafetyDisabled_.load()) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                               "本次运行的爪钩覆盖已因恢复失败而安全停用。");
+        }
+        ImGui::TextDisabled(
+            "只修改物品 ID 可确认的正式爪钩枪；关闭和切图时恢复原值。热卸载前请先关闭。");
     }
 
     /**
@@ -1492,6 +1623,22 @@ private:
     std::atomic<bool> requestedBaseSharingEnabled_{false};
     /** @brief 通知 EngineTick 消费最新资源共享偏好。 */
     std::atomic<bool> baseSharingSettingDirty_{false};
+    /** @brief 用户期望的爪钩枪无冷却偏好；GUI 写入、EngineTick 消费。 */
+    std::atomic<bool> requestedGrappleNoCooldown_{false};
+    /** @brief 通知 EngineTick 更新爪钩覆盖领域服务的期望状态。 */
+    std::atomic<bool> grappleSettingDirty_{false};
+    /** @brief 爪钩枪配置持久化的最近错误（仅 GUI 显示）。 */
+    std::string grappleConfigError_;
+    /** @brief 只在游戏线程执行严格目标识别、冷却覆盖和恢复的反射网关。 */
+    grappling_hook::GrappleCooldownGateway grappleGateway_;
+    /** @brief 只保存对象全名、原值和世界代次的可逆覆盖领域状态。 */
+    grappling_hook::CooldownOverrideLedger grappleLedger_;
+    /** @brief 恢复验证失败后阻止本次运行继续建立爪钩覆盖。 */
+    std::atomic<bool> grappleSafetyDisabled_{false};
+    /** @brief 保护游戏线程发布、GUI 复制的爪钩运行时状态。 */
+    std::mutex grappleStatusMutex_;
+    /** @brief 最近一次爪钩应用或恢复结果的面向用户文本。 */
+    std::string grappleRuntimeStatus_;
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;

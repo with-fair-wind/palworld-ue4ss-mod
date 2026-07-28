@@ -1,4 +1,4 @@
-# PalworldEditor 1.6.6 — Palworld 物品、帕鲁技能与据点资源编辑器
+# PalworldEditor 1.6.7 — Palworld 物品、帕鲁技能与据点资源编辑器
 
 一个基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0
 提供游戏内物品编辑、当前选中帕鲁的主动/被动技能编辑，以及可选的同公会跨据点制作/建造材料共享。
@@ -15,7 +15,8 @@
 | **目标帕鲁** | 用数字键高亮下一次按 E 会召唤的队伍帕鲁，再点击“选择当前帕鲁”确认；确认前不做后台扫描 |
 | **被动技能** | 最多 4 个；新增/替换前先按 普通/稀有/极品/传说/负面 分类筛选，支持新增、替换、删除与四词条预设 |
 | **主动技能** | 编辑 3 个 `EquipWaza` 槽位；支持装备、替换、清空 |
-| **属性修改** | 选中帕鲁后修改等级（1–80）、个体值 HP/攻击/防御（0–255，可突破 100）与亲密度（0–10） |
+| **属性修改** | 选中帕鲁后修改等级（1–80）、普通个体值 HP/攻击/防御（0–100）与亲密度（0–10）；只提交差量并做写后验证 |
+| **爪钩枪无冷却** | 默认关闭；仅覆盖可明确识别的爪钩对象，并在关闭和切图时恢复各自原值；热卸载前应先关闭 |
 | **技能目录** | 进入存档且主背包就绪后自动重试完整目录；手动刷新也必须通过运行时安全检查 |
 | **本地化搜索** | 物品与技能均显示 `当前语言名称 [RawId]`，可按名称或原始 ID 搜索 |
 | **据点资源共享** | 默认关闭；单人/本地房主可让制作和建造使用同公会所有已加载普通仓储材料 |
@@ -196,6 +197,8 @@ Enabled=true
 mods/PalworldEditor/
 ├── CMakeLists.txt
 ├── inc/
+│   ├── editor/
+│   │   └── settings.hpp             各功能模块配置聚合与持久化接口
 │   ├── game/
 │   │   └── pal_game.hpp             物品/背包与当前待出战帕鲁解析
 │   ├── base_resource_sharing/
@@ -206,6 +209,12 @@ mods/PalworldEditor/
 │   │   └── settings.hpp              默认关闭的持久化配置
 │   ├── items/
 │   │   └── item_catalog.hpp          物品标签、搜索、去重、排序与索引
+│   ├── pal_stats/
+│   │   ├── pal_stat_editor.hpp       属性快照、差量草稿、请求槽与验证
+│   │   └── pal_stats.hpp             SaveParameter 游戏线程网关
+│   ├── grappling_hook/
+│   │   ├── cooldown_service.hpp      精确 ID 白名单、一次性工作状态与原值账本
+│   │   └── cooldown_gateway.hpp      冷却覆盖/恢复游戏线程网关
 │   ├── skills/
 │   │   ├── active_skill_definitions.hpp Palworld 1.0 主动技能数值/Raw ID 生成表
 │   │   ├── pal_resolution_scheduler.hpp 当前帕鲁选择/编辑事件决策与纯值解析快照
@@ -217,8 +226,9 @@ mods/PalworldEditor/
 │   └── support/
 │       └── text_encoding.hpp        UE 宽字符串到 UTF-8
 ├── src/
-│   ├── base_resource_settings.cpp 配置解析与原子保存
+│   ├── editor_settings.cpp       配置解析与原子保存
 │   ├── dllmain.cpp                Mod 类 + GUI + EngineTick/LoadMap 请求分发
+│   ├── grapple_cooldown_gateway.cpp 精确识别、覆盖、验证与恢复爪钩冷却
 │   ├── pal_base_resource_runtime.* 管理器发现与可逆临时联合
 │   ├── pal_base_resources.cpp     事件调度、会话租约与 Hook
 │   └── pal_skills.cpp             技能目录与游戏函数实现
@@ -245,9 +255,10 @@ mods/PalworldEditor/
 - 修理材料共享尚不可用；缺少必需 Hook、容器解析不完整或恢复序列不一致时，对应能力会按世界失败关闭。
 - 1.6.1 修复同一世界内关闭后重新开启资源共享的生命周期；1.6.2 移除确认帕鲁后的 250 毫秒
   `FindAllOf` 后台解析；1.6.3 把资源联合提前到原版首次资格计算前，制作只暴露唯一 Helper 路径，并暂停活动
-  会话期间的目录校准；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚；1.6.5 增加被动技能分类选择器，
-  按 `Rank` 与 `AddWorldTreePal` 自动归类，分类以有界小批次在游戏线程后台完成，不增加常驻扫描；1.6.6
-  增加帕鲁属性编辑（等级 1–80、个体值 0–255、亲密度 0–10），按需直接写 `SaveParameter`。
+  会话期间的目录校准；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚；1.6.5 增加有界批次的
+  被动技能分类；1.6.6 增加带目标授权和事务验证的属性编辑；1.6.7 增加可逆的爪钩枪冷却覆盖。
+- 爪钩功能只在切换开关或新世界重应用时扫描一次；关闭和 LoadMap 前会在游戏线程恢复原值。若使用 UE4SS
+  热卸载 C++ mod，请先在界面关闭该功能，析构阶段不会访问 Unreal。
 - 不要与 UBIM Lite 或其他修改相同制作/建造资源请求路径的 mod 同时运行。
 - 主动技能只修改 `EquipWaza`，不会解锁或修改 `MasteredWaza`，也不编辑伙伴技能。
 - 技能数组通过 UE4SS 的真实 `TArray<T>` 读取；仍依赖 Palworld 1.0 的 UFunction 参数布局，

@@ -1,21 +1,10 @@
 #pragma once
 
-#include <filesystem>
-#include <string>
-#include <string_view>
-
+/** @brief 提供跨据点资源共享自身的独立配置值。 */
 namespace base_resource_sharing {
+
+/** @brief `[BaseResourceSharing]` 配置节；默认失败安全地关闭。 */
 struct Settings {
-    bool enabled{};
+    bool enabled{}; /**< 是否期望启用同公会跨据点材料共享。 */
 };
-
-struct SettingsParseResult {
-    Settings settings;
-    std::string error;
-};
-
-auto parse_settings(std::string_view text) -> SettingsParseResult;
-auto serialize_settings(const Settings& settings) -> std::string;
-auto load_settings(const std::filesystem::path& path) -> SettingsParseResult;
-auto save_settings(const std::filesystem::path& path, const Settings& settings) -> std::string;
 }  // namespace base_resource_sharing

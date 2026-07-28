@@ -7,7 +7,8 @@
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 #include <base_resource_sharing/resource_session.hpp>
-#include <base_resource_sharing/settings.hpp>
+#include <editor/settings.hpp>
+#include <grappling_hook/cooldown_service.hpp>
 
 namespace {
 auto failures = 0;
@@ -23,28 +24,59 @@ void check(const bool condition, const char* expression, const int line) {
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
 void test_settings_default_off_and_round_trip() {
-    using namespace base_resource_sharing;
+    using namespace editor_settings;
 
-    const auto missing = parse_settings("");
-    CHECK(!missing.settings.enabled);
-    CHECK(!missing.error.empty());
+    // 空配置：两节均缺省，不再视为错误（失败安全回退为全关）。
+    const auto empty = parse_settings("");
+    CHECK(!empty.settings.baseResourceSharing.enabled);
+    CHECK(!empty.settings.grapplingHook.noCooldown);
+    CHECK(empty.error.empty());
 
-    const auto enabled = parse_settings(
+    // 仅资源共享节。
+    const auto sharing = parse_settings(
         "[BaseResourceSharing]\n"
         "Enabled=true\n");
-    CHECK(enabled.settings.enabled);
-    CHECK(enabled.error.empty());
-    CHECK(serialize_settings(enabled.settings) == "[BaseResourceSharing]\nEnabled=true\n");
+    CHECK(sharing.settings.baseResourceSharing.enabled);
+    CHECK(!sharing.settings.grapplingHook.noCooldown);
+    CHECK(sharing.error.empty());
 
+    // 仅爪钩枪节。
+    const auto grapple = parse_settings(
+        "[GrapplingHook]\n"
+        "NoCooldown=true\n");
+    CHECK(!grapple.settings.baseResourceSharing.enabled);
+    CHECK(grapple.settings.grapplingHook.noCooldown);
+    CHECK(grapple.error.empty());
+
+    // 两节共存、任意顺序。
+    const auto both = parse_settings(
+        "[GrapplingHook]\n"
+        "NoCooldown=true\n"
+        "[BaseResourceSharing]\n"
+        "Enabled=true\n");
+    CHECK(both.settings.baseResourceSharing.enabled);
+    CHECK(both.settings.grapplingHook.noCooldown);
+    CHECK(both.error.empty());
+    CHECK(serialize_settings(both.settings) ==
+          "[BaseResourceSharing]\nEnabled=true\n[GrapplingHook]\nNoCooldown=true\n");
+
+    // 节内非法值仍失败安全。
     const auto invalid = parse_settings(
         "[BaseResourceSharing]\n"
         "Enabled=maybe\n");
-    CHECK(!invalid.settings.enabled);
+    CHECK(!invalid.settings.baseResourceSharing.enabled);
     CHECK(!invalid.error.empty());
+
+    // 未知键仍拒绝。
+    const auto unknown = parse_settings(
+        "[GrapplingHook]\n"
+        "Bogus=true\n");
+    CHECK(!unknown.settings.grapplingHook.noCooldown);
+    CHECK(!unknown.error.empty());
 }
 
 void test_settings_file_round_trip() {
-    using namespace base_resource_sharing;
+    using namespace editor_settings;
 
     const auto root =
         std::filesystem::temp_directory_path() / "PalworldEditorBaseResourceSharingTests";
@@ -53,13 +85,17 @@ void test_settings_file_round_trip() {
     std::filesystem::remove_all(root, ignored);
 
     const auto missing = load_settings(path);
-    CHECK(!missing.settings.enabled);
+    CHECK(!missing.settings.baseResourceSharing.enabled);
+    CHECK(!missing.settings.grapplingHook.noCooldown);
     CHECK(!missing.error.empty());
     CHECK(!std::filesystem::exists(path));
 
-    CHECK(save_settings(path, Settings{.enabled = true}).empty());
+    CHECK(save_settings(path, Settings{.baseResourceSharing = {.enabled = true},
+                                       .grapplingHook = {.noCooldown = true}})
+              .empty());
     const auto loaded = load_settings(path);
-    CHECK(loaded.settings.enabled);
+    CHECK(loaded.settings.baseResourceSharing.enabled);
+    CHECK(loaded.settings.grapplingHook.noCooldown);
     CHECK(loaded.error.empty());
 
     std::filesystem::remove_all(root, ignored);
@@ -412,6 +448,53 @@ void test_union_targets_do_not_double_expose_crafting_containers() {
     CHECK(union_targets_for_operation(ResourceOperation::repair) == UnionTargets{});
 }
 
+void test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent() {
+    grappling_hook::CooldownOverrideLedger ledger;
+    CHECK(ledger.begin_world(7));
+    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+
+    ledger.set_desired(true);
+    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::apply);
+    CHECK(ledger.mark_apply_attempted(
+        7, {{.objectFullName = L"PalWeaponBase /Game/GrappleA", .originalCooldown = 12.0F},
+            {.objectFullName = L"PalWeaponBase /Game/GrappleB", .originalCooldown = 6.0F}}));
+    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+    CHECK(ledger.records().size() == 2);
+
+    ledger.set_desired(true);
+    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+}
+
+void test_grapple_target_filter_accepts_only_known_item_ids() {
+    CHECK(grappling_hook::is_grappling_item_id("GrapplingGun"));
+    CHECK(grappling_hook::is_grappling_item_id("GrapplingGun2"));
+    CHECK(grappling_hook::is_grappling_item_id("GrapplingGun5"));
+    CHECK(grappling_hook::is_grappling_item_id("GrapplingGun_1"));
+    CHECK(!grappling_hook::is_grappling_item_id("AirGrapplingGun"));
+    CHECK(!grappling_hook::is_grappling_item_id("AssaultRifle_Default1"));
+    CHECK(!grappling_hook::is_grappling_item_id(""));
+}
+
+void test_grapple_cooldown_restores_each_original_before_changing_world() {
+    grappling_hook::CooldownOverrideLedger ledger;
+    CHECK(ledger.begin_world(7));
+    ledger.set_desired(true);
+    CHECK(ledger.mark_apply_attempted(
+        7, {{.objectFullName = L"PalWeaponBase /Game/GrappleA", .originalCooldown = 12.0F},
+            {.objectFullName = L"PalWeaponBase /Game/GrappleB", .originalCooldown = 6.0F}}));
+
+    ledger.set_desired(false);
+    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::restore);
+    CHECK(!ledger.begin_world(8));
+    ledger.complete_restore(false);
+    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+
+    ledger.complete_restore(true);
+    CHECK(ledger.records().empty());
+    CHECK(ledger.begin_world(8));
+    CHECK(ledger.next_work(8, true) == grappling_hook::CooldownWork::none);
+}
+
 auto main() -> int {
     test_settings_default_off_and_round_trip();
     test_settings_file_round_trip();
@@ -431,5 +514,8 @@ auto main() -> int {
     test_material_session_touch_does_not_acquire_and_wrong_generation_is_ignored();
     test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation();
     test_union_targets_do_not_double_expose_crafting_containers();
+    test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent();
+    test_grapple_target_filter_accepts_only_known_item_ids();
+    test_grapple_cooldown_restores_each_original_before_changing_world();
     return failures == 0 ? 0 : 1;
 }

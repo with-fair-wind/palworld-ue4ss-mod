@@ -4,9 +4,9 @@
 #include <system_error>
 
 #include <Windows.h>
-#include <base_resource_sharing/settings.hpp>
+#include <editor/settings.hpp>
 
-namespace base_resource_sharing {
+namespace editor_settings {
 namespace {
 auto trim_ascii(const std::string_view text) -> std::string_view {
     const auto first = text.find_first_not_of(" \t\n\r\f\v");
@@ -46,9 +46,13 @@ auto win32_error(const std::string_view action, const DWORD error) -> std::strin
 }  // namespace
 
 auto parse_settings(const std::string_view text) -> SettingsParseResult {
-    bool foundSection{};
-    bool foundEnabled{};
     Settings settings;
+    enum class Section { none, sharing, grapple };
+    Section current{Section::none};
+    bool seenSharing{};
+    bool seenGrapple{};
+    bool seenEnabled{};
+    bool seenNoCooldown{};
 
     std::size_t lineStart{};
     while (lineStart < text.size()) {
@@ -60,32 +64,57 @@ auto parse_settings(const std::string_view text) -> SettingsParseResult {
             return parse_error("配置包含空白行。");
         }
 
-        if (!foundSection) {
-            if (line != "[BaseResourceSharing]") {
-                return parse_error("缺少 [BaseResourceSharing] 配置节。");
+        if (line == "[BaseResourceSharing]") {
+            if (seenSharing) {
+                return parse_error("[BaseResourceSharing] 配置节重复。");
             }
-            foundSection = true;
-        } else {
+            seenSharing = true;
+            current = Section::sharing;
+            seenEnabled = false;
+        } else if (line == "[GrapplingHook]") {
+            if (seenGrapple) {
+                return parse_error("[GrapplingHook] 配置节重复。");
+            }
+            seenGrapple = true;
+            current = Section::grapple;
+            seenNoCooldown = false;
+        } else if (line.find('=') != std::string_view::npos) {
             const auto equals = line.find('=');
-            if (equals == std::string_view::npos ||
-                line.find('=', equals + 1) != std::string_view::npos) {
+            if (line.find('=', equals + 1) != std::string_view::npos) {
                 return parse_error("配置行格式无效。");
             }
-
             const auto key = trim_ascii(line.substr(0, equals));
             const auto value = trim_ascii(line.substr(equals + 1));
-            if (!equal_ascii_case_insensitive(key, "Enabled")) {
+
+            if (current == Section::none) {
+                return parse_error("配置键出现在任何节之前。");
+            }
+            if (current == Section::sharing && equal_ascii_case_insensitive(key, "Enabled")) {
+                if (seenEnabled) {
+                    return parse_error("Enabled 配置重复。");
+                }
+                if (equal_ascii_case_insensitive(value, "true")) {
+                    settings.baseResourceSharing.enabled = true;
+                } else if (!equal_ascii_case_insensitive(value, "false")) {
+                    return parse_error("Enabled 必须为 true 或 false。");
+                }
+                seenEnabled = true;
+            } else if (current == Section::grapple &&
+                       equal_ascii_case_insensitive(key, "NoCooldown")) {
+                if (seenNoCooldown) {
+                    return parse_error("NoCooldown 配置重复。");
+                }
+                if (equal_ascii_case_insensitive(value, "true")) {
+                    settings.grapplingHook.noCooldown = true;
+                } else if (!equal_ascii_case_insensitive(value, "false")) {
+                    return parse_error("NoCooldown 必须为 true 或 false。");
+                }
+                seenNoCooldown = true;
+            } else {
                 return parse_error("配置包含未知键。");
             }
-            if (foundEnabled) {
-                return parse_error("Enabled 配置重复。");
-            }
-            if (equal_ascii_case_insensitive(value, "true")) {
-                settings.enabled = true;
-            } else if (!equal_ascii_case_insensitive(value, "false")) {
-                return parse_error("Enabled 必须为 true 或 false。");
-            }
-            foundEnabled = true;
+        } else {
+            return parse_error("配置行格式无效。");
         }
 
         if (lineEnd == std::string_view::npos) {
@@ -93,19 +122,14 @@ auto parse_settings(const std::string_view text) -> SettingsParseResult {
         }
         lineStart = lineEnd + 1;
     }
-
-    if (!foundSection) {
-        return parse_error("缺少 [BaseResourceSharing] 配置节。");
-    }
-    if (!foundEnabled) {
-        return parse_error("缺少 Enabled 配置。");
-    }
     return {.settings = settings};
 }
 
 auto serialize_settings(const Settings& settings) -> std::string {
     return std::string{"[BaseResourceSharing]\nEnabled="} +
-           (settings.enabled ? "true\n" : "false\n");
+           (settings.baseResourceSharing.enabled ? "true\n" : "false\n") +
+           "[GrapplingHook]\nNoCooldown=" +
+           (settings.grapplingHook.noCooldown ? "true\n" : "false\n");
 }
 
 auto load_settings(const std::filesystem::path& path) -> SettingsParseResult {
@@ -164,4 +188,4 @@ auto save_settings(const std::filesystem::path& path, const Settings& settings) 
     }
     return {};
 }
-}  // namespace base_resource_sharing
+}  // namespace editor_settings
