@@ -301,61 +301,63 @@ void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
     CHECK(!scheduler.advance(0.0F, 7, true));
 }
 
-void test_material_sessions_open_once_overlap_and_close_once() {
+void test_foreground_session_preempts_instead_of_combining_operations() {
     using namespace base_resource_sharing;
 
-    MaterialOperationSessions sessions;
-    sessions.begin_world(11);
+    ForegroundMaterialSession sessions;
+    sessions.begin_world(7);
+    const auto crafting = sessions.acquire(ResourceOperation::crafting, 7);
+    CHECK(crafting.kind == ForegroundTransitionKind::acquired);
+    CHECK(sessions.active(7) == ResourceOperation::crafting);
 
-    auto transition = sessions.acquire(ResourceOperation::building, 11);
-    CHECK(transition.unionBecameDesired);
-    CHECK(!transition.unionBecameIdle);
-    CHECK(sessions.active(ResourceOperation::building, 11));
-
-    transition = sessions.acquire(ResourceOperation::crafting, 11);
-    CHECK(!transition.unionBecameDesired);
-    CHECK(sessions.touch(ResourceOperation::crafting, 11));
-    CHECK(
-        (sessions.required_targets(11) == UnionTargets{.baseModules = true, .playerHelper = true}));
-
-    transition = sessions.release(ResourceOperation::building, 11);
-    CHECK(!transition.unionBecameIdle);
-    CHECK((sessions.required_targets(11) ==
-           UnionTargets{.baseModules = false, .playerHelper = true}));
-
-    transition = sessions.release(ResourceOperation::crafting, 11);
-    CHECK(transition.unionBecameIdle);
-    CHECK(!sessions.desired(11));
+    const auto building = sessions.acquire(ResourceOperation::building, 7);
+    CHECK(building.kind == ForegroundTransitionKind::preempted);
+    CHECK(building.previous == ResourceOperation::crafting);
+    CHECK(building.current == ResourceOperation::building);
+    CHECK(sessions.active(7) == ResourceOperation::building);
 }
 
-void test_material_session_touch_does_not_acquire_and_wrong_generation_is_ignored() {
+void test_foreground_session_ignores_stale_touch_and_release() {
     using namespace base_resource_sharing;
 
-    MaterialOperationSessions sessions;
-    sessions.begin_world(12);
-    CHECK(!sessions.touch(ResourceOperation::crafting, 12));
-    CHECK(!sessions.acquire(ResourceOperation::crafting, 13).unionBecameDesired);
-    CHECK(!sessions.desired(12));
-
-    CHECK(sessions.acquire(ResourceOperation::crafting, 12).unionBecameDesired);
-    CHECK(!sessions.release(ResourceOperation::crafting, 13).unionBecameIdle);
-    CHECK(sessions.release(ResourceOperation::crafting, 12).unionBecameIdle);
+    ForegroundMaterialSession sessions;
+    sessions.begin_world(7);
+    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
+    CHECK(!sessions.touch(ResourceOperation::crafting, 7));
+    CHECK(sessions.release(ResourceOperation::crafting, 7).kind == ForegroundTransitionKind::none);
+    CHECK(!sessions.active(8).has_value());
 }
 
-void test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation() {
+void test_foreground_crafting_session_expires_only_after_idle_lease() {
     using namespace base_resource_sharing;
 
-    MaterialOperationSessions sessions;
-    sessions.begin_world(14);
-    CHECK(sessions.acquire(ResourceOperation::building, 14).unionBecameDesired);
-    CHECK(sessions.acquire(ResourceOperation::crafting, 14).unionBecameDesired == false);
+    ForegroundMaterialSession sessions;
+    sessions.begin_world(7);
+    static_cast<void>(sessions.acquire(ResourceOperation::crafting, 7));
+    CHECK(sessions.advance(1.49F, 7).kind == ForegroundTransitionKind::none);
+    CHECK(sessions.touch(ResourceOperation::crafting, 7));
+    CHECK(sessions.advance(1.49F, 7).kind == ForegroundTransitionKind::none);
+    const auto expired = sessions.advance(0.01F, 7);
+    CHECK(expired.kind == ForegroundTransitionKind::released);
+    CHECK(expired.previous == ResourceOperation::crafting);
+    CHECK(!sessions.active(7).has_value());
+}
 
-    CHECK(!sessions.cancel_all(15).unionBecameIdle);
-    CHECK(sessions.desired(14));
+void test_current_base_state_never_leaks_across_worlds() {
+    using namespace base_resource_sharing;
 
-    CHECK(sessions.cancel_all(14).unionBecameIdle);
-    CHECK(!sessions.desired(14));
-    CHECK(sessions.acquire(ResourceOperation::crafting, 14).unionBecameDesired);
+    CurrentBaseState state;
+    const GuidKey baseA{{10, 0, 0, 0}};
+    const GuidKey baseB{{20, 0, 0, 0}};
+    state.begin_world(7);
+    CHECK(state.enter(baseA, 7));
+    CHECK(state.current(7) == baseA);
+    CHECK(!state.exit(baseB, 7));
+    CHECK(state.current(7) == baseA);
+    CHECK(state.exit(baseA, 7));
+    CHECK(!state.current(7).has_value());
+    state.begin_world(8);
+    CHECK(!state.current(8).has_value());
 }
 
 void test_resource_exposure_uses_exactly_one_consumer_surface() {
@@ -547,9 +549,10 @@ auto main() -> int {
     test_missing_early_build_acquire_disables_only_building();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
-    test_material_sessions_open_once_overlap_and_close_once();
-    test_material_session_touch_does_not_acquire_and_wrong_generation_is_ignored();
-    test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation();
+    test_foreground_session_preempts_instead_of_combining_operations();
+    test_foreground_session_ignores_stale_touch_and_release();
+    test_foreground_crafting_session_expires_only_after_idle_lease();
+    test_current_base_state_never_leaks_across_worlds();
     test_resource_exposure_uses_exactly_one_consumer_surface();
     test_applied_sequence_rejects_duplicate_remote_container();
     test_applied_sequence_rejects_injection_of_existing_id();
