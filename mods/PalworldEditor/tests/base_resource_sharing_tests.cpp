@@ -368,20 +368,61 @@ void test_union_targets_do_not_double_expose_crafting_containers() {
 }
 
 void test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent() {
-    grappling_hook::CooldownOverrideLedger ledger;
+    using namespace grappling_hook;
+
+    CooldownOverrideLedger ledger;
     CHECK(ledger.begin_world(7));
-    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+    CHECK(ledger.next_work(7, true) == CooldownWork::none);
 
     ledger.set_desired(true);
-    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::apply);
-    CHECK(ledger.mark_apply_attempted(
-        7, {{.objectFullName = L"PalWeaponBase /Game/GrappleA", .originalCooldown = 12.0F},
-            {.objectFullName = L"PalWeaponBase /Game/GrappleB", .originalCooldown = 6.0F}}));
-    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+    CHECK(ledger.next_work(7, true) == CooldownWork::apply);
+    CHECK(ledger.begin_apply(7));
+    CHECK(ledger.complete_apply(
+        7, CooldownApplyOutcome::succeeded,
+        {{.objectFullName = L"PalWeaponBase /Game/GrappleA", .originalCooldown = 12.0F},
+         {.objectFullName = L"PalWeaponBase /Game/GrappleB", .originalCooldown = 6.0F}}));
+    CHECK(ledger.next_work(7, true) == CooldownWork::none);
     CHECK(ledger.records().size() == 2);
 
     ledger.set_desired(true);
-    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+    CHECK(ledger.next_work(7, true) == CooldownWork::none);
+}
+
+void test_grapple_target_unavailable_waits_for_explicit_retry() {
+    using namespace grappling_hook;
+
+    CooldownOverrideLedger ledger;
+    CHECK(ledger.begin_world(7));
+    ledger.set_desired(true);
+    CHECK(ledger.next_work(7, true) == CooldownWork::apply);
+    CHECK(ledger.begin_apply(7));
+    CHECK(ledger.complete_apply(7, CooldownApplyOutcome::targetUnavailable));
+
+    CHECK(ledger.phase(7) == CooldownRuntimePhase::waitingForRetry);
+    CHECK(ledger.next_work(7, true) == CooldownWork::none);
+    CHECK(!ledger.request_retry(8));
+    CHECK(ledger.request_retry(7));
+    CHECK(ledger.next_work(7, true) == CooldownWork::apply);
+}
+
+void test_grapple_terminal_failure_is_not_reenabled_by_retry_or_toggle() {
+    using namespace grappling_hook;
+
+    CooldownOverrideLedger ledger;
+    CHECK(ledger.begin_world(7));
+    ledger.set_desired(true);
+    CHECK(ledger.begin_apply(7));
+    CHECK(ledger.complete_apply(7, CooldownApplyOutcome::terminalFailure));
+    CHECK(ledger.phase(7) == CooldownRuntimePhase::safetyDisabled);
+    CHECK(!ledger.request_retry(7));
+    ledger.set_desired(false);
+    ledger.set_desired(true);
+    CHECK(ledger.phase(7) == CooldownRuntimePhase::safetyDisabled);
+    CHECK(ledger.next_work(7, true) == CooldownWork::none);
+
+    CHECK(ledger.begin_world(8));
+    CHECK(ledger.phase(8) == CooldownRuntimePhase::readyToApply);
+    CHECK(ledger.next_work(8, true) == CooldownWork::apply);
 }
 
 void test_grapple_target_filter_accepts_only_known_item_ids() {
@@ -395,23 +436,27 @@ void test_grapple_target_filter_accepts_only_known_item_ids() {
 }
 
 void test_grapple_cooldown_restores_each_original_before_changing_world() {
-    grappling_hook::CooldownOverrideLedger ledger;
+    using namespace grappling_hook;
+
+    CooldownOverrideLedger ledger;
     CHECK(ledger.begin_world(7));
     ledger.set_desired(true);
-    CHECK(ledger.mark_apply_attempted(
-        7, {{.objectFullName = L"PalWeaponBase /Game/GrappleA", .originalCooldown = 12.0F},
-            {.objectFullName = L"PalWeaponBase /Game/GrappleB", .originalCooldown = 6.0F}}));
+    CHECK(ledger.begin_apply(7));
+    CHECK(ledger.complete_apply(
+        7, CooldownApplyOutcome::succeeded,
+        {{.objectFullName = L"PalWeaponBase /Game/GrappleA", .originalCooldown = 12.0F},
+         {.objectFullName = L"PalWeaponBase /Game/GrappleB", .originalCooldown = 6.0F}}));
 
     ledger.set_desired(false);
-    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::restore);
+    CHECK(ledger.next_work(7, true) == CooldownWork::restore);
     CHECK(!ledger.begin_world(8));
     ledger.complete_restore(false);
-    CHECK(ledger.next_work(7, true) == grappling_hook::CooldownWork::none);
+    CHECK(ledger.next_work(7, true) == CooldownWork::none);
 
     ledger.complete_restore(true);
     CHECK(ledger.records().empty());
     CHECK(ledger.begin_world(8));
-    CHECK(ledger.next_work(8, true) == grappling_hook::CooldownWork::none);
+    CHECK(ledger.next_work(8, true) == CooldownWork::none);
 }
 
 auto main() -> int {
@@ -432,6 +477,8 @@ auto main() -> int {
     test_material_sessions_can_cancel_a_failed_union_without_losing_world_generation();
     test_union_targets_do_not_double_expose_crafting_containers();
     test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent();
+    test_grapple_target_unavailable_waits_for_explicit_retry();
+    test_grapple_terminal_failure_is_not_reenabled_by_retry_or_toggle();
     test_grapple_target_filter_accepts_only_known_item_ids();
     test_grapple_cooldown_restores_each_original_before_changing_world();
     return failures == 0 ? 0 : 1;
