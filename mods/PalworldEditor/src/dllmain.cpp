@@ -262,10 +262,10 @@ public:
         std::optional<pal_stats::PalStatEditRequest> statRequest;
         if (selectionRequested) {
             skillQueue_.clear();
-            statQueue_.clear();
+            statRequestSlot_.clear();
         } else {
             editRequest = skillQueue_.try_pop();
-            statRequest = statQueue_.try_pop();
+            statRequest = statRequestSlot_.consume();
         }
 
         const auto trigger = skill_editor::decide_pal_resolution(
@@ -344,20 +344,27 @@ public:
         }
 
         if (statRequest.has_value()) {
-            const bool generationCurrent =
-                selectedTarget_.generation() == statRequest->targetGeneration &&
-                worldSession_.generation() == statRequest->worldGeneration &&
-                resolvedPal.has_value() && resolution.resolved;
             const auto target =
-                generationCurrent
+                resolvedPal.has_value() && resolution.resolved
                     ? reinterpret_cast<pal_stats::PalStatTarget>(resolvedPal->parameter)
                     : pal_stats::PalStatTarget{};
-            if (generationCurrent && pal_stats::has_any_change(statRequest->values) &&
-                statGateway_.is_valid(target)) {
-                statGateway_.apply_stat_edit(target, *statRequest);
-                skillRuntimeSnapshot_.palStat = statGateway_.read_stats(target);
-            } else if (!generationCurrent) {
-                statQueue_.clear();
+            const bool targetCurrent = skill_editor::bound_target_request_is_current(
+                *statRequest, selectedTarget_, resolution.observation, target, worldSession_);
+            if (targetCurrent && !statWritesDisabledForWorld_ &&
+                pal_stats::has_any_change(statRequest->values) && statGateway_.is_valid(target)) {
+                const auto result = statGateway_.apply_stat_edit(target, *statRequest);
+                skillRuntimeSnapshot_.palStat = result.snapshot;
+                skillRuntimeSnapshot_.lastResult = result.message;
+                if (result.status == pal_stats::PalStatEditStatus::rollbackFailed) {
+                    statWritesDisabledForWorld_ = true;
+                }
+            } else {
+                statRequestSlot_.clear();
+                skillRuntimeSnapshot_.lastResult =
+                    statWritesDisabledForWorld_
+                        ? "本世界曾发生属性恢复验证失败；后续属性写入已安全停用。"
+                        : "当前高亮帕鲁与已选择目标不一致或暂时无法确认；"
+                          "属性修改未执行。";
             }
             skillSnapshotDirty_ = true;
         }
@@ -397,6 +404,7 @@ public:
                                                                 : std::string{});
         update_runtime_value(skillRuntimeSnapshot_.resolutionStatus, resolution.status);
         update_runtime_value(skillRuntimeSnapshot_.pending, skillQueue_.size() != 0);
+        update_runtime_value(skillRuntimeSnapshot_.statWritesDisabled, statWritesDisabledForWorld_);
         if (!selectedTarget_.is_selected() && (!skillRuntimeSnapshot_.state.passiveIds.empty() ||
                                                !skillRuntimeSnapshot_.state.activeSkills.empty())) {
             skillRuntimeSnapshot_.state = {};
@@ -531,12 +539,13 @@ private:
     auto begin_world_transition() -> void {
         baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
+        statWritesDisabledForWorld_ = false;
         passiveClassificationJob_.cancel();
         passiveClassificationCompleted_.store(0, std::memory_order_relaxed);
         passiveClassificationTotal_.store(0, std::memory_order_relaxed);
         hadUsablePassiveClassificationBeforeRefresh_ = false;
         skillQueue_.clear();
-        statQueue_.clear();
+        statRequestSlot_.clear();
         {
             const std::lock_guard lock(selectionRequestMutex_);
             selectCurrentPalRequest_.reset();
@@ -576,6 +585,7 @@ private:
         skillRuntimeSnapshot_.worldAccessible = false;
         skillRuntimeSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
         skillRuntimeSnapshot_.targetConfirmedForWorld = false;
+        skillRuntimeSnapshot_.statWritesDisabled = false;
         skillSnapshotDirty_ = true;
         publish_skill_snapshot_if_dirty();
     }
@@ -634,6 +644,7 @@ private:
         bool worldAccessible{true};           /**< 当前是否不处于 LoadMap 过渡阶段。 */
         bool worldLifecycleCallbacksReady{};  /**< LoadMap 前后回调是否均已注册。 */
         bool targetConfirmedForWorld{};       /**< 当前世界是否已由用户重新确认目标。 */
+        bool statWritesDisabled{};            /**< 本世界是否因恢复验证失败而停用属性写入。 */
         pal_stats::PalStatSnapshot palStat;   /**< 最近一次从游戏重读的实际属性值。 */
     };
 
@@ -695,11 +706,7 @@ private:
         self->activeChoice_.reset();
         self->passiveSearch_[0] = '\0';
         self->activeSearch_[0] = '\0';
-        self->statLevelInput_ = 1;
-        self->statTalentHpInput_ = 0;
-        self->statTalentShotInput_ = 0;
-        self->statTalentDefenseInput_ = 0;
-        self->statFriendshipInput_ = 0;
+        self->statDraft_.reset();
     }
 
     /**
@@ -1267,32 +1274,31 @@ private:
             ImGui::TextDisabled("属性读取中或不可用");
             return;
         }
+        self->statDraft_.reconcile(stats, snapshot.targetGeneration);
+        auto& values = self->statDraft_.values();
         ImGui::Text("当前：等级 %d / HP %d / 攻击 %d / 防御 %d / 亲密度 %d", stats.level,
                     stats.talentHp, stats.talentShot, stats.talentDefense, stats.friendshipRank);
 
         ImGui::SetNextItemWidth(120.0F);
-        ImGui::DragInt("等级##stat-level", &self->statLevelInput_, 1.0F, 1, 80);
+        ImGui::DragInt("等级##stat-level", &values.level, 1.0F, pal_stats::kLevelMin,
+                       pal_stats::kLevelMax);
         ImGui::SetNextItemWidth(120.0F);
-        ImGui::DragInt("个体值·HP##stat-hp", &self->statTalentHpInput_, 1.0F, 0, 255);
+        ImGui::DragInt("个体值·HP##stat-hp", &values.talentHp, 1.0F, pal_stats::kTalentMin,
+                       pal_stats::kTalentMax);
         ImGui::SetNextItemWidth(120.0F);
-        ImGui::DragInt("个体值·攻击##stat-atk", &self->statTalentShotInput_, 1.0F, 0, 255);
+        ImGui::DragInt("个体值·攻击##stat-atk", &values.talentShot, 1.0F, pal_stats::kTalentMin,
+                       pal_stats::kTalentMax);
         ImGui::SetNextItemWidth(120.0F);
-        ImGui::DragInt("个体值·防御##stat-def", &self->statTalentDefenseInput_, 1.0F, 0, 255);
+        ImGui::DragInt("个体值·防御##stat-def", &values.talentDefense, 1.0F, pal_stats::kTalentMin,
+                       pal_stats::kTalentMax);
         ImGui::SetNextItemWidth(120.0F);
-        ImGui::DragInt("亲密度##stat-friend", &self->statFriendshipInput_, 1.0F, 0, 10);
+        ImGui::DragInt("亲密度##stat-friend", &values.friendshipRank, 1.0F,
+                       pal_stats::kFriendshipRankMin, pal_stats::kFriendshipRankMax);
 
-        ImGui::BeginDisabled(mutationsDisabled);
+        const auto request = self->statDraft_.make_request(snapshot.worldGeneration);
+        ImGui::BeginDisabled(mutationsDisabled || !request.has_value());
         if (ImGui::Button("应用属性修改")) {
-            pal_stats::PalStatEditRequest request{
-                .values = {.level = self->statLevelInput_,
-                           .talentHp = self->statTalentHpInput_,
-                           .talentShot = self->statTalentShotInput_,
-                           .talentDefense = self->statTalentDefenseInput_,
-                           .friendshipRank = self->statFriendshipInput_},
-                .targetGeneration = snapshot.targetGeneration,
-                .worldGeneration = snapshot.worldGeneration,
-            };
-            self->statQueue_.push(request);
+            self->statRequestSlot_.submit(*request);
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
@@ -1342,7 +1348,8 @@ private:
             const std::lock_guard lock(self->selectionRequestMutex_);
             selectionPending = self->selectCurrentPalRequest_.has_value();
         }
-        const bool pending = snapshot.pending || self->skillQueue_.size() != 0 || selectionPending;
+        const bool pending = snapshot.pending || self->skillQueue_.size() != 0 ||
+                             self->statRequestSlot_.has_pending() || selectionPending;
         const bool catalogReady = skill_editor::catalog_is_ready_for_editing(snapshot.catalog);
         const bool lifecycleReady =
             snapshot.worldAccessible && snapshot.worldLifecycleCallbacksReady;
@@ -1397,6 +1404,10 @@ private:
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
                                "正在切换世界；所有待处理修改均已取消。");
         }
+        if (snapshot.statWritesDisabled) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                               "属性写入已在本世界安全停用；请退出并重新进入世界。");
+        }
         if (pending) {
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "技能修改处理中...");
         }
@@ -1422,7 +1433,7 @@ private:
         ImGui::Separator();
         render_active_skills(self, snapshot, pending || !editingReady);
         ImGui::Separator();
-        render_pal_stats(self, snapshot, pending || !editingReady);
+        render_pal_stats(self, snapshot, pending || !editingReady || snapshot.statWritesDisabled);
     }
 
     /** @brief 给予物品输入框中的 ASCII Raw ID；只由 GUI 线程访问。 */
@@ -1486,8 +1497,10 @@ private:
     pal_skills::PalSkillGateway skillGateway_;
     /** @brief 在游戏线程执行帕鲁属性反射读写的无 UObject 所有权网关。 */
     pal_stats::PalStatGateway statGateway_;
-    /** @brief GUI 生产、游戏线程 FIFO 消费的线程安全属性编辑请求队列。 */
-    pal_stats::PalStatEditQueue statQueue_;
+    /** @brief 属性恢复验证失败后阻止本世界继续写入；仅由游戏线程访问。 */
+    bool statWritesDisabledForWorld_{};
+    /** @brief GUI 生产、游戏线程消费且只保留最新状态的线程安全属性请求槽。 */
+    pal_stats::PalStatEditRequestSlot statRequestSlot_;
     /** @brief 仅由 EngineTick/LoadMap 游戏线程回调访问的世界代次与确认状态。 */
     skill_editor::WorldSessionState worldSession_;
     /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
@@ -1533,12 +1546,8 @@ private:
     char passiveSearch_[96]{};
     /** @brief 主动技能下拉框搜索缓冲区；只由 GUI 线程访问。 */
     char activeSearch_[96]{};
-    /** @brief 属性编辑输入缓冲区；只由 GUI 线程访问。 */
-    int statLevelInput_{1};
-    int statTalentHpInput_{0};
-    int statTalentShotInput_{0};
-    int statTalentDefenseInput_{0};
-    int statFriendshipInput_{0};
+    /** @brief 从已确认目标真实快照初始化、只生成差量请求的属性编辑草稿。 */
+    pal_stats::PalStatEditDraft statDraft_;
     /**
      * @brief 被动技能编辑模式与索引；只由 GUI 线程访问。
      * @details `-1` 表示未编辑，`-2` 表示新增，非负值表示要替换的被动技能索引。

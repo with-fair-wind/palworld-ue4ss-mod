@@ -1213,6 +1213,30 @@ void test_stale_generation_never_reaches_apply_callback() {
     CHECK(applyCalls == 1);
 }
 
+void test_pal_stat_request_requires_the_locked_guid() {
+    skill_editor::SelectedTargetState state;
+    skill_editor::WorldSessionState session;
+    const skill_editor::SelectedTargetObservation locked{
+        .identity = identity(10),
+        .name = "Boar",
+    };
+    const skill_editor::SelectedTargetObservation other{
+        .identity = identity(11),
+        .name = "Sheep",
+    };
+    CHECK(state.confirm(locked));
+    CHECK(session.confirm_target());
+
+    const pal_stats::PalStatEditRequest request{
+        .values = {.level = 20},
+        .targetGeneration = state.generation(),
+        .worldGeneration = session.generation(),
+    };
+    CHECK(skill_editor::bound_target_request_is_current(request, state, locked, 0x2000, session));
+    CHECK(!skill_editor::bound_target_request_is_current(request, state, other, 0x2000, session));
+    CHECK(!skill_editor::bound_target_request_is_current(request, state, locked, 0, session));
+}
+
 void test_pal_stat_clamp_respects_policy_bounds() {
     using namespace pal_stats;
     // 等级 1–80
@@ -1222,12 +1246,12 @@ void test_pal_stat_clamp_respects_policy_bounds() {
     CHECK(clamp_level(80) == 80);
     CHECK(clamp_level(81) == 80);
     CHECK(clamp_level(255) == 80);
-    // 个体值 0–255（突破游戏 100 上限）
+    // 普通个体值 0–100，拒绝生成超出游戏正常范围的存档数据。
     CHECK(clamp_talent(-5) == 0);
     CHECK(clamp_talent(0) == 0);
     CHECK(clamp_talent(100) == 100);
-    CHECK(clamp_talent(255) == 255);
-    CHECK(clamp_talent(256) == 255);
+    CHECK(clamp_talent(255) == 100);
+    CHECK(clamp_talent(256) == 100);
     // 亲密度 rank 0–10
     CHECK(clamp_friendship_rank(-1) == 0);
     CHECK(clamp_friendship_rank(0) == 0);
@@ -1241,6 +1265,65 @@ void test_pal_stat_values_detects_any_change() {
     CHECK(has_any_change(PalStatValues{.level = 1}));
     CHECK(has_any_change(PalStatValues{.talentHp = 0}));
     CHECK(has_any_change(PalStatValues{.friendshipRank = 10}));
+}
+
+void test_pal_stat_verification_checks_only_requested_fields() {
+    const pal_stats::PalStatSnapshot actual{
+        .level = 45,
+        .talentHp = 90,
+        .talentShot = 82,
+        .talentDefense = 63,
+        .friendshipRank = 4,
+        .friendshipPoint = 1200,
+        .readable = true,
+    };
+
+    CHECK(pal_stats::verify_stat_edit({.talentHp = 90}, actual));
+    CHECK(pal_stats::verify_stat_edit({.level = 45, .friendshipRank = 4}, actual));
+    CHECK(!pal_stats::verify_stat_edit({.talentHp = 89}, actual));
+
+    auto unreadable = actual;
+    unreadable.readable = false;
+    CHECK(!pal_stats::verify_stat_edit({.talentHp = 90}, unreadable));
+}
+
+void test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes() {
+    pal_stats::PalStatEditDraft draft;
+    draft.synchronize({.level = 45,
+                       .talentHp = 71,
+                       .talentShot = 82,
+                       .talentDefense = 63,
+                       .friendshipRank = 4,
+                       .friendshipPoint = 1200,
+                       .readable = true},
+                      7);
+
+    CHECK(draft.values().level == 45);
+    CHECK(draft.values().talentHp == 71);
+    CHECK(!draft.make_request(11).has_value());
+
+    draft.values().talentHp = 90;
+    const auto request = draft.make_request(11);
+    CHECK(request.has_value());
+    CHECK(!request->values.level.has_value());
+    CHECK(request->values.talentHp == 90);
+    CHECK(!request->values.talentShot.has_value());
+    CHECK(!request->values.talentDefense.has_value());
+    CHECK(!request->values.friendshipRank.has_value());
+    CHECK(request->targetGeneration == 7);
+    CHECK(request->worldGeneration == 11);
+}
+
+void test_pal_stat_request_slot_keeps_only_latest_request() {
+    pal_stats::PalStatEditRequestSlot slot;
+    slot.submit({.values = {.level = 10}, .targetGeneration = 1, .worldGeneration = 2});
+    slot.submit({.values = {.level = 20}, .targetGeneration = 1, .worldGeneration = 2});
+
+    CHECK(slot.has_pending());
+    const auto request = slot.consume();
+    CHECK(request.has_value());
+    CHECK(request->values.level == 20);
+    CHECK(!slot.has_pending());
 }
 
 auto main() -> int {
@@ -1301,7 +1384,11 @@ auto main() -> int {
     test_local_candidate_selection_reports_each_unavailable_stage();
     test_multiple_local_candidates_are_rejected();
     test_stale_generation_never_reaches_apply_callback();
+    test_pal_stat_request_requires_the_locked_guid();
     test_pal_stat_clamp_respects_policy_bounds();
     test_pal_stat_values_detects_any_change();
+    test_pal_stat_verification_checks_only_requested_fields();
+    test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes();
+    test_pal_stat_request_slot_keeps_only_latest_request();
     return failures == 0 ? 0 : 1;
 }

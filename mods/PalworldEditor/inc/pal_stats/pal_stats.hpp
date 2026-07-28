@@ -11,7 +11,7 @@ namespace pal_stats {
 /**
  * @brief 通过 `PalIndividualCharacterParameter.SaveParameter` 反射读写帕鲁属性。
  * @details 本类不拥有任何 Unreal 对象。所有成员函数都必须在游戏线程调用；
- *          `apply_stat_edit` 的布尔返回值只表示能否发起写入，调用方仍需重读确认。
+ *          `apply_stat_edit` 在同一游戏线程调用内完成预检、写入、重读验证和必要的恢复。
  */
 class PalStatGateway final {
 public:
@@ -34,10 +34,10 @@ public:
      * @brief 按 `request.values` 写入各项属性；空 optional 跳过该项。
      * @param[in] target 已由 is_valid() 校验的目标句柄。
      * @param[in] request 携带期望值与目标/世界代次的编辑请求。
-     * @retval true 目标与 `SaveParameter` 结构有效，已对每个设置项发起写入。
-     * @retval false 目标失效或 `SaveParameter` 结构不可达。
-     * @note 返回 `true` 不保证游戏立即刷新面板；按设计在重召唤/重载后可见。
+     * @return 结构化事务结果，包含最终重读快照和面向用户的诊断。
+     * @details 任一所需反射字段或亲密度阈值不可用时零写入；写后不一致时恢复修改前值。
      */
-    auto apply_stat_edit(PalStatTarget target, const PalStatEditRequest& request) -> bool;
+    [[nodiscard]] auto apply_stat_edit(PalStatTarget target, const PalStatEditRequest& request)
+        -> PalStatEditResult;
 };
 }  // namespace pal_stats

@@ -301,6 +301,26 @@ private:
 };
 
 /**
+ * @brief 统一校验绑定世界与显式目标的修改请求是否仍可安全执行。
+ * @tparam Request 含 `targetGeneration` 和 `worldGeneration` 字段的纯值请求。
+ * @param[in] request GUI 提交的世界/目标绑定请求。
+ * @param[in] state 用户显式确认的目标状态。
+ * @param[in] observation 执行前在游戏线程重新解析的当前目标观察。
+ * @param[in] transientTarget 只在当前游戏线程回调内有效的非拥有对象句柄。
+ * @param[in] session 当前世界生命周期与确认状态。
+ * @return 世界可访问且已确认、两个代数匹配、GUID 匹配且临时句柄非零时返回 `true`。
+ */
+template <typename Request>
+[[nodiscard]] auto bound_target_request_is_current(const Request& request,
+                                                   const SelectedTargetState& state,
+                                                   const SelectedTargetObservation& observation,
+                                                   const std::uintptr_t transientTarget,
+                                                   const WorldSessionState& session) -> bool {
+    return transientTarget != 0 && session.request_is_current(request.worldGeneration) &&
+           state.matches(request.targetGeneration, observation);
+}
+
+/**
  * @brief 仅在排队请求仍指向当前待出战帕鲁时调用写入回调。
  * @tparam Apply 接受 `const SkillEditRequest&` 并返回 `SkillEditResult` 的可调用类型。
  * @param[in] request 待执行的排队请求。
@@ -317,8 +337,7 @@ template <typename Apply>
                                               const SkillTarget transientTarget,
                                               const WorldSessionState& session, Apply&& apply)
     -> std::optional<SkillEditResult> {
-    if (transientTarget == 0 || !session.request_is_current(request.worldGeneration) ||
-        !state.matches(request.targetGeneration, observation)) {
+    if (!bound_target_request_is_current(request, state, observation, transientTarget, session)) {
         return std::nullopt;
     }
 
