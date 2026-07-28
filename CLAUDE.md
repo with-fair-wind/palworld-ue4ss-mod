@@ -6,10 +6,10 @@ instructions live in `README.md`; repository-wide agent rules live in `AGENTS.md
 ## 项目概览
 
 这是一个面向 **Palworld 1.0** 的 UE4SS C++23 mod。当前 mod 名为 `PalworldEditor`
-（版本 1.6.4），提供：
+（版本 1.6.5），提供：
 
 - 运行时物品目录、本地化搜索、给予物品和主背包数量修改；
-- 数字键当前高亮、下一次按 E 会召唤的队伍帕鲁主动/被动技能编辑和四词条预设；
+- 数字键当前高亮、下一次按 E 会召唤的队伍帕鲁主动/被动技能编辑、被动技能分类选择和四词条预设；
 - 默认关闭、仅支持单人/本地房主的同公会跨据点制作与建造材料共享。
 
 Palworld 1.0 需要 UE4SS Experimental (Palworld) + PalSchema（含
@@ -38,7 +38,7 @@ DLL 输出为 `build/Game__Shipping__Win64/bin/PalworldEditor.dll`；部署目�
 
 - `inc/game/pal_game.hpp`：背包、物品和当前待出战队伍帕鲁的反射访问；
 - `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和 Raw ID 索引；
-- `inc/skills/`：技能定义、目录、编辑服务、显式目标锁定与世界代次状态；
+- `inc/skills/`：技能定义、目录、编辑服务、被动技能分类、显式目标锁定与世界代次状态；
 - `src/pal_skills.cpp`：技能领域接口到 Palworld UFunction 的游戏线程适配；
 - `inc/base_resource_sharing/resource_pool.hpp`：资源过滤、能力和恢复纯逻辑；
 - `inc/base_resource_sharing/resource_session.hpp`：目录校准调度与制作/建造会话租约；
@@ -52,6 +52,13 @@ ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反
 
 当前技能目标只在用户点击“选择当前帕鲁”后锁定。数字键切换不会自动切换编辑对象；修改前仍会重新校验
 当前 GUID。LoadMap 前必须清空请求并撤销写权限，进入新世界后必须重新选择。
+
+被动技能分类选择器在新增/替换流程中提供“类别 + 技能”两级下拉框。分类来源是 `PalPassiveSkillManager:GetSkillData`
+的 `Rank` 与 `AddWorldTreePal`：传说优先，其次按 `Rank` 划分负面、极品、稀有、普通。分类只在被动目录成功刷新后
+由增量任务驱动，每个 EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束；单个 `GetSkillData` 失败只标记未知，
+不终止任务。成功元数据缓存保留到卸载，手动刷新只重试新 ID 与失败 ID；分类完成前只有“全部”可选，结构性失败
+若有旧分类则保留具体类别可用。LoadMap 前取消任务但保留缓存。1.6.5 增加该选择器，不改变主动技能目录、被动
+写入、四词条预设、目标锁定与资源共享，也不引入常驻扫描或逐帧任务。
 
 ## 资源共享契约
 
@@ -70,7 +77,8 @@ ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反
 同一可访问世界内关闭后重新开启共享时，必须以当前世界代次重新初始化会话和目录调度器，由后续 EngineTick
 自动校准。该路径不得增加线程、全局扫描、槽位扫描或逐帧任务；恢复失败造成的本世界安全禁用不能用开关绕过。
 1.6.1 修复该开关生命周期；1.6.2 移除确认帕鲁后的空闲后台解析；1.6.3 增加首次资格计算前的资源联合、
-制作唯一 Helper 入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚。
+制作唯一 Helper 入口和活动会话校准抑制；1.6.4 增加被动技能四词条预设的单请求差量应用与失败回滚；
+1.6.5 增加被动技能分类选择器，以有界小批次在 EngineTick 后台分类，不增加常驻工作。
 
 本地权限门为 `IsServer && !IsDedicatedServer`。修理共享仍不可用。不要与 IntegratedStorage、
 UBIM Lite、BlueprintResearch 或其他修改相同资源路径的 mod 同时测试。
@@ -85,7 +93,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-游戏内应看到 `PalworldEditor loaded (v1.6.4)`。除物品、技能和世界切换回归外，还要验证：
+游戏内应看到 `PalworldEditor loaded (v1.6.5)`。除物品、技能和世界切换回归外，还要验证：
 
 - 关闭资源共享时，工厂和建造界面性能与未启用资源功能一致；
 - 同一世界内关闭后重新开启会自动恢复非零计数，每次重新开启只产生一次成功目录校准；

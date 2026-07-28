@@ -6,8 +6,11 @@
  *          `PalUIUtility`。所有接口均在游戏线程执行，所有 Unreal 裸指针均为非拥有观察指针。
  */
 #include <algorithm>
+#include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
@@ -252,6 +255,116 @@ auto PalSkillGateway::rewrite_active(const skill_editor::SkillTarget target,
         pal->ProcessEvent(addFunction, &params);
     }
     return true;
+}
+
+/**
+ * @details 动态解析 `GetSkillData` 的参数与返回结构，只读取 `Rank` 和
+ *          `AddWorldTreePal`。完整调用契约见头文件中的成员声明。
+ */
+auto PalSkillGateway::load_passive_skill_metadata_batch(
+    const std::span<const std::string> ids, const std::size_t maxItems,
+    const std::chrono::microseconds budget) const -> skill_editor::PassiveSkillMetadataBatchResult {
+    using clock = std::chrono::steady_clock;
+    const auto startedAt = clock::now();
+    skill_editor::PassiveSkillMetadataBatchResult result;
+    const auto finish = [&result, startedAt] {
+        result.elapsed =
+            std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - startedAt);
+    };
+
+    if (ids.empty() || maxItems == 0) {
+        finish();
+        return result;
+    }
+
+    auto* const manager = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
+    auto* const function =
+        find_function<UFunction>(STR("/Script/Pal.PalPassiveSkillManager:GetSkillData"));
+    auto* const skillNameProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FNameProperty>(function->FindProperty(FName(STR("SkillName"), FNAME_Find)));
+    auto* const outSkillDataProperty =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("outSkillData"), FNAME_Find)));
+    auto* const returnProperty =
+        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
+    auto* const rowStruct =
+        outSkillDataProperty == nullptr ? nullptr : outSkillDataProperty->GetStruct().Get();
+    auto* const rankProperty =
+        rowStruct == nullptr
+            ? nullptr
+            : CastField<FIntProperty>(rowStruct->FindProperty(FName(STR("Rank"), FNAME_Find)));
+    auto* const worldTreeProperty = rowStruct == nullptr
+                                        ? nullptr
+                                        : CastField<FBoolProperty>(rowStruct->FindProperty(
+                                              FName(STR("AddWorldTreePal"), FNAME_Find)));
+
+    if (manager == nullptr) {
+        result.error = "PalPassiveSkillManager is unavailable";
+    } else if (function == nullptr) {
+        result.error = "GetSkillData is unavailable";
+    } else if (skillNameProperty == nullptr) {
+        result.error = "GetSkillData.SkillName is unavailable";
+    } else if (outSkillDataProperty == nullptr || rowStruct == nullptr) {
+        result.error = "GetSkillData.outSkillData is unavailable";
+    } else if (returnProperty == nullptr) {
+        result.error = "GetSkillData return value is unavailable";
+    } else if (rankProperty == nullptr) {
+        result.error = "FPalPassiveSkillDatabaseRow.Rank is unavailable";
+    } else if (worldTreeProperty == nullptr) {
+        result.error = "FPalPassiveSkillDatabaseRow.AddWorldTreePal is unavailable";
+    }
+    if (!result.error.empty()) {
+        finish();
+        return result;
+    }
+
+    const auto count = std::min(ids.size(), maxItems);
+    result.entries.reserve(count);
+    for (std::size_t index = 0; index < count; ++index) {
+        {
+            std::vector<std::byte> params(static_cast<std::size_t>(function->GetParmsSize()));
+            function->InitializeStruct(params.data());
+            struct ParamsGuard {
+                UFunction* function{}; /**< 非拥有的当前调用函数。 */
+                void* params{};        /**< 当前调用动态参数缓冲区。 */
+
+                /** @brief 销毁参数缓冲区内由 Unreal 初始化的字段。 */
+                ~ParamsGuard() {
+                    function->DestroyStruct(params);
+                }
+            } guard{.function = function, .params = params.data()};
+
+            const auto wide = text_encoding::widen_ascii(ids[index]);
+            const FName skillName(wide.c_str());
+            skillNameProperty->CopyCompleteValue(
+                skillNameProperty->ContainerPtrToValuePtr<void>(params.data()), &skillName);
+            manager->ProcessEvent(function, params.data());
+
+            if (!returnProperty->GetPropertyValueInContainer(params.data())) {
+                result.entries.push_back({.id = ids[index], .metadata = std::nullopt});
+            } else {
+                void* const row = outSkillDataProperty->ContainerPtrToValuePtr<void>(params.data());
+                const auto rank = rankProperty->GetPropertyValueInContainer(row);
+                const bool addWorldTreePal = worldTreeProperty->GetPropertyValueInContainer(row);
+                result.entries.push_back(
+                    {.id = ids[index],
+                     .metadata = skill_editor::PassiveSkillMetadata{
+                         .rank = rank,
+                         .addWorldTreePal = addWorldTreePal,
+                         .category = skill_editor::classify_passive_skill(rank, addWorldTreePal)}});
+            }
+        }
+
+        if (clock::now() - startedAt >= budget) {
+            break;
+        }
+    }
+
+    finish();
+    return result;
 }
 
 /**
