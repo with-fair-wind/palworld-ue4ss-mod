@@ -130,41 +130,6 @@ struct ResourceExposurePlan {
     return {.operation = operation};
 }
 
-struct UnionTargets {
-    bool baseModules{};
-    bool playerHelper{};
-
-    auto operator<=>(const UnionTargets&) const = default;
-};
-
-[[nodiscard]] constexpr auto union_targets_for_operation(const ResourceOperation operation) noexcept
-    -> UnionTargets {
-    switch (operation) {
-        case ResourceOperation::crafting:
-            return {.playerHelper = true};
-        case ResourceOperation::building:
-            return {.baseModules = true, .playerHelper = true};
-        case ResourceOperation::repair:
-            return {};
-    }
-    return {};
-}
-
-[[nodiscard]] constexpr auto combine_union_targets(const UnionTargets left,
-                                                   const UnionTargets right) noexcept
-    -> UnionTargets {
-    return {
-        .baseModules = left.baseModules || right.baseModules,
-        .playerHelper = left.playerHelper || right.playerHelper,
-    };
-}
-
-[[nodiscard]] constexpr auto contains_union_targets(const UnionTargets current,
-                                                    const UnionTargets required) noexcept -> bool {
-    return (!required.baseModules || current.baseModules) &&
-           (!required.playerHelper || current.playerHelper);
-}
-
 [[nodiscard]] constexpr auto resource_hooks_required(const bool enabled,
                                                      const bool worldAccessible) noexcept -> bool {
     return enabled && worldAccessible;

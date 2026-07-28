@@ -163,11 +163,12 @@ public:
         }
 
         const auto sessionTransition = sessions_.advance(deltaSeconds, generation);
-        if (sessionTransition.unionBecameIdle) {
+        if (sessionTransition.kind == ForegroundTransitionKind::released) {
             restore_or_disable("制作会话空闲");
         }
 
-        if (scheduler_.advance(deltaSeconds, generation, !liveUnion_.active)) {
+        const bool idle = !sessions_.active(generation).has_value() && !liveUnion_.active;
+        if (scheduler_.advance(deltaSeconds, generation, idle)) {
             auto* worldContext = resolve_world_context(nullptr);
             reconcile_catalog(worldContext);
         }
@@ -290,15 +291,6 @@ private:
         containerCount_ = catalog_.plan.ordered.size();
         runtimeError_.clear();
 
-        bool unionReady = true;
-        const auto targets = sessions_.required_targets(generation);
-        if (targets != UnionTargets{}) {
-            unionReady = apply_live_union(worldContext, targets);
-            if (!unionReady) {
-                static_cast<void>(sessions_.cancel_all(generation));
-            }
-        }
-
         const auto elapsed =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                 .count();
@@ -306,28 +298,20 @@ private:
             STR("PalworldEditor: resource catalog reconciled in {:.3f} ms, bases={}, "
                 "containers={}, union={}\n"),
             elapsed, baseCount_, containerCount_, liveUnion_.active);
-        if (!unionReady) {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: resource union initialization failed after catalog "
-                    "reconciliation; the current material operation was cancelled\n"));
-        }
         snapshotDirty_.mark();
     }
 
-    [[nodiscard]] auto apply_live_union(UObject* worldContext, const UnionTargets targets) -> bool {
-        UnionTargets requestedTargets = targets;
-        UnionTargets previousTargets;
+    [[nodiscard]] auto apply_live_union(UObject* worldContext, const ResourceExposurePlan& exposure)
+        -> bool {
         if (liveUnion_.active) {
             if (liveUnion_.generation != runtime_.generation() ||
                 liveUnion_.guildId != catalog_.guildId) {
                 return false;
             }
-            if (contains_union_targets(liveUnion_.targets, targets)) {
+            if (liveUnion_.exposure == exposure) {
                 return true;
             }
-            previousTargets = liveUnion_.targets;
-            requestedTargets = combine_union_targets(previousTargets, targets);
-            if (!restore_live_union("扩展材料操作联合")) {
+            if (!restore_live_union("切换前台材料操作")) {
                 return false;
             }
         }
@@ -342,16 +326,9 @@ private:
         bool applied{};
         {
             MutationScope mutation{selfMutation_};
-            applied =
-                detail::apply_union(worldContext, catalog_, requestedTargets, liveUnion_, error);
+            applied = detail::apply_union(worldContext, catalog_, exposure, liveUnion_, error);
         }
         if (!applied) {
-            if (previousTargets != UnionTargets{}) {
-                std::string rollbackError;
-                MutationScope mutation{selfMutation_};
-                static_cast<void>(detail::apply_union(worldContext, catalog_, previousTargets,
-                                                      liveUnion_, rollbackError));
-            }
             runtimeError_ = std::move(error);
             snapshotDirty_.mark();
             return false;
@@ -361,27 +338,22 @@ private:
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                 .count();
         Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: resource union opened in {:.3f} ms, entries={}, modules={}, "
-                "helper={}\n"),
-            elapsed, liveUnion_.entries.size(), requestedTargets.baseModules,
-            requestedTargets.playerHelper);
+            STR("PalworldEditor: resource union opened in {:.3f} ms, operation={}, surface={}, "
+                "injected={}\n"),
+            elapsed, static_cast<int>(exposure.operation), static_cast<int>(exposure.surface),
+            liveUnion_.entry.has_value() ? liveUnion_.entry->injected.size() : 0);
         runtimeError_.clear();
         snapshotDirty_.mark();
         return true;
     }
 
-    [[nodiscard]] auto ensure_union(UObject* hint, const ResourceOperation operation) -> bool {
-        const auto generation = runtime_.generation();
-        if (!runtime_.can_extend(operation, generation)) {
-            return false;
-        }
+    [[nodiscard]] auto ensure_union(UObject* hint, const ResourceExposurePlan& exposure) -> bool {
         remember_world_context(hint);
-        const auto targets = sessions_.required_targets(generation);
-        if (hint == nullptr || targets == UnionTargets{} || !catalog_ready()) {
-            scheduler_.request_immediate(generation);
+        if (hint == nullptr || exposure.surface == ResourceConsumerSurface::none ||
+            !catalog_ready()) {
             return false;
         }
-        return apply_live_union(hint, targets);
+        return apply_live_union(hint, exposure);
     }
 
     [[nodiscard]] auto restore_live_union(const std::string_view reason) -> bool {
@@ -431,15 +403,25 @@ private:
             return;
         }
         const auto transition = sessions_.release(ResourceOperation::building, generation);
-        if (transition.unionBecameIdle) {
+        if (transition.kind == ForegroundTransitionKind::released) {
             restore_or_disable("退出建造模式");
         }
     }
 
-    auto handle_acquire(UObject* context, const ResourceOperation operation) -> void {
+    auto acquire_foreground(UObject* context, const ResourceOperation operation) -> void {
         const auto generation = runtime_.generation();
+        if (!runtime_.can_extend(operation, generation)) {
+            return;
+        }
+        remember_world_context(context);
+        if (!catalog_ready()) {
+            runtimeError_ = "共享资源目录尚未就绪；本次菜单保持原版行为。";
+            scheduler_.request_immediate(generation);
+            snapshotDirty_.mark();
+            return;
+        }
         if (operation == ResourceOperation::building &&
-            !currentBase_.current(generation).has_value() && catalog_ready()) {
+            !currentBase_.current(generation).has_value()) {
             std::string error;
             const auto nearest = detail::resolve_nearest_base_id(context, catalog_, error);
             if (!nearest.has_value() || !currentBase_.enter(*nearest, generation)) {
@@ -448,35 +430,37 @@ private:
                 return;
             }
         }
-        static_cast<void>(sessions_.acquire(operation, generation));
-        remember_world_context(context);
-        if (!catalog_ready()) {
-            runtimeError_ = "正在初始化共享资源目录；目录就绪后会自动建立本次材料会话。";
-            scheduler_.request_immediate(generation);
+        const auto exposure = make_exposure_plan(operation, currentBase_.current(generation));
+        if (exposure.surface == ResourceConsumerSurface::none) {
+            runtimeError_ = "当前材料操作没有可用的单一消费入口。";
             snapshotDirty_.mark();
             return;
         }
-        if (ensure_union(context, operation)) {
+        const auto transition = sessions_.acquire(operation, generation);
+        if (transition.kind == ForegroundTransitionKind::none) {
             return;
         }
-        const auto transition = sessions_.release(operation, generation);
-        if (transition.unionBecameIdle) {
-            restore_or_disable("材料操作会话获取失败");
+        if (transition.kind == ForegroundTransitionKind::preempted &&
+            !restore_live_union("前台材料操作抢占")) {
+            static_cast<void>(sessions_.release(operation, generation));
+            const std::string error = "旧材料联合未能完整恢复；本世界已禁用制作和建造共享。";
+            disable_operation(ResourceOperation::crafting, error);
+            disable_operation(ResourceOperation::building, error);
+            return;
         }
-        runtimeError_ = "资源目录尚未安全就绪；本次菜单保持原版行为，请重新打开后再试。";
-        scheduler_.request_immediate(generation);
+        if (ensure_union(context, exposure)) {
+            return;
+        }
+        static_cast<void>(sessions_.release(operation, generation));
+        restore_or_disable("材料操作会话获取失败");
+        if (runtimeError_.empty()) {
+            runtimeError_ = "未能建立单一材料消费面；本次菜单保持原版行为。";
+        }
         snapshotDirty_.mark();
     }
 
     auto handle_touch(const ResourceOperation operation) -> void {
         static_cast<void>(sessions_.touch(operation, runtime_.generation()));
-    }
-
-    auto handle_release(const ResourceOperation operation, const std::string_view reason) -> void {
-        const auto transition = sessions_.release(operation, runtime_.generation());
-        if (transition.unionBecameIdle) {
-            restore_or_disable(reason);
-        }
     }
 
     auto handle_structure_changed() -> void {
@@ -518,13 +502,10 @@ private:
                 handle_structure_changed();
                 break;
             case HookEvent::acquire:
-                handle_acquire(context.Context, spec.operation);
+                acquire_foreground(context.Context, spec.operation);
                 break;
             case HookEvent::touch:
                 handle_touch(spec.operation);
-                break;
-            case HookEvent::release:
-                handle_release(spec.operation, "制作请求已提交");
                 break;
             case HookEvent::updateBuildingMode:
                 update_building_mode(context.Context);
@@ -634,7 +615,7 @@ private:
 
     RuntimeState runtime_;
     ReconcileScheduler scheduler_;
-    MaterialOperationSessions sessions_;
+    ForegroundMaterialSession sessions_;
     CurrentBaseState currentBase_;
     detail::ResourceCatalogSnapshot catalog_;
     detail::LiveUnion liveUnion_;

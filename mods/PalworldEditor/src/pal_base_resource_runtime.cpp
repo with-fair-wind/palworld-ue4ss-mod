@@ -481,6 +481,22 @@ auto notify_array_changed(UObject* object, const CharType* functionName) -> void
                                              : read_module_sequence(object, property, restored);
     return finalRead && restored == removal.kept;
 }
+
+[[nodiscard]] auto sequence_status_text(const SequenceValidationStatus status) -> std::string_view {
+    switch (status) {
+        case SequenceValidationStatus::valid:
+            return "valid";
+        case SequenceValidationStatus::originalPrefixChanged:
+            return "originalPrefixChanged";
+        case SequenceValidationStatus::injectedCountMismatch:
+            return "injectedCountMismatch";
+        case SequenceValidationStatus::duplicateInjectedId:
+            return "duplicateInjectedId";
+        case SequenceValidationStatus::unexpectedTail:
+            return "unexpectedTail";
+    }
+    return "unknown";
+}
 }  // namespace
 
 auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
@@ -709,10 +725,16 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
 }
 
 auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
-                 const UnionTargets targets, LiveUnion& liveUnion, std::string& error) -> bool {
+                 const ResourceExposurePlan& exposure, LiveUnion& liveUnion, std::string& error)
+    -> bool {
     error.clear();
     if (liveUnion.active) {
         error = "已有据点资源联合处于活动状态。";
+        return false;
+    }
+    if (exposure.surface == ResourceConsumerSurface::none ||
+        exposure.operation == ResourceOperation::repair) {
+        error = "当前材料操作没有可用的单一消费入口。";
         return false;
     }
     if (worldContext == nullptr || catalog.generation == 0 || !catalog.guildId.valid() ||
@@ -721,65 +743,78 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
         return false;
     }
 
-    UObject* mapObjectManager{};
-    UObject* inventoryData{};
-    if (!call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager) ||
-        !call_utility_object(worldContext, STR("GetLocalInventoryData"), inventoryData)) {
-        error = "无法解析地图物体管理器或本地主背包。";
-        return false;
-    }
-
     liveUnion = {
         .generation = catalog.generation,
         .guildId = catalog.guildId,
-        .targets = targets,
+        .exposure = exposure,
         .active = true,
     };
+    const auto rollback = [&](std::string primaryError) {
+        std::string restoreError;
+        if (!restore_union(liveUnion, restoreError)) {
+            primaryError += "；" + restoreError;
+        }
+        error = std::move(primaryError);
+        return false;
+    };
+
     std::vector<GuidKey> globalIds;
     globalIds.reserve(catalog.plan.ordered.size());
     for (const auto& descriptor : catalog.plan.ordered) {
         globalIds.push_back(descriptor.containerId);
     }
 
-    if (targets.baseModules) {
-        for (const auto& module : catalog.modules) {
-            auto* object = find_object_by_full_name(module.objectFullName);
-            auto* property = object == nullptr
-                                 ? nullptr
-                                 : CastField<FArrayProperty>(
-                                       object->GetPropertyByNameInChain(STR("ContainerInfos")));
-            UnionLedgerEntry ledger{.objectFullName = module.objectFullName};
-            if (!read_module_sequence(object, property, ledger.original)) {
-                error = "建立联合时无法重新读取据点仓储序列。";
-                std::string restoreError;
-                static_cast<void>(restore_union(liveUnion, restoreError));
-                return false;
-            }
-            liveUnion.entries.push_back(ledger);
-
-            const auto missing = missing_union_tail(ledger.original, globalIds);
-            for (const auto& id : missing) {
-                const auto [sourceModule, sourceContainer] = locate_catalog_container(catalog, id);
-                static_cast<void>(sourceContainer);
-                if (sourceModule == nullptr ||
-                    !append_container_info(object, property, *sourceModule, id)) {
-                    error = "向据点仓储追加共享箱子登记失败。";
-                    std::string restoreError;
-                    static_cast<void>(restore_union(liveUnion, restoreError));
-                    return false;
-                }
-                liveUnion.entries.back().injected.push_back(id);
-            }
-            if (!liveUnion.entries.back().injected.empty()) {
-                notify_array_changed(object, STR("OnRep_ContainerInfos"));
-            }
+    if (exposure.surface == ResourceConsumerSurface::currentBaseModule) {
+        if (!exposure.targetBaseId.has_value()) {
+            return rollback("建造共享缺少当前据点标识。");
         }
-    }
-
-    if (!targets.playerHelper) {
+        const auto module =
+            std::ranges::find(catalog.modules, *exposure.targetBaseId, &CatalogModule::baseId);
+        if (module == catalog.modules.end()) {
+            return rollback("当前据点没有可用的普通仓储模块。");
+        }
+        auto* object = find_object_by_full_name(module->objectFullName);
+        auto* property = object == nullptr
+                             ? nullptr
+                             : CastField<FArrayProperty>(
+                                   object->GetPropertyByNameInChain(STR("ContainerInfos")));
+        UnionLedgerEntry ledger{.objectFullName = module->objectFullName};
+        if (!read_module_sequence(object, property, ledger.original)) {
+            return rollback("建立建造联合时无法读取当前据点仓储序列。");
+        }
+        liveUnion.entry = std::move(ledger);
+        const auto missing = missing_union_tail(liveUnion.entry->original, globalIds);
+        for (const auto& id : missing) {
+            const auto [sourceModule, sourceContainer] = locate_catalog_container(catalog, id);
+            static_cast<void>(sourceContainer);
+            if (sourceModule == nullptr ||
+                !append_container_info(object, property, *sourceModule, id)) {
+                return rollback("向当前据点仓储追加共享箱子登记失败。");
+            }
+            liveUnion.entry->injected.push_back(id);
+        }
+        if (!liveUnion.entry->injected.empty()) {
+            notify_array_changed(object, STR("OnRep_ContainerInfos"));
+        }
+        std::vector<GuidKey> current;
+        if (!read_module_sequence(object, property, current)) {
+            return rollback("无法重读建造联合后的当前据点仓储序列。");
+        }
+        const auto validation = validate_applied_sequence(liveUnion.entry->original,
+                                                          liveUnion.entry->injected, current);
+        if (!validation) {
+            return rollback("建造联合序列验证失败：" +
+                            std::string{sequence_status_text(validation.status)});
+        }
         return true;
     }
 
+    UObject* mapObjectManager{};
+    UObject* inventoryData{};
+    if (!call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager) ||
+        !call_utility_object(worldContext, STR("GetLocalInventoryData"), inventoryData)) {
+        return rollback("无法解析地图物体管理器或本地主背包。");
+    }
     auto* helperProperty = CastField<FObjectPropertyBase>(
         inventoryData->GetPropertyByNameInChain(STR("InventoryMultiHelper")));
     auto* helper = helperProperty == nullptr
@@ -799,14 +834,11 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
     };
     if (containerProperty == nullptr ||
         !read_helper_sequence(helper, containersProperty, helperLedger.original)) {
-        error = "本地主背包资源助手不可用。";
-        std::string restoreError;
-        static_cast<void>(restore_union(liveUnion, restoreError));
-        return false;
+        return rollback("本地主背包资源助手不可用。");
     }
-    liveUnion.entries.push_back(helperLedger);
+    liveUnion.entry = std::move(helperLedger);
 
-    const auto missingHelperIds = missing_union_tail(helperLedger.original, globalIds);
+    const auto missingHelperIds = missing_union_tail(liveUnion.entry->original, globalIds);
     for (const auto& id : missingHelperIds) {
         const auto [sourceModule, sourceContainer] = locate_catalog_container(catalog, id);
         static_cast<void>(sourceModule);
@@ -814,15 +846,22 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
                               ? nullptr
                               : resolve_live_container(mapObjectManager, *sourceContainer);
         if (container == nullptr || !append_array_copy(containersProperty, helper, &container)) {
-            error = "向本地主背包资源助手追加共享箱子失败。";
-            std::string restoreError;
-            static_cast<void>(restore_union(liveUnion, restoreError));
-            return false;
+            return rollback("向本地主背包资源助手追加共享箱子失败。");
         }
-        liveUnion.entries.back().injected.push_back(id);
+        liveUnion.entry->injected.push_back(id);
     }
-    if (!liveUnion.entries.back().injected.empty()) {
+    if (!liveUnion.entry->injected.empty()) {
         notify_array_changed(helper, STR("OnRep_Containers"));
+    }
+    std::vector<GuidKey> current;
+    if (!read_helper_sequence(helper, containersProperty, current)) {
+        return rollback("无法重读制作联合后的本地主背包资源助手序列。");
+    }
+    const auto validation =
+        validate_applied_sequence(liveUnion.entry->original, liveUnion.entry->injected, current);
+    if (!validation) {
+        return rollback("制作联合序列验证失败：" +
+                        std::string{sequence_status_text(validation.status)});
     }
     return true;
 }
@@ -833,10 +872,7 @@ auto restore_union(LiveUnion& liveUnion, std::string& error) -> bool {
         return true;
     }
 
-    bool restored = true;
-    for (auto entry = liveUnion.entries.rbegin(); entry != liveUnion.entries.rend(); ++entry) {
-        restored = restore_entry(*entry) && restored;
-    }
+    const bool restored = !liveUnion.entry.has_value() || restore_entry(*liveUnion.entry);
     liveUnion = {};
     if (restored) {
         error.clear();

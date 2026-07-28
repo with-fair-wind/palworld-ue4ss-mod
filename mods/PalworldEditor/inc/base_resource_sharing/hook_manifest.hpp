@@ -14,7 +14,6 @@ enum class HookEvent : std::uint8_t {
     structureChanged,
     acquire,
     touch,
-    release,
     updateBuildingMode,
     enterBase,
     exitBase,
@@ -81,7 +80,7 @@ inline constexpr std::array kPalworld101HookManifest{
              "/Script/Pal.PalUIProductSettingModel:CalcMaxProductableNum"},
     HookSpec{ResourceOperation::crafting, HookEvent::touch, HookEvent::none,
              HookRequirement::required, "/Script/Pal.PalUIConvertItemModel:CanStartProduction"},
-    HookSpec{ResourceOperation::crafting, HookEvent::touch, HookEvent::release,
+    HookSpec{ResourceOperation::crafting, HookEvent::touch, HookEvent::touch,
              HookRequirement::required, "/Script/Pal.PalUIConvertItemModel:StartProduction"},
 };
 

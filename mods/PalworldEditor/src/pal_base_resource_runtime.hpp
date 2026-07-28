@@ -43,8 +43,8 @@ struct UnionLedgerEntry {
 struct LiveUnion {
     std::uint64_t generation{};
     GuidKey guildId;
-    UnionTargets targets;
-    std::vector<UnionLedgerEntry> entries;
+    ResourceExposurePlan exposure;
+    std::optional<UnionLedgerEntry> entry;
     bool active{};
 };
 
@@ -57,7 +57,8 @@ struct LiveUnion {
                                            const ResourceCatalogSnapshot& catalog,
                                            std::string& error) -> std::optional<GuidKey>;
 [[nodiscard]] auto apply_union(RC::Unreal::UObject* worldContext,
-                               const ResourceCatalogSnapshot& catalog, UnionTargets targets,
-                               LiveUnion& liveUnion, std::string& error) -> bool;
+                               const ResourceCatalogSnapshot& catalog,
+                               const ResourceExposurePlan& exposure, LiveUnion& liveUnion,
+                               std::string& error) -> bool;
 [[nodiscard]] auto restore_union(LiveUnion& liveUnion, std::string& error) -> bool;
 }  // namespace base_resource_sharing::detail

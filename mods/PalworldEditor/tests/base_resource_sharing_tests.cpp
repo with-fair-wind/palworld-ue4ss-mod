@@ -209,7 +209,7 @@ void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
     CHECK(craftInitialize->requirement == HookRequirement::required);
 }
 
-void test_hook_manifest_keeps_touches_pre_and_releases_crafting_after_request() {
+void test_hook_manifest_keeps_crafting_alive_through_submission() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
@@ -218,7 +218,7 @@ void test_hook_manifest_keeps_touches_pre_and_releases_crafting_after_request() 
         &HookSpec::path);
     CHECK(startProduction != hooks.end());
     CHECK(event_for_phase(*startProduction, HookPhase::pre) == HookEvent::touch);
-    CHECK(event_for_phase(*startProduction, HookPhase::post) == HookEvent::release);
+    CHECK(event_for_phase(*startProduction, HookPhase::post) == HookEvent::touch);
 
     for (const auto& hook : hooks) {
         if (event_for_phase(hook, HookPhase::pre) == HookEvent::touch) {
@@ -578,7 +578,7 @@ auto main() -> int {
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
     test_hook_manifest_acquires_before_first_build_and_craft_eligibility();
-    test_hook_manifest_keeps_touches_pre_and_releases_crafting_after_request();
+    test_hook_manifest_keeps_crafting_alive_through_submission();
     test_missing_early_build_acquire_disables_only_building();
     test_hook_manifest_tracks_current_base_context();
     test_missing_current_base_hook_disables_only_building();
