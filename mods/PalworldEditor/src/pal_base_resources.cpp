@@ -10,6 +10,7 @@
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/UObject.hpp>
@@ -56,6 +57,19 @@ namespace {
     return true;
 }
 
+[[nodiscard]] auto read_object_parameter(UFunction* function,
+                                         UnrealScriptFunctionCallableContext& context,
+                                         const CharType* parameterName) -> UObject* {
+    auto* property = function == nullptr ? nullptr
+                                         : CastField<FObjectPropertyBase>(function->FindProperty(
+                                               FName(parameterName, FNAME_Find)));
+    auto* locals = context.TheStack.Locals();
+    if (property == nullptr || locals == nullptr || !property->HasAnyPropertyFlags(CPF_Parm)) {
+        return nullptr;
+    }
+    return property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(locals));
+}
+
 class MutationScope {
 public:
     explicit MutationScope(bool& flag) noexcept : flag_{flag} {
@@ -92,6 +106,7 @@ public:
 
         if (transition.disableRuntime) {
             sessions_.reset();
+            currentBase_.reset();
             scheduler_.reset();
             restore_or_disable("关闭资源共享");
             unregister_resource_hooks();
@@ -106,6 +121,7 @@ public:
         if (transition.beginAccessibleWorld) {
             const auto generation = runtime_.generation();
             sessions_.begin_world(generation);
+            currentBase_.begin_world(generation);
             scheduler_.begin_world(generation);
             runtimeError_.clear();
         }
@@ -115,6 +131,7 @@ public:
 
     auto on_world_begin(const std::uint64_t generation) -> void {
         sessions_.reset();
+        currentBase_.reset();
         scheduler_.reset();
         restore_or_disable("切换世界");
         unregister_resource_hooks();
@@ -131,6 +148,7 @@ public:
     auto on_world_ready(const std::uint64_t generation) -> void {
         runtime_.finish_world_transition(generation);
         sessions_.begin_world(generation);
+        currentBase_.begin_world(generation);
         scheduler_.begin_world(generation);
         publish_capabilities();
         snapshotDirty_.mark();
@@ -204,6 +222,7 @@ public:
 
     auto shutdown_hooks() -> void {
         sessions_.reset();
+        currentBase_.reset();
         scheduler_.reset();
         restore_or_disable("卸载 mod");
         unregister_resource_hooks();
@@ -267,7 +286,7 @@ private:
         }
 
         catalog_ = std::move(next);
-        baseCount_ = catalog_.plan.baseCount;
+        baseCount_ = catalog_.sameGuildBaseCount;
         containerCount_ = catalog_.plan.ordered.size();
         runtimeError_.clear();
 
@@ -419,6 +438,16 @@ private:
 
     auto handle_acquire(UObject* context, const ResourceOperation operation) -> void {
         const auto generation = runtime_.generation();
+        if (operation == ResourceOperation::building &&
+            !currentBase_.current(generation).has_value() && catalog_ready()) {
+            std::string error;
+            const auto nearest = detail::resolve_nearest_base_id(context, catalog_, error);
+            if (!nearest.has_value() || !currentBase_.enter(*nearest, generation)) {
+                disable_operation(ResourceOperation::building,
+                                  error.empty() ? "无法确认当前建造所在据点。" : std::move(error));
+                return;
+            }
+        }
         static_cast<void>(sessions_.acquire(operation, generation));
         remember_world_context(context);
         if (!catalog_ready()) {
@@ -454,7 +483,25 @@ private:
         scheduler_.request_immediate(runtime_.generation());
     }
 
-    auto dispatch_hook(const HookPhase phase, const HookSpec& spec,
+    auto handle_base_context(UFunction* function, UnrealScriptFunctionCallableContext& context,
+                             const bool entering) -> void {
+        auto* baseModel = read_object_parameter(function, context, STR("BaseCampModel"));
+        const auto baseId = detail::read_base_id(baseModel);
+        if (!baseId.has_value()) {
+            disable_operation(ResourceOperation::building,
+                              "据点进入/离开回调缺少有效 BaseCampModel.BaseCampId。");
+            return;
+        }
+        const auto generation = runtime_.generation();
+        const bool changed = entering ? currentBase_.enter(*baseId, generation)
+                                      : currentBase_.exit(*baseId, generation);
+        if (!changed && entering) {
+            disable_operation(ResourceOperation::building,
+                              "当前据点回调与世界代次不一致，已停用建造共享。");
+        }
+    }
+
+    auto dispatch_hook(UFunction* function, const HookPhase phase, const HookSpec& spec,
                        UnrealScriptFunctionCallableContext& context) -> void {
         if (selfMutation_ || !runtime_.accessible()) {
             return;
@@ -482,20 +529,26 @@ private:
             case HookEvent::updateBuildingMode:
                 update_building_mode(context.Context);
                 break;
+            case HookEvent::enterBase:
+                handle_base_context(function, context, true);
+                break;
+            case HookEvent::exitBase:
+                handle_base_context(function, context, false);
+                break;
         }
         if (event != HookEvent::touch) {
             snapshotDirty_.mark();
         }
     }
 
-    auto on_hook_pre(UFunction*, const HookSpec& spec, UnrealScriptFunctionCallableContext& context)
-        -> void {
-        dispatch_hook(HookPhase::pre, spec, context);
+    auto on_hook_pre(UFunction* function, const HookSpec& spec,
+                     UnrealScriptFunctionCallableContext& context) -> void {
+        dispatch_hook(function, HookPhase::pre, spec, context);
     }
 
-    auto on_hook_post(UFunction*, const HookSpec& spec,
+    auto on_hook_post(UFunction* function, const HookSpec& spec,
                       UnrealScriptFunctionCallableContext& context) -> void {
-        dispatch_hook(HookPhase::post, spec, context);
+        dispatch_hook(function, HookPhase::post, spec, context);
     }
 
     auto unregister_resource_hooks() -> void {
@@ -582,6 +635,7 @@ private:
     RuntimeState runtime_;
     ReconcileScheduler scheduler_;
     MaterialOperationSessions sessions_;
+    CurrentBaseState currentBase_;
     detail::ResourceCatalogSnapshot catalog_;
     detail::LiveUnion liveUnion_;
     std::vector<HookResolution> resolutions_{all_hook_resolutions(false)};

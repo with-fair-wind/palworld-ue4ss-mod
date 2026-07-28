@@ -20,6 +20,34 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace {
+class FunctionParams {
+public:
+    explicit FunctionParams(UFunction* function)
+        : function_{function},
+          storage_(function == nullptr ? 0U : static_cast<std::size_t>(function->GetParmsSize())) {
+        if (function_ != nullptr) {
+            function_->InitializeStruct(storage_.data());
+        }
+    }
+
+    ~FunctionParams() {
+        if (function_ != nullptr) {
+            function_->DestroyStruct(storage_.data());
+        }
+    }
+
+    FunctionParams(const FunctionParams&) = delete;
+    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
+
+    [[nodiscard]] auto data() noexcept -> void* {
+        return storage_.data();
+    }
+
+private:
+    UFunction* function_{};
+    std::vector<std::byte> storage_;
+};
+
 [[nodiscard]] auto to_key(const FGuid& guid) -> GuidKey {
     return {{guid.A, guid.B, guid.C, guid.D}};
 }
@@ -471,6 +499,106 @@ auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
     return true;
 }
 
+auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
+    auto* property =
+        baseModel == nullptr
+            ? nullptr
+            : CastField<FStructProperty>(baseModel->GetPropertyByNameInChain(STR("BaseCampId")));
+    if (property == nullptr || property->GetSize() != static_cast<int32>(sizeof(FGuid))) {
+        return std::nullopt;
+    }
+
+    FGuid value{};
+    property->CopyCompleteValue(&value, property->ContainerPtrToValuePtr<void>(baseModel));
+    const auto key = to_key(value);
+    return key.valid() ? std::optional{key} : std::nullopt;
+}
+
+auto resolve_nearest_base_id(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
+                             std::string& error) -> std::optional<GuidKey> {
+    error.clear();
+    UObject* controller{};
+    UObject* pawn{};
+    if (!call_utility_object(worldContext, STR("GetLocalPalPlayerController"), controller) ||
+        !try_get_object(controller, STR("GetPawn"), pawn)) {
+        error = "无法解析本地玩家控制器或 Pawn。";
+        return std::nullopt;
+    }
+
+    auto* locationFunction = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
+    auto* locationReturn = locationFunction == nullptr
+                               ? nullptr
+                               : CastField<FStructProperty>(locationFunction->GetReturnProperty());
+    if (locationFunction == nullptr || locationReturn == nullptr ||
+        locationReturn->GetSize() != FVector::StaticSize()) {
+        error = "K2_GetActorLocation 缺少兼容的 FVector 返回值。";
+        return std::nullopt;
+    }
+
+    FVector location{};
+    {
+        FunctionParams params{locationFunction};
+        pawn->ProcessEvent(locationFunction, params.data());
+        locationReturn->CopyCompleteValue(
+            &location, locationReturn->ContainerPtrToValuePtr<void>(params.data()));
+    }
+
+    UObject* manager{};
+    if (!call_utility_object(worldContext, STR("GetBaseCampManager"), manager)) {
+        error = "无法解析据点管理器。";
+        return std::nullopt;
+    }
+    auto* nearestFunction = manager->GetFunctionByNameInChain(STR("GetNearestBaseCamp"));
+    FStructProperty* locationInput{};
+    FObjectPropertyBase* baseReturn{};
+    if (nearestFunction != nullptr) {
+        for (auto* property :
+             TFieldRange<FProperty>(nearestFunction, EFieldIterationFlags::IncludeDeprecated)) {
+            if (!property->HasAnyPropertyFlags(CPF_Parm)) {
+                continue;
+            }
+            if (property->HasAnyPropertyFlags(CPF_ReturnParm)) {
+                baseReturn = CastField<FObjectPropertyBase>(property);
+                continue;
+            }
+            auto* candidate = CastField<FStructProperty>(property);
+            if (candidate != nullptr && candidate->GetSize() == FVector::StaticSize()) {
+                if (locationInput != nullptr) {
+                    locationInput = nullptr;
+                    break;
+                }
+                locationInput = candidate;
+            }
+        }
+    }
+    if (nearestFunction == nullptr || locationInput == nullptr || baseReturn == nullptr) {
+        error = "GetNearestBaseCamp 缺少唯一 FVector 参数或对象返回值。";
+        return std::nullopt;
+    }
+
+    UObject* baseModel{};
+    {
+        FunctionParams params{nearestFunction};
+        locationInput->CopyCompleteValue(locationInput->ContainerPtrToValuePtr<void>(params.data()),
+                                         &location);
+        manager->ProcessEvent(nearestFunction, params.data());
+        baseModel = baseReturn->GetObjectPropertyValue(
+            baseReturn->ContainerPtrToValuePtr<void>(params.data()));
+    }
+    const auto baseId = read_base_id(baseModel);
+    if (!baseId.has_value()) {
+        error = "最近据点模型缺少有效 BaseCampId。";
+        return std::nullopt;
+    }
+    const auto belongsToCatalog = std::ranges::any_of(
+        catalog.modules, [&](const auto& module) { return module.baseId == *baseId; });
+    if (!belongsToCatalog) {
+        error = "最近据点不在当前同公会普通仓储目录中。";
+        return std::nullopt;
+    }
+    return baseId;
+}
+
 auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
     -> ResourceCatalogSnapshot {
     ResourceCatalogSnapshot result{.generation = generation};
@@ -509,6 +637,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
             to_key(ownerGuild) != result.guildId) {
             continue;
         }
+        ++result.sameGuildBaseCount;
 
         auto* moduleArray =
             CastField<FArrayProperty>(baseModel->GetPropertyByNameInChain(STR("ModuleArray")));

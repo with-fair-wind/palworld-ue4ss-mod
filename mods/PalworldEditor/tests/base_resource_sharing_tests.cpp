@@ -245,6 +245,39 @@ void test_missing_early_build_acquire_disables_only_building() {
     CHECK(!capabilities[operation_index(ResourceOperation::repair)].available());
 }
 
+void test_hook_manifest_tracks_current_base_context() {
+    using namespace base_resource_sharing;
+
+    const auto hooks = palworld_1_0_1_hook_manifest();
+    const auto enter = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalBuilderComponent:OnEnterBaseCamp"},
+        &HookSpec::path);
+    const auto exit = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalBuilderComponent:OnExitBaseCamp"}, &HookSpec::path);
+    CHECK(enter != hooks.end());
+    CHECK(exit != hooks.end());
+    if (enter != hooks.end()) {
+        CHECK(event_for_phase(*enter, HookPhase::pre) == HookEvent::enterBase);
+    }
+    if (exit != hooks.end()) {
+        CHECK(event_for_phase(*exit, HookPhase::pre) == HookEvent::exitBase);
+    }
+}
+
+void test_missing_current_base_hook_disables_only_building() {
+    using namespace base_resource_sharing;
+
+    auto resolved = all_hook_resolutions(true);
+    for (auto& resolution : resolved) {
+        if (resolution.spec.path == "/Script/Pal.PalBuilderComponent:OnEnterBaseCamp") {
+            resolution.resolved = false;
+        }
+    }
+    const auto capabilities = evaluate_capabilities(resolved);
+    CHECK(!capabilities[operation_index(ResourceOperation::building)].available());
+    CHECK(capabilities[operation_index(ResourceOperation::crafting)].available());
+}
+
 void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable() {
     using namespace base_resource_sharing;
 
@@ -547,6 +580,8 @@ auto main() -> int {
     test_hook_manifest_acquires_before_first_build_and_craft_eligibility();
     test_hook_manifest_keeps_touches_pre_and_releases_crafting_after_request();
     test_missing_early_build_acquire_disables_only_building();
+    test_hook_manifest_tracks_current_base_context();
+    test_missing_current_base_hook_disables_only_building();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
     test_foreground_session_preempts_instead_of_combining_operations();

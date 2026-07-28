@@ -1,6 +1,8 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,7 @@ struct CatalogModule {
 struct ResourceCatalogSnapshot {
     std::uint64_t generation{};
     GuidKey guildId;
+    std::size_t sameGuildBaseCount{};
     ResourceUnionPlan plan;
     std::vector<CatalogModule> modules;
     std::string error;
@@ -49,6 +52,10 @@ struct LiveUnion {
     -> bool;
 [[nodiscard]] auto discover_catalog(RC::Unreal::UObject* worldContext, std::uint64_t generation)
     -> ResourceCatalogSnapshot;
+[[nodiscard]] auto read_base_id(RC::Unreal::UObject* baseModel) -> std::optional<GuidKey>;
+[[nodiscard]] auto resolve_nearest_base_id(RC::Unreal::UObject* worldContext,
+                                           const ResourceCatalogSnapshot& catalog,
+                                           std::string& error) -> std::optional<GuidKey>;
 [[nodiscard]] auto apply_union(RC::Unreal::UObject* worldContext,
                                const ResourceCatalogSnapshot& catalog, UnionTargets targets,
                                LiveUnion& liveUnion, std::string& error) -> bool;

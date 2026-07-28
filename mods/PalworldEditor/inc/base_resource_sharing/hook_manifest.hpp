@@ -16,6 +16,8 @@ enum class HookEvent : std::uint8_t {
     touch,
     release,
     updateBuildingMode,
+    enterBase,
+    exitBase,
 };
 
 enum class HookPhase : std::uint8_t { pre, post };
@@ -46,6 +48,10 @@ inline constexpr std::array kPalworld101HookManifest{
              "/Script/Pal.PalBaseCampModuleItemStorage:OnNotAvailableConcreteModel_ServerInternal"},
     HookSpec{ResourceOperation::repair, HookEvent::none, HookEvent::structureChanged,
              HookRequirement::optional, "/Script/Pal.PalBaseCampModel:OnRep_ModuleArray"},
+    HookSpec{ResourceOperation::building, HookEvent::enterBase, HookEvent::none,
+             HookRequirement::required, "/Script/Pal.PalBuilderComponent:OnEnterBaseCamp"},
+    HookSpec{ResourceOperation::building, HookEvent::exitBase, HookEvent::none,
+             HookRequirement::required, "/Script/Pal.PalBuilderComponent:OnExitBaseCamp"},
     HookSpec{ResourceOperation::building, HookEvent::acquire, HookEvent::none,
              HookRequirement::required, "/Script/Pal.PalUIBuildModel:OnOpenMenu"},
     HookSpec{ResourceOperation::building, HookEvent::acquire, HookEvent::none,
