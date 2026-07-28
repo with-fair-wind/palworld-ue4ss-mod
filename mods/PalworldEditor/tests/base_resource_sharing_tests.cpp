@@ -1,13 +1,10 @@
 #include <array>
-#include <filesystem>
 #include <iostream>
-#include <system_error>
 #include <vector>
 
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 #include <base_resource_sharing/resource_session.hpp>
-#include <editor/settings.hpp>
 #include <grappling_hook/cooldown_service.hpp>
 
 namespace {
@@ -22,84 +19,6 @@ void check(const bool condition, const char* expression, const int line) {
 }  // namespace
 
 #define CHECK(expression) check((expression), #expression, __LINE__)
-
-void test_settings_default_off_and_round_trip() {
-    using namespace editor_settings;
-
-    // 空配置：两节均缺省，不再视为错误（失败安全回退为全关）。
-    const auto empty = parse_settings("");
-    CHECK(!empty.settings.baseResourceSharing.enabled);
-    CHECK(!empty.settings.grapplingHook.noCooldown);
-    CHECK(empty.error.empty());
-
-    // 仅资源共享节。
-    const auto sharing = parse_settings(
-        "[BaseResourceSharing]\n"
-        "Enabled=true\n");
-    CHECK(sharing.settings.baseResourceSharing.enabled);
-    CHECK(!sharing.settings.grapplingHook.noCooldown);
-    CHECK(sharing.error.empty());
-
-    // 仅爪钩枪节。
-    const auto grapple = parse_settings(
-        "[GrapplingHook]\n"
-        "NoCooldown=true\n");
-    CHECK(!grapple.settings.baseResourceSharing.enabled);
-    CHECK(grapple.settings.grapplingHook.noCooldown);
-    CHECK(grapple.error.empty());
-
-    // 两节共存、任意顺序。
-    const auto both = parse_settings(
-        "[GrapplingHook]\n"
-        "NoCooldown=true\n"
-        "[BaseResourceSharing]\n"
-        "Enabled=true\n");
-    CHECK(both.settings.baseResourceSharing.enabled);
-    CHECK(both.settings.grapplingHook.noCooldown);
-    CHECK(both.error.empty());
-    CHECK(serialize_settings(both.settings) ==
-          "[BaseResourceSharing]\nEnabled=true\n[GrapplingHook]\nNoCooldown=true\n");
-
-    // 节内非法值仍失败安全。
-    const auto invalid = parse_settings(
-        "[BaseResourceSharing]\n"
-        "Enabled=maybe\n");
-    CHECK(!invalid.settings.baseResourceSharing.enabled);
-    CHECK(!invalid.error.empty());
-
-    // 未知键仍拒绝。
-    const auto unknown = parse_settings(
-        "[GrapplingHook]\n"
-        "Bogus=true\n");
-    CHECK(!unknown.settings.grapplingHook.noCooldown);
-    CHECK(!unknown.error.empty());
-}
-
-void test_settings_file_round_trip() {
-    using namespace editor_settings;
-
-    const auto root =
-        std::filesystem::temp_directory_path() / "PalworldEditorBaseResourceSharingTests";
-    const auto path = root / "config.ini";
-    std::error_code ignored;
-    std::filesystem::remove_all(root, ignored);
-
-    const auto missing = load_settings(path);
-    CHECK(!missing.settings.baseResourceSharing.enabled);
-    CHECK(!missing.settings.grapplingHook.noCooldown);
-    CHECK(!missing.error.empty());
-    CHECK(!std::filesystem::exists(path));
-
-    CHECK(save_settings(path, Settings{.baseResourceSharing = {.enabled = true},
-                                       .grapplingHook = {.noCooldown = true}})
-              .empty());
-    const auto loaded = load_settings(path);
-    CHECK(loaded.settings.baseResourceSharing.enabled);
-    CHECK(loaded.settings.grapplingHook.noCooldown);
-    CHECK(loaded.error.empty());
-
-    std::filesystem::remove_all(root, ignored);
-}
 
 void test_resource_pool_filters_deduplicates_and_orders() {
     using namespace base_resource_sharing;
@@ -496,8 +415,6 @@ void test_grapple_cooldown_restores_each_original_before_changing_world() {
 }
 
 auto main() -> int {
-    test_settings_default_off_and_round_trip();
-    test_settings_file_round_trip();
     test_resource_pool_filters_deduplicates_and_orders();
     test_runtime_state_fails_closed_across_worlds();
     test_hook_capabilities_require_preview_and_consume_paths();

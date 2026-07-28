@@ -11,7 +11,6 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -29,7 +28,6 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
-#include <editor/settings.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
@@ -98,19 +96,6 @@ public:
         unregister_callback(engineTickCallbackId_);
         unregister_callback(loadMapPostCallbackId_);
         unregister_callback(loadMapPreCallbackId_);
-    }
-
-    /** @brief 从 mod 配置目录读取默认关闭的跨据点资源共享偏好。 */
-    auto on_program_start() -> void override {
-        configPath_ = std::filesystem::path{UE4SSProgram::get_program().get_mods_directory()} /
-                      "PalworldEditor" / "config.ini";
-        const auto loaded = editor_settings::load_settings(configPath_);
-        requestedBaseSharingEnabled_.store(loaded.settings.baseResourceSharing.enabled);
-        baseSharingSettingDirty_.store(true);
-        requestedGrappleNoCooldown_.store(loaded.settings.grapplingHook.noCooldown);
-        grappleSettingDirty_.store(loaded.settings.grapplingHook.noCooldown);
-        baseResourceBridge_.set_config_error(loaded.error);
-        grappleConfigError_ = loaded.error;
     }
 
     /**
@@ -1329,51 +1314,26 @@ private:
         }
 
         const auto snapshot = self->baseResourceBridge_.snapshot();
-        bool enabled = self->requestedBaseSharingEnabled_.load();
+        bool enabled = self->requestedBaseSharingEnabled_.load(std::memory_order_acquire);
         if (ImGui::Checkbox("同公会跨据点资源共享", &enabled)) {
-            self->requestedBaseSharingEnabled_.store(enabled);
-            self->baseSharingSettingDirty_.store(true);
-            const auto error =
-                self->configPath_.empty()
-                    ? std::string{"配置路径尚未初始化，设置未持久化。"}
-                    : editor_settings::save_settings(
-                          self->configPath_,
-                          editor_settings::Settings{
-                              .baseResourceSharing = {.enabled = enabled},
-                              .grapplingHook = {.noCooldown =
-                                                    self->requestedGrappleNoCooldown_.load()}});
-            self->baseResourceBridge_.set_config_error(error);
+            self->requestedBaseSharingEnabled_.store(enabled, std::memory_order_release);
+            self->baseSharingSettingDirty_.store(true, std::memory_order_release);
         }
 
         ImGui::TextWrapped("%s", snapshot.status.c_str());
-        if (!snapshot.configError.empty()) {
-            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s", snapshot.configError.c_str());
-        }
+        ImGui::TextDisabled("仅本次游戏进程有效；重新启动游戏后默认关闭。");
         ImGui::TextDisabled("仅支持单人世界/本地房主；只影响制作和建造材料消耗，不合并箱子界面。");
     }
 
-    /** @brief 渲染爪钩枪无冷却开关；切换时立即应用并持久化。 */
+    /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self) {
-        bool enabled = self->requestedGrappleNoCooldown_.load();
-        ImGui::BeginDisabled(self->grappleSafetyDisabled_.load());
+        bool enabled = self->requestedGrappleNoCooldown_.load(std::memory_order_acquire);
+        ImGui::BeginDisabled(self->grappleSafetyDisabled_.load(std::memory_order_acquire));
         if (ImGui::Checkbox("爪钩枪无冷却", &enabled)) {
-            self->requestedGrappleNoCooldown_.store(enabled);
-            self->grappleSettingDirty_.store(true);
-            self->grappleConfigError_ =
-                self->configPath_.empty()
-                    ? std::string{"配置路径尚未初始化，设置未持久化。"}
-                    : editor_settings::save_settings(
-                          self->configPath_,
-                          editor_settings::Settings{
-                              .baseResourceSharing =
-                                  {.enabled = self->requestedBaseSharingEnabled_.load()},
-                              .grapplingHook = {.noCooldown = enabled}});
+            self->requestedGrappleNoCooldown_.store(enabled, std::memory_order_release);
+            self->grappleSettingDirty_.store(true, std::memory_order_release);
         }
         ImGui::EndDisabled();
-        if (!self->grappleConfigError_.empty()) {
-            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "%s",
-                               self->grappleConfigError_.c_str());
-        }
         std::string runtimeStatus;
         {
             const std::lock_guard lock(self->grappleStatusMutex_);
@@ -1386,6 +1346,7 @@ private:
             ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
                                "本次运行的爪钩覆盖已因恢复失败而安全停用。");
         }
+        ImGui::TextDisabled("仅本次游戏进程有效；重新启动游戏后默认关闭。");
         ImGui::TextDisabled(
             "只修改物品 ID 可确认的正式爪钩枪；关闭和切图时恢复原值。热卸载前请先关闭。");
     }
@@ -1617,8 +1578,6 @@ private:
 
     /** @brief 游戏线程拥有的跨据点资源反射桥；GUI 只读取其值快照。 */
     base_resource_sharing::PalBaseResourceBridge baseResourceBridge_;
-    /** @brief `ue4ss/Mods/PalworldEditor/config.ini` 的绝对路径。 */
-    std::filesystem::path configPath_;
     /** @brief GUI/启动阶段提交给游戏线程的资源共享偏好。 */
     std::atomic<bool> requestedBaseSharingEnabled_{false};
     /** @brief 通知 EngineTick 消费最新资源共享偏好。 */
@@ -1627,8 +1586,6 @@ private:
     std::atomic<bool> requestedGrappleNoCooldown_{false};
     /** @brief 通知 EngineTick 更新爪钩覆盖领域服务的期望状态。 */
     std::atomic<bool> grappleSettingDirty_{false};
-    /** @brief 爪钩枪配置持久化的最近错误（仅 GUI 显示）。 */
-    std::string grappleConfigError_;
     /** @brief 只在游戏线程执行严格目标识别、冷却覆盖和恢复的反射网关。 */
     grappling_hook::GrappleCooldownGateway grappleGateway_;
     /** @brief 只保存对象全名、原值和世界代次的可逆覆盖领域状态。 */

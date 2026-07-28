@@ -19,7 +19,6 @@ add_library(${TARGET} SHARED
     src/pal_skills.cpp
     src/pal_stats.cpp
     src/grapple_cooldown_gateway.cpp
-    src/editor_settings.cpp
     src/pal_base_resource_runtime.cpp
     src/pal_base_resources.cpp
 )
@@ -45,7 +44,6 @@ if(BUILD_TESTING)
 
     add_executable(PalworldEditorBaseResourceSharingTests
         tests/base_resource_sharing_tests.cpp
-        src/editor_settings.cpp
     )
     target_include_directories(PalworldEditorBaseResourceSharingTests
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)

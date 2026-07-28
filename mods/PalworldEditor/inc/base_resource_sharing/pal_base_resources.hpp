@@ -16,7 +16,6 @@ struct BaseResourceSharingSnapshot {
     std::size_t containerCount{};
     std::array<CapabilityState, 3> capabilities{};
     std::string status;
-    std::string configError;
 };
 
 class PalBaseResourceBridge final {
@@ -29,7 +28,6 @@ public:
     auto operator=(PalBaseResourceBridge&&) noexcept -> PalBaseResourceBridge&;
 
     auto set_enabled(bool enabled) -> void;
-    auto set_config_error(std::string error) -> void;
     auto on_world_begin(std::uint64_t generation) -> void;
     auto on_world_ready(std::uint64_t generation) -> void;
     auto tick(float deltaSeconds) -> void;

@@ -113,11 +113,6 @@ public:
         publish_snapshot();
     }
 
-    auto set_config_error(std::string error) -> void {
-        const std::lock_guard lock(snapshotMutex_);
-        snapshot_.configError = std::move(error);
-    }
-
     auto on_world_begin(const std::uint64_t generation) -> void {
         sessions_.reset();
         scheduler_.reset();
@@ -581,7 +576,6 @@ private:
              .runtimeError = runtimeError_});
 
         const std::lock_guard lock(snapshotMutex_);
-        next.configError = snapshot_.configError;
         snapshot_ = std::move(next);
     }
 
@@ -613,10 +607,6 @@ auto PalBaseResourceBridge::operator=(PalBaseResourceBridge&&) noexcept
 
 auto PalBaseResourceBridge::set_enabled(const bool enabled) -> void {
     impl_->set_enabled(enabled);
-}
-
-auto PalBaseResourceBridge::set_config_error(std::string error) -> void {
-    impl_->set_config_error(std::move(error));
 }
 
 auto PalBaseResourceBridge::on_world_begin(const std::uint64_t generation) -> void {
