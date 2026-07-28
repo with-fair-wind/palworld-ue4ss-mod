@@ -14,12 +14,27 @@
 namespace grappling_hook {
 
 /** @brief 一次覆盖或恢复操作的终止状态。 */
-enum class CooldownGatewayStatus {
+enum class CooldownGatewayStatus : std::uint8_t {
     succeeded,          /**< 操作完成并重读验证成功。 */
     targetUnavailable,  /**< 当前没有可明确识别的正式爪钩枪对象。 */
     layoutUnavailable,  /**< 当前游戏版本缺少所需字段，未执行写入。 */
     verificationFailed, /**< 写入后的属性值与期望不一致。 */
 };
+
+/** @brief 把反射网关结果收敛为领域状态机的可重试或终止结果。 */
+[[nodiscard]] constexpr auto to_apply_outcome(const CooldownGatewayStatus status) noexcept
+    -> CooldownApplyOutcome {
+    switch (status) {
+        case CooldownGatewayStatus::succeeded:
+            return CooldownApplyOutcome::succeeded;
+        case CooldownGatewayStatus::targetUnavailable:
+            return CooldownApplyOutcome::targetUnavailable;
+        case CooldownGatewayStatus::layoutUnavailable:
+        case CooldownGatewayStatus::verificationFailed:
+            return CooldownApplyOutcome::terminalFailure;
+    }
+    return CooldownApplyOutcome::terminalFailure;
+}
 
 /** @brief 网关操作结果及新建的原值恢复记录。 */
 struct CooldownGatewayResult {

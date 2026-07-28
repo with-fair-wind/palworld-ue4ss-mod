@@ -5,6 +5,7 @@
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 #include <base_resource_sharing/resource_session.hpp>
+#include <grappling_hook/cooldown_gateway.hpp>
 #include <grappling_hook/cooldown_service.hpp>
 
 namespace {
@@ -425,6 +426,50 @@ void test_grapple_terminal_failure_is_not_reenabled_by_retry_or_toggle() {
     CHECK(ledger.next_work(8, true) == CooldownWork::apply);
 }
 
+void test_grapple_gateway_status_classifies_only_missing_target_as_retryable() {
+    using namespace grappling_hook;
+
+    CHECK(to_apply_outcome(CooldownGatewayStatus::succeeded) == CooldownApplyOutcome::succeeded);
+    CHECK(to_apply_outcome(CooldownGatewayStatus::targetUnavailable) ==
+          CooldownApplyOutcome::targetUnavailable);
+    CHECK(to_apply_outcome(CooldownGatewayStatus::layoutUnavailable) ==
+          CooldownApplyOutcome::terminalFailure);
+    CHECK(to_apply_outcome(CooldownGatewayStatus::verificationFailed) ==
+          CooldownApplyOutcome::terminalFailure);
+}
+
+void test_grapple_apply_readiness_requires_world_callbacks_and_common_inventory() {
+    using namespace grappling_hook;
+
+    CHECK(!grapple_apply_ready(false, true, true));
+    CHECK(!grapple_apply_ready(true, false, true));
+    CHECK(!grapple_apply_ready(true, true, false));
+    CHECK(grapple_apply_ready(true, true, true));
+}
+
+void test_grapple_readiness_scheduler_polls_only_when_requested_and_at_interval() {
+    using namespace grappling_hook;
+
+    CooldownReadinessScheduler scheduler;
+    scheduler.begin_world(7);
+
+    CHECK(scheduler.advance(0.0F, 7, true));
+    scheduler.complete(7, false);
+    CHECK(!scheduler.advance(0.49F, 7, true));
+    CHECK(scheduler.advance(0.01F, 7, true));
+    scheduler.complete(7, true);
+    CHECK(!scheduler.advance(10.0F, 7, true));
+
+    scheduler.request(7);
+    CHECK(!scheduler.advance(0.0F, 8, true));
+    CHECK(!scheduler.advance(0.0F, 7, false));
+    CHECK(scheduler.advance(0.0F, 7, true));
+
+    scheduler.begin_world(8);
+    CHECK(!scheduler.advance(0.0F, 7, true));
+    CHECK(scheduler.advance(0.0F, 8, true));
+}
+
 void test_grapple_target_filter_accepts_only_known_item_ids() {
     CHECK(grappling_hook::is_grappling_item_id("GrapplingGun"));
     CHECK(grappling_hook::is_grappling_item_id("GrapplingGun2"));
@@ -479,6 +524,9 @@ auto main() -> int {
     test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent();
     test_grapple_target_unavailable_waits_for_explicit_retry();
     test_grapple_terminal_failure_is_not_reenabled_by_retry_or_toggle();
+    test_grapple_gateway_status_classifies_only_missing_target_as_retryable();
+    test_grapple_apply_readiness_requires_world_callbacks_and_common_inventory();
+    test_grapple_readiness_scheduler_polls_only_when_requested_and_at_interval();
     test_grapple_target_filter_accepts_only_known_item_ids();
     test_grapple_cooldown_restores_each_original_before_changing_world();
     return failures == 0 ? 0 : 1;

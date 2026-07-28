@@ -144,6 +144,9 @@ public:
         want_scan_items_.store(true);
         baseResourceBridge_.on_world_ready(worldSession_.generation());
         static_cast<void>(grappleLedger_.begin_world(worldSession_.generation()));
+        grappleReadinessScheduler_.begin_world(worldSession_.generation());
+        grappleRuntimePhase_.store(grappleLedger_.phase(worldSession_.generation()),
+                                   std::memory_order_release);
 
         if (engineTickCallbackId_ == Hook::ERROR_ID || !worldLifecycleCallbacksReady_.load()) {
             baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
@@ -179,9 +182,17 @@ public:
             baseResourceBridge_.set_enabled(requestedBaseSharingEnabled_.load());
         }
         if (grappleSettingDirty_.exchange(false)) {
-            grappleLedger_.set_desired(requestedGrappleNoCooldown_.load());
+            const auto desired = requestedGrappleNoCooldown_.load(std::memory_order_acquire);
+            grappleLedger_.set_desired(desired);
+            if (desired) {
+                grappleReadinessScheduler_.request(worldSession_.generation());
+            }
         }
-        process_grapple_work();
+        if (grappleRetryRequested_.exchange(false, std::memory_order_acq_rel) &&
+            grappleLedger_.request_retry(worldSession_.generation())) {
+            grappleReadinessScheduler_.request(worldSession_.generation());
+        }
+        process_grapple_work(deltaSeconds);
         baseResourceBridge_.ensure_hooks_registered();
         baseResourceBridge_.tick(deltaSeconds);
 
@@ -542,13 +553,23 @@ private:
      * @brief 在 EngineTick 执行一次由纯值账本决定的爪钩应用或恢复工作。
      * @details 默认关闭、已应用和世界不可访问时立即返回，不扫描 UObject。
      */
-    auto process_grapple_work() -> void {
-        if (!worldLifecycleCallbacksReady_.load() || grappleSafetyDisabled_.load()) {
+    auto process_grapple_work(const float deltaSeconds) -> void {
+        if (!worldLifecycleCallbacksReady_.load(std::memory_order_acquire)) {
+            grappleRuntimePhase_.store(grappling_hook::CooldownRuntimePhase::waitingForWorld,
+                                       std::memory_order_release);
             return;
         }
-        const auto work =
-            grappleLedger_.next_work(worldSession_.generation(), worldSession_.can_access_unreal());
+        if (grappleSafetyDisabled_.load(std::memory_order_acquire)) {
+            grappleRuntimePhase_.store(grappling_hook::CooldownRuntimePhase::safetyDisabled,
+                                       std::memory_order_release);
+            return;
+        }
+        const auto worldGeneration = worldSession_.generation();
+        const auto worldAccessible = worldSession_.can_access_unreal();
+        const auto work = grappleLedger_.next_work(worldGeneration, worldAccessible);
         if (work == grappling_hook::CooldownWork::none) {
+            grappleRuntimePhase_.store(grappleLedger_.phase(worldGeneration),
+                                       std::memory_order_release);
             return;
         }
         if (work == grappling_hook::CooldownWork::restore) {
@@ -560,21 +581,63 @@ private:
                 requestedGrappleNoCooldown_.store(false);
                 grappleLedger_.set_desired(false);
             }
+            grappleRuntimePhase_.store(grappleSafetyDisabled_.load()
+                                           ? grappling_hook::CooldownRuntimePhase::safetyDisabled
+                                           : grappleLedger_.phase(worldGeneration),
+                                       std::memory_order_release);
             return;
         }
 
+        if (!grappleReadinessScheduler_.advance(deltaSeconds, worldGeneration, true)) {
+            grappleRuntimePhase_.store(grappleLedger_.phase(worldGeneration),
+                                       std::memory_order_release);
+            return;
+        }
+        const auto commonInventoryReady = pal_game::is_valid(pal_game::get_main_container());
+        const auto ready = grappling_hook::grapple_apply_ready(
+            worldLifecycleCallbacksReady_.load(std::memory_order_acquire), worldAccessible,
+            commonInventoryReady);
+        grappleReadinessScheduler_.complete(worldGeneration, ready);
+        if (!ready) {
+            set_grapple_runtime_status(
+                "正在等待进入可访问世界并加载本地玩家 Common 主背包；不会逐帧扫描。");
+            grappleRuntimePhase_.store(grappleLedger_.phase(worldGeneration),
+                                       std::memory_order_release);
+            return;
+        }
+        if (!grappleLedger_.begin_apply(worldGeneration)) {
+            grappleReadinessScheduler_.request(worldGeneration);
+            grappleRuntimePhase_.store(grappleLedger_.phase(worldGeneration),
+                                       std::memory_order_release);
+            return;
+        }
+        grappleRuntimePhase_.store(grappling_hook::CooldownRuntimePhase::applying,
+                                   std::memory_order_release);
         auto result = grappleGateway_.apply();
-        auto records = std::move(result.records);
-        if (!grappleLedger_.mark_apply_attempted(worldSession_.generation(), records)) {
-            if (!records.empty()) {
-                const auto restoreResult = grappleGateway_.restore(records);
+        const auto rollbackRecords = result.records;
+        const auto accepted = grappleLedger_.complete_apply(
+            worldGeneration, grappling_hook::to_apply_outcome(result.status),
+            std::move(result.records));
+        if (!accepted) {
+            if (!rollbackRecords.empty()) {
+                const auto restoreResult = grappleGateway_.restore(rollbackRecords);
                 set_grapple_runtime_status(restoreResult.succeeded()
                                                ? "爪钩应用请求已过期；刚建立的覆盖已按原值恢复。"
                                                : "爪钩应用请求已过期，且即时恢复未能完整验证。");
+                if (!restoreResult.succeeded()) {
+                    grappleSafetyDisabled_.store(true, std::memory_order_release);
+                }
+            } else {
+                set_grapple_runtime_status(
+                    "爪钩覆盖返回了无效结果；本世界已安全停用，未保留覆盖记录。");
             }
-            return;
+        } else {
+            set_grapple_runtime_status(std::move(result.message));
         }
-        set_grapple_runtime_status(std::move(result.message));
+        grappleRuntimePhase_.store(grappleSafetyDisabled_.load(std::memory_order_acquire)
+                                       ? grappling_hook::CooldownRuntimePhase::safetyDisabled
+                                       : grappleLedger_.phase(worldGeneration),
+                                   std::memory_order_release);
     }
 
     /**
@@ -611,6 +674,9 @@ private:
             grappleLedger_.complete_restore(true);
         }
         static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
+        grappleReadinessScheduler_.begin_world(nextWorldGeneration);
+        grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
+                                   std::memory_order_release);
         baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
         statWritesDisabledForWorld_ = false;
@@ -632,6 +698,7 @@ private:
         want_scan_items_.store(false);
         wantRefreshSkillCatalog_.store(false);
         wantProbeObject_.store(false);
+        grappleRetryRequested_.store(false, std::memory_order_release);
 
         {
             const std::lock_guard lock(inv_mutex_);
@@ -1328,12 +1395,19 @@ private:
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self) {
         bool enabled = self->requestedGrappleNoCooldown_.load(std::memory_order_acquire);
-        ImGui::BeginDisabled(self->grappleSafetyDisabled_.load(std::memory_order_acquire));
+        const auto phase = self->grappleRuntimePhase_.load(std::memory_order_acquire);
+        const auto safetyDisabled = self->grappleSafetyDisabled_.load(std::memory_order_acquire) ||
+                                    phase == grappling_hook::CooldownRuntimePhase::safetyDisabled;
+        ImGui::BeginDisabled(safetyDisabled);
         if (ImGui::Checkbox("爪钩枪无冷却", &enabled)) {
             self->requestedGrappleNoCooldown_.store(enabled, std::memory_order_release);
             self->grappleSettingDirty_.store(true, std::memory_order_release);
         }
         ImGui::EndDisabled();
+        if (phase == grappling_hook::CooldownRuntimePhase::waitingForRetry &&
+            ImGui::Button("重新检测爪钩枪")) {
+            self->grappleRetryRequested_.store(true, std::memory_order_release);
+        }
         std::string runtimeStatus;
         {
             const std::lock_guard lock(self->grappleStatusMutex_);
@@ -1342,9 +1416,13 @@ private:
         if (!runtimeStatus.empty()) {
             ImGui::TextWrapped("%s", runtimeStatus.c_str());
         }
-        if (self->grappleSafetyDisabled_.load()) {
+        if (phase == grappling_hook::CooldownRuntimePhase::waitingForRetry) {
+            ImGui::TextColored(ImVec4(1.0F, 0.75F, 0.2F, 1.0F),
+                               "当前未找到已加载的正式爪钩枪；装备后请点击“重新检测爪钩枪”。");
+        }
+        if (safetyDisabled) {
             ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
-                               "本次运行的爪钩覆盖已因恢复失败而安全停用。");
+                               "爪钩字段布局、写入验证或恢复失败；已安全停用，切换开关不会绕过。");
         }
         ImGui::TextDisabled("仅本次游戏进程有效；重新启动游戏后默认关闭。");
         ImGui::TextDisabled(
@@ -1586,10 +1664,17 @@ private:
     std::atomic<bool> requestedGrappleNoCooldown_{false};
     /** @brief 通知 EngineTick 更新爪钩覆盖领域服务的期望状态。 */
     std::atomic<bool> grappleSettingDirty_{false};
+    /** @brief GUI 显式授权目标未加载后的下一次单次检测。 */
+    std::atomic<bool> grappleRetryRequested_{false};
     /** @brief 只在游戏线程执行严格目标识别、冷却覆盖和恢复的反射网关。 */
     grappling_hook::GrappleCooldownGateway grappleGateway_;
     /** @brief 只保存对象全名、原值和世界代次的可逆覆盖领域状态。 */
     grappling_hook::CooldownOverrideLedger grappleLedger_;
+    /** @brief 有界调度玩家就绪检查，避免等待背包时逐帧解析。 */
+    grappling_hook::CooldownReadinessScheduler grappleReadinessScheduler_;
+    /** @brief 游戏线程发布、GUI 只读的爪钩领域阶段。 */
+    std::atomic<grappling_hook::CooldownRuntimePhase> grappleRuntimePhase_{
+        grappling_hook::CooldownRuntimePhase::off};
     /** @brief 恢复验证失败后阻止本次运行继续建立爪钩覆盖。 */
     std::atomic<bool> grappleSafetyDisabled_{false};
     /** @brief 保护游戏线程发布、GUI 复制的爪钩运行时状态。 */
