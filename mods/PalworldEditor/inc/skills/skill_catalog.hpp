@@ -540,4 +540,31 @@ private:
     }
     return result;
 }
+
+/**
+ * @brief 按类别、排除集合和搜索词生成不复制技能值的被动技能视图。
+ * @param[in] options 待筛选的被动技能目录；返回指针的有效期不超过该目录。
+ * @param[in] category 具体类别；空值表示“全部”。
+ * @param[in] query 中文名或 Raw ID 搜索文本。
+ * @param[in] excludedIds 已装备且不应再次选择的被动技能 Raw ID。
+ * @return 与原目录顺序一致、指向原目录元素的非拥有指针。
+ */
+[[nodiscard]] inline auto filter_passive_skill_views(
+    const std::span<const SkillOption> options, const std::optional<PassiveSkillCategory> category,
+    const std::string_view query, const std::unordered_set<std::string>& excludedIds)
+    -> std::vector<const SkillOption*> {
+    std::vector<const SkillOption*> result;
+    result.reserve(options.size());
+    for (const auto& option : options) {
+        if (category.has_value() && (!option.passiveMetadata.has_value() ||
+                                     option.passiveMetadata->category != *category)) {
+            continue;
+        }
+        if (excludedIds.contains(option.id) || !matches_skill(option, query)) {
+            continue;
+        }
+        result.push_back(&option);
+    }
+    return result;
+}
 }  // namespace skill_editor

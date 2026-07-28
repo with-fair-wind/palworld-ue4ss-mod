@@ -114,6 +114,34 @@ void test_passive_filter_combines_category_exclusion_and_search() {
     }));
 }
 
+void test_passive_filter_views_preserve_catalog_objects_and_order() {
+    using enum skill_editor::PassiveSkillCategory;
+
+    const std::vector<skill_editor::SkillOption> skills{
+        {.id = "Normal",
+         .localizedName = "普通采矿",
+         .passiveMetadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 1, .addWorldTreePal = false, .category = normal}},
+        {.id = "Rare",
+         .localizedName = "稀有采矿",
+         .passiveMetadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 3, .addWorldTreePal = false, .category = rare}},
+        {.id = "RareExcluded",
+         .localizedName = "稀有采矿二",
+         .passiveMetadata =
+             skill_editor::PassiveSkillMetadata{
+                 .rank = 3, .addWorldTreePal = false, .category = rare}},
+    };
+
+    const auto visible = skill_editor::filter_passive_skill_views(
+        skills, rare, "采矿", std::unordered_set<std::string>{"RareExcluded"});
+
+    CHECK(visible.size() == 1);
+    CHECK(visible.front() == &skills[1]);
+}
+
 void test_passive_picker_category_change_clears_only_selection() {
     skill_editor::PassiveSkillPickerState state{
         .category = std::nullopt,
@@ -1189,6 +1217,7 @@ auto main() -> int {
     test_skill_catalog_filter_and_deduplicate();
     test_passive_skill_categories_follow_runtime_metadata();
     test_passive_filter_combines_category_exclusion_and_search();
+    test_passive_filter_views_preserve_catalog_objects_and_order();
     test_passive_picker_category_change_clears_only_selection();
     test_passive_classification_job_reuses_success_cache_and_retries_unknowns();
     test_passive_classification_job_honors_batch_limit_and_reports_failure();

@@ -940,20 +940,20 @@ private:
             ImGui::SetNextItemWidth(340.0F);
             ImGui::InputText("搜索##passive-skill-search", self->passiveSearch_,
                              sizeof(self->passiveSearch_));
-            const auto visible = skill_editor::filter_passive_skills(
+            const auto visible = skill_editor::filter_passive_skill_views(
                 options, self->passivePickerState_.category, self->passiveSearch_, excludedIds);
-            for (const auto& option : visible) {
-                const auto label = skill_editor::skill_label(option);
-                const bool isSelected = selected.has_value() && selected->id == option.id;
-                if (option.passiveMetadata.has_value()) {
-                    ImGui::PushStyleColor(ImGuiCol_Text,
-                                          passive_category_color(option.passiveMetadata->category));
+            for (const auto* option : visible) {
+                const auto label = skill_editor::skill_label(*option);
+                const bool isSelected = selected.has_value() && selected->id == option->id;
+                if (option->passiveMetadata.has_value()) {
+                    ImGui::PushStyleColor(
+                        ImGuiCol_Text, passive_category_color(option->passiveMetadata->category));
                 }
                 if (ImGui::Selectable(label.c_str(), isSelected)) {
-                    self->passivePickerState_.selected = option;
+                    self->passivePickerState_.selected = *option;
                     changed = true;
                 }
-                if (option.passiveMetadata.has_value()) {
+                if (option->passiveMetadata.has_value()) {
                     ImGui::PopStyleColor();
                 }
             }
