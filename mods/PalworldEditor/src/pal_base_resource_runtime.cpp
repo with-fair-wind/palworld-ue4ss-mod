@@ -14,7 +14,6 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
-
 #include <base_resource_sharing/current_base_resolution.hpp>
 
 namespace base_resource_sharing::detail {
@@ -529,11 +528,10 @@ auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
 
 auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
     using Names = CurrentBaseReflectionNames<CharType>;
-    auto* property =
-        baseModel == nullptr
-            ? nullptr
-            : CastField<FStructProperty>(
-                  baseModel->GetPropertyByNameInChain(Names::baseIdProperty.data()));
+    auto* property = baseModel == nullptr
+                         ? nullptr
+                         : CastField<FStructProperty>(
+                               baseModel->GetPropertyByNameInChain(Names::baseIdProperty.data()));
     if (property == nullptr || property->GetSize() != static_cast<int32>(sizeof(FGuid))) {
         return std::nullopt;
     }
@@ -561,8 +559,7 @@ auto resolve_inside_base_id(UObject* worldContext, const ResourceCatalogSnapshot
         return std::nullopt;
     }
 
-    auto* insideComponent =
-        read_object_property(pawn, Names::insideComponentProperty.data());
+    auto* insideComponent = read_object_property(pawn, Names::insideComponentProperty.data());
     if (insideComponent == nullptr) {
         error = "本地 Pawn 缺少 InsideBaseCampCheckComponent。";
         return std::nullopt;

@@ -83,9 +83,9 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 
 - `inc/game/pal_game.hpp`：背包、物品和帕鲁 UObject 反射访问；
 - `inc/base_resource_sharing/resource_pool.hpp`：公会资源过滤/排序、能力与按注入次数恢复的纯逻辑；
-- `inc/base_resource_sharing/resource_session.hpp`：60 秒目录兜底、部分结果退避调度与固定大小制作/建造操作会话；
-- `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 分阶段制作/建造 Hook 清单；
-- `inc/base_resource_sharing/pal_base_resources.hpp` + `src/pal_base_resources.cpp`：事件驱动目录调度、
+- `inc/base_resource_sharing/resource_session.hpp`：按需目录失效状态与固定大小制作/建造操作会话；
+- `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 最小制作/建造前台会话 Hook 清单；
+- `inc/base_resource_sharing/pal_base_resources.hpp` + `src/pal_base_resources.cpp`：按需目录发现、
   制作/建造会话与 Hook 适配；
 - `src/pal_base_resource_runtime.hpp` + `src/pal_base_resource_runtime.cpp`：通过游戏管理器发现同公会普通仓储、
   建立可逆临时资源联合并按账本恢复；
@@ -145,22 +145,31 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 跨据点资源共享通过 `PalBaseCampManager:GetBaseCampIds` / `TryGetModel` 读取同公会据点，再从
 `PalBaseCampModel.ModuleArray` 的 `PalBaseCampModuleItemStorage.ContainerInfos` 筛选 `Chest` 类型普通仓储；
 每个登记项都尝试通过 `PalMapObjectManager:FindConcreteModel` 解析到已加载的 `PalItemContainer`；暂未加载的
-普通箱子从本次联合排除，已加载部分仍可用，并按 1、2、4 秒指数退避、最高 30 秒重试。该功能不使用全局
+普通箱子从本次联合排除，已加载部分仍可用，并在下一次材料操作开始时重新尝试。该功能不使用全局
 `FindAllOf`，不扫描或写入 `ItemSlotArray`/`StackCount`，也没有一秒一次的物品数量预览缓存。
 
-`OnRep_ContainerInfos`、仓储 ConcreteModel 可用性和 `OnRep_ModuleArray` 只负责合并目录失效标记；活动材料
-会话期间目录调度器不得执行校准或拆装联合，会话结束后处理一次失效，60 秒校准仅为空闲兜底。
-`PalUIBuildModel:OnOpenMenu` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前获取
-会话并建立联合。制作和建造都只向本地主背包 `InventoryMultiHelper` 追加去重后的同公会普通箱子，不同时扩展
-据点模块。制作与建造会话互斥，新操作必须先恢复旧联合再抢占。高频列表、配方和资格 Hook 只刷新固定大小状态，
-不做 UObject 查找、反射、目录发现、数组修改或日志。`StartProduction` 只确认会话仍活动；制作界面由
+不注册 `OnRep_ContainerInfos`、ConcreteModel 可用性、`OnRep_ModuleArray`、配方预览或建造资格等结构/高频
+Hook。目录不存在空闲定时校准或后台重试；每个新的制作或建造会话只在对应 pre-hook 中同步执行一次有界目录
+发现，同一会话不重复发现。原生 UFunction 直接注册到目标函数；Blueprint UFunction 共用一对可注销的
+`ProcessLocalScriptFunction` 回调，并只按最多八个缓存的 `UFunction*` 做指针比较，不使用
+`UObjectGlobals::RegisterHook` 的逐调用函数全名构造与散列表分发。
+`PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay`、`PalBuilderComponent:IsExistsMaterialForBuildObject`、
+`PalUIInGameMainMenuBuildModel:Setup` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前
+获取会话并建立联合。制作只向本地主背包 `InventoryMultiHelper` 追加其他据点的普通箱子，明确排除当前据点；
+建造只向当前据点仓储模块追加其他据点箱子，使预览和原版扣料使用同一入口。制作与建造会话互斥，新操作必须
+先恢复旧联合再抢占。`StartProduction` 与 `RequestBuild_ToServer` 只在真实提交前重读并验证当前据点、世界代次
+和联合序列，不执行目录发现或数组修改；制作界面由
 `PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式释放建造会话。
+当前据点通过 `PalUtility:GetLocalPalPlayerController`、控制器 `K2_GetPawn`、Pawn 的
+`InsideBaseCampCheckComponent` 和组件 `GetInsideBaseCampModel` 获取，再读取 `BaseCampId` 并验证其属于同公会
+普通仓储目录。不得调用 `GetPawn`、`K2_GetActorLocation` 或 `PalBaseCampManager:GetNearestBaseCamp` 回退猜测；
+解析失败时不建立联合。该查询只发生在新前台材料会话与真实提交验证中，不增加 Hook、定时器或逐帧工作。
 写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
-停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。首次资格回调早于目录
-初始化时在该次 pre-hook 同步完成一次有界目录发现和联合，不允许逐帧重试。只有终端而没有普通仓储模块的据点
-计入据点数但不贡献材料。建筑菜单 `Setup` 完成后只向该建造模型发送一次原生
-`OnUpdateInventory(Container)` 事件以重算首次资格，不重复调用 Helper 的 `OnRep_Containers`，也不增加逐物品
-或逐帧 Hook。跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
+停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。每次新材料会话都在
+pre-hook 同步完成一次有界目录发现和联合，不允许空闲或逐帧重试。只有终端而没有普通仓储模块的据点计入据点数
+但不贡献材料，且无法作为建造共享目标。建筑菜单 `Setup` 完成后只向该建造模型发送一次原生
+`OnUpdateInventory(Container)` 事件以重算首次资格，不重复调用 Helper 的 `OnRep_Containers`。跨帧只持有
+GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
 
 本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先恢复活动联合再注销
 资源 Hook。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
@@ -168,13 +177,14 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 不读取、创建或写入 `config.ini`。不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 或等价的资源路径
 mod 同时启用。
 
-同一可访问世界内从关闭切换为开启时，资源桥必须按当前世界代次重新初始化会话和目录调度器，并由后续
-EngineTick 自动执行一次既有的管理器目录校准。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局
-UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
+同一可访问世界内从关闭切换为开启时，资源桥必须按当前世界代次重新初始化会话和按需目录状态；直到下一次
+制作或建造会话开始前不执行目录发现。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局 UObject 扫描、
+槽位扫描、空闲定时校准或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
 开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
 入口和活动会话校准抑制。1.6.8 增加进程内动态开关、资源单一消费面、首次资格同步 bootstrap、联合序列验证
 及有界诊断；爪钩等待 Common 主背包就绪后只执行一次精确目标扫描，未找到时仅允许显式重试。关闭和 LoadMap
-前在游戏线程按账本恢复。1.6.9 增加部分目录成功、指数退避、60 秒空闲兜底和建造 Setup 单次库存更新通知。
+前在游戏线程按账本恢复。1.6.9 后续修订移除空闲目录兜底与后台退避，把目录发现限制在新材料会话，并将建造
+资格刷新改为实际建筑模型的单次通知；制作排除当前据点容器，建造使用当前据点模块，真实提交前执行只读验证。
 热卸载前必须先关闭开关，析构不得访问 Unreal。相关功能均不增加空闲逐帧工作。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
@@ -225,9 +235,9 @@ git diff --check
 无需先打开炉子；制作最大数量与真实可制作数量一致且不会把同一箱子计算两次；制作/建造能消费同公会另一
 已加载据点的普通箱子材料；
 材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
-显示不可用；同一世界内关闭后重新开启会自动恢复非零计数且每次只产生一次成功的初始校准；日志中目录校准
-仅在无活动材料会话时最多每 60 秒一次，未加载箱子按指数退避且不阻塞已加载箱子；活动菜单期间不出现联合反复
-恢复/重建；每次实时联合都有匹配且无错误的恢复和耗时记录。首次按 B 打开建造菜单应立即可建造，无需先打开
+显示不可用；同一世界内关闭后重新开启时，在下一次材料操作开始后恢复非零计数；移动、瞄准和空闲等待期间目录
+尝试次数不得增长，未加载箱子不得阻塞已加载箱子；活动菜单期间不出现联合反复恢复/重建；每个新材料会话只
+出现一次按需目录发现，每次实时联合都有匹配且无错误的恢复和耗时记录。首次按 B 打开建造菜单应立即可建造，无需先打开
 任意制作设施；同一建造会话日志中只出现一次建造库存资格刷新。不要与
 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时测试。
 

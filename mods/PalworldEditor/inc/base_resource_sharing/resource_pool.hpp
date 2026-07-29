@@ -105,20 +105,68 @@ struct ResourceExposurePlan {
     auto operator<=>(const ResourceExposurePlan&) const = default;
 };
 
-/** @brief 为制作或建造选择玩家原生材料 Helper 这一唯一消费面。 */
-[[nodiscard]] inline auto make_exposure_plan(const ResourceOperation operation) noexcept
-    -> ResourceExposurePlan {
+/** @brief 为制作或建造选择唯一消费面；无法确认当前据点时拒绝扩展。 */
+[[nodiscard]] inline auto make_exposure_plan(
+    const ResourceOperation operation,
+    const std::optional<GuidKey> currentBaseId = std::nullopt) noexcept -> ResourceExposurePlan {
     switch (operation) {
         case ResourceOperation::crafting:
+            if (currentBaseId.has_value() && currentBaseId->valid()) {
+                return {
+                    .operation = operation,
+                    .surface = ResourceConsumerSurface::playerHelper,
+                    .targetBaseId = currentBaseId,
+                };
+            }
+            return {.operation = operation};
         case ResourceOperation::building:
+            if (currentBaseId.has_value() && currentBaseId->valid()) {
+                return {
+                    .operation = operation,
+                    .surface = ResourceConsumerSurface::currentBaseModule,
+                    .targetBaseId = currentBaseId,
+                };
+            }
+            return {.operation = operation};
+        case ResourceOperation::repair:
             return {
                 .operation = operation,
-                .surface = ResourceConsumerSurface::playerHelper,
             };
-        case ResourceOperation::repair:
-            return {.operation = operation};
     }
     return {.operation = operation};
+}
+
+/**
+ * @brief 选择其他据点的唯一容器，避免当前据点同时经原版入口和共享入口重复统计。
+ */
+[[nodiscard]] inline auto select_shared_container_ids(
+    const std::span<const ContainerDescriptor> containers, const GuidKey& currentBaseId)
+    -> std::vector<GuidKey> {
+    std::vector<GuidKey> result;
+    result.reserve(containers.size());
+    for (const auto& container : containers) {
+        if (container.baseId != currentBaseId &&
+            std::ranges::find(result, container.containerId) == result.end()) {
+            result.push_back(container.containerId);
+        }
+    }
+    return result;
+}
+
+enum class BuildingInventoryRefreshTarget : std::uint8_t {
+    none,
+    buildModel,
+};
+
+/** @return 建造联合建立后唯一允许发送库存更新的原生目标。 */
+[[nodiscard]] constexpr auto select_building_inventory_refresh_target(
+    const bool unionActive, const ResourceExposurePlan& exposure) noexcept
+    -> BuildingInventoryRefreshTarget {
+    if (unionActive && exposure.operation == ResourceOperation::building &&
+        exposure.surface == ResourceConsumerSurface::currentBaseModule) {
+        return BuildingInventoryRefreshTarget::buildModel;
+    }
+    return BuildingInventoryRefreshTarget::none;
 }
 
 [[nodiscard]] constexpr auto resource_hooks_required(const bool enabled,
