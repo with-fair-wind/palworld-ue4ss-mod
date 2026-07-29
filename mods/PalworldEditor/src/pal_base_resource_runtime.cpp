@@ -15,6 +15,8 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
 
+#include <base_resource_sharing/current_base_resolution.hpp>
+
 namespace base_resource_sharing::detail {
 using namespace RC;
 using namespace RC::Unreal;
@@ -142,6 +144,16 @@ private:
     target->ProcessEvent(function, &params);
     output = params.ReturnValue;
     return output != nullptr;
+}
+
+[[nodiscard]] auto read_object_property(UObject* object, const CharType* propertyName) -> UObject* {
+    auto* property =
+        object == nullptr
+            ? nullptr
+            : CastField<FObjectPropertyBase>(object->GetPropertyByNameInChain(propertyName));
+    return property == nullptr
+               ? nullptr
+               : property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
 }
 
 [[nodiscard]] auto try_get_player_guild(UObject* worldContext, const FGuid& playerId,
@@ -516,10 +528,12 @@ auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
 }
 
 auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
+    using Names = CurrentBaseReflectionNames<CharType>;
     auto* property =
         baseModel == nullptr
             ? nullptr
-            : CastField<FStructProperty>(baseModel->GetPropertyByNameInChain(STR("BaseCampId")));
+            : CastField<FStructProperty>(
+                  baseModel->GetPropertyByNameInChain(Names::baseIdProperty.data()));
     if (property == nullptr || property->GetSize() != static_cast<int32>(sizeof(FGuid))) {
         return std::nullopt;
     }
@@ -530,89 +544,49 @@ auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
     return key.valid() ? std::optional{key} : std::nullopt;
 }
 
-auto resolve_nearest_base_id(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
-                             std::string& error) -> std::optional<GuidKey> {
+auto resolve_inside_base_id(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
+                            std::string& error) -> std::optional<GuidKey> {
+    using Names = CurrentBaseReflectionNames<CharType>;
     error.clear();
+
     UObject* controller{};
+    if (!call_utility_object(worldContext, STR("GetLocalPalPlayerController"), controller)) {
+        error = "无法解析本地玩家控制器。";
+        return std::nullopt;
+    }
+
     UObject* pawn{};
-    if (!call_utility_object(worldContext, STR("GetLocalPalPlayerController"), controller) ||
-        !try_get_object(controller, STR("GetPawn"), pawn)) {
-        error = "无法解析本地玩家控制器或 Pawn。";
+    if (!try_get_object(controller, Names::controllerPawnFunction.data(), pawn)) {
+        error = "本地玩家控制器无法通过 K2_GetPawn 返回 Pawn。";
         return std::nullopt;
     }
 
-    auto* locationFunction = pawn->GetFunctionByNameInChain(STR("K2_GetActorLocation"));
-    auto* locationReturn = locationFunction == nullptr
-                               ? nullptr
-                               : CastField<FStructProperty>(locationFunction->GetReturnProperty());
-    if (locationFunction == nullptr || locationReturn == nullptr ||
-        locationReturn->GetSize() != FVector::StaticSize()) {
-        error = "K2_GetActorLocation 缺少兼容的 FVector 返回值。";
-        return std::nullopt;
-    }
-
-    FVector location{};
-    {
-        FunctionParams params{locationFunction};
-        pawn->ProcessEvent(locationFunction, params.data());
-        locationReturn->CopyCompleteValue(
-            &location, locationReturn->ContainerPtrToValuePtr<void>(params.data()));
-    }
-
-    UObject* manager{};
-    if (!call_utility_object(worldContext, STR("GetBaseCampManager"), manager)) {
-        error = "无法解析据点管理器。";
-        return std::nullopt;
-    }
-    auto* nearestFunction = manager->GetFunctionByNameInChain(STR("GetNearestBaseCamp"));
-    FStructProperty* locationInput{};
-    FObjectPropertyBase* baseReturn{};
-    if (nearestFunction != nullptr) {
-        for (auto* property :
-             TFieldRange<FProperty>(nearestFunction, EFieldIterationFlags::IncludeDeprecated)) {
-            if (!property->HasAnyPropertyFlags(CPF_Parm)) {
-                continue;
-            }
-            if (property->HasAnyPropertyFlags(CPF_ReturnParm)) {
-                baseReturn = CastField<FObjectPropertyBase>(property);
-                continue;
-            }
-            auto* candidate = CastField<FStructProperty>(property);
-            if (candidate != nullptr && candidate->GetSize() == FVector::StaticSize()) {
-                if (locationInput != nullptr) {
-                    locationInput = nullptr;
-                    break;
-                }
-                locationInput = candidate;
-            }
-        }
-    }
-    if (nearestFunction == nullptr || locationInput == nullptr || baseReturn == nullptr) {
-        error = "GetNearestBaseCamp 缺少唯一 FVector 参数或对象返回值。";
+    auto* insideComponent =
+        read_object_property(pawn, Names::insideComponentProperty.data());
+    if (insideComponent == nullptr) {
+        error = "本地 Pawn 缺少 InsideBaseCampCheckComponent。";
         return std::nullopt;
     }
 
     UObject* baseModel{};
-    {
-        FunctionParams params{nearestFunction};
-        locationInput->CopyCompleteValue(locationInput->ContainerPtrToValuePtr<void>(params.data()),
-                                         &location);
-        manager->ProcessEvent(nearestFunction, params.data());
-        baseModel = baseReturn->GetObjectPropertyValue(
-            baseReturn->ContainerPtrToValuePtr<void>(params.data()));
-    }
-    const auto baseId = read_base_id(baseModel);
-    if (!baseId.has_value()) {
-        error = "最近据点模型缺少有效 BaseCampId。";
+    if (!try_get_object(insideComponent, Names::insideBaseModelFunction.data(), baseModel)) {
+        error = "当前不在游戏已确认的据点内。";
         return std::nullopt;
     }
-    const auto belongsToCatalog = std::ranges::any_of(
-        catalog.modules, [&](const auto& module) { return module.baseId == *baseId; });
-    if (!belongsToCatalog) {
-        error = "最近据点不在当前同公会普通仓储目录中。";
+
+    const auto candidate = read_base_id(baseModel);
+    if (!candidate.has_value()) {
+        error = "当前据点模型缺少有效 BaseCampId。";
         return std::nullopt;
     }
-    return baseId;
+
+    const bool hasStorageModule = std::ranges::any_of(
+        catalog.modules, [&](const auto& module) { return module.baseId == *candidate; });
+    const auto accepted = accept_current_base(*candidate, hasStorageModule);
+    if (!accepted.has_value()) {
+        error = "当前据点不在同公会普通仓储目录中。";
+    }
+    return accepted;
 }
 
 auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
@@ -763,16 +737,13 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
         return false;
     };
 
-    std::vector<GuidKey> globalIds;
-    globalIds.reserve(catalog.plan.ordered.size());
-    for (const auto& descriptor : catalog.plan.ordered) {
-        globalIds.push_back(descriptor.containerId);
+    if (!exposure.targetBaseId.has_value()) {
+        return rollback("材料联合缺少当前据点标识。");
     }
+    const auto globalIds =
+        select_shared_container_ids(catalog.plan.ordered, *exposure.targetBaseId);
 
     if (exposure.surface == ResourceConsumerSurface::currentBaseModule) {
-        if (!exposure.targetBaseId.has_value()) {
-            return rollback("建造共享缺少当前据点标识。");
-        }
         const auto module =
             std::ranges::find(catalog.modules, *exposure.targetBaseId, &CatalogModule::baseId);
         if (module == catalog.modules.end()) {
@@ -871,15 +842,47 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
     return true;
 }
 
+auto validate_union(const LiveUnion& liveUnion, std::string& error) -> bool {
+    error.clear();
+    if (!liveUnion.active || !liveUnion.entry.has_value()) {
+        error = "材料提交前缺少活动联合账本。";
+        return false;
+    }
+
+    auto* object = find_object_by_full_name(liveUnion.entry->objectFullName);
+    const auto* propertyName =
+        liveUnion.entry->helperArray ? STR("Containers") : STR("ContainerInfos");
+    auto* property =
+        object == nullptr
+            ? nullptr
+            : CastField<FArrayProperty>(object->GetPropertyByNameInChain(propertyName));
+    std::vector<GuidKey> current;
+    const bool read = liveUnion.entry->helperArray
+                          ? read_helper_sequence(object, property, current)
+                          : read_module_sequence(object, property, current);
+    if (!read) {
+        error = "材料提交前无法重读活动联合序列。";
+        return false;
+    }
+    const auto validation =
+        validate_applied_sequence(liveUnion.entry->original, liveUnion.entry->injected, current);
+    if (!validation) {
+        error =
+            "材料提交前联合序列验证失败：" + std::string{sequence_status_text(validation.status)};
+        return false;
+    }
+    return true;
+}
+
 auto notify_building_inventory_changed(UObject* buildModel, UObject* worldContext,
                                        const ResourceCatalogSnapshot& catalog,
                                        const LiveUnion& liveUnion, std::string& error) -> bool {
     error.clear();
-    if (buildModel == nullptr || worldContext == nullptr || !liveUnion.active ||
-        liveUnion.exposure.operation != ResourceOperation::building ||
-        liveUnion.exposure.surface != ResourceConsumerSurface::playerHelper ||
-        !liveUnion.entry.has_value()) {
-        error = "建造库存更新通知缺少活动的玩家资源联合。";
+    if (buildModel == nullptr || worldContext == nullptr ||
+        select_building_inventory_refresh_target(liveUnion.active, liveUnion.exposure) !=
+            BuildingInventoryRefreshTarget::buildModel ||
+        !liveUnion.entry.has_value() || liveUnion.entry->helperArray) {
+        error = "建造库存更新通知缺少活动的当前据点资源联合。";
         return false;
     }
     if (liveUnion.entry->injected.empty()) {

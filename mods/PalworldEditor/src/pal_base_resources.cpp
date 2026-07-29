@@ -116,7 +116,9 @@ public:
     struct HookBinding {
         UFunction* function{};
         HookSpec spec;
-        std::pair<int, int> ids{-1, -1};
+        ResourceHookBackend backend{ResourceHookBackend::unsupported};
+        CallbackId preId{-1};
+        CallbackId postId{-1};
     };
 
     auto set_enabled(const bool enabled) -> void {
@@ -131,7 +133,7 @@ public:
             restore_or_disable("关闭资源共享");
             sessions_.reset();
             currentBase_.reset();
-            scheduler_.reset();
+            catalogState_.reset();
             unregister_resource_hooks();
             catalog_ = {};
             baseCount_ = 0;
@@ -146,7 +148,7 @@ public:
             const auto generation = runtime_.generation();
             sessions_.begin_world(generation);
             currentBase_.begin_world(generation);
-            scheduler_.begin_world(generation);
+            catalogState_.begin_world(generation);
             runtimeError_.clear();
         }
         snapshotDirty_.mark();
@@ -157,7 +159,7 @@ public:
         restore_or_disable("切换世界");
         sessions_.reset();
         currentBase_.reset();
-        scheduler_.reset();
+        catalogState_.reset();
         unregister_resource_hooks();
         worldDisabledErrors_ = {};
         safetyDisabled_ = false;
@@ -180,28 +182,17 @@ public:
         runtime_.finish_world_transition(generation);
         sessions_.begin_world(generation);
         currentBase_.begin_world(generation);
-        scheduler_.begin_world(generation);
+        catalogState_.begin_world(generation);
         publish_capabilities();
         snapshotDirty_.mark();
         publish_snapshot();
     }
 
     auto tick(const float deltaSeconds) -> void {
-        const auto generation = runtime_.generation();
+        static_cast<void>(deltaSeconds);
         if (!runtime_.enabled() || !runtime_.accessible()) {
             publish_snapshot();
             return;
-        }
-
-        const auto sessionTransition = sessions_.advance(deltaSeconds, generation);
-        if (sessionTransition.kind == ForegroundTransitionKind::released) {
-            restore_or_disable("制作会话空闲");
-        }
-
-        const bool idle = !sessions_.active(generation).has_value() && !liveUnion_.active;
-        if (scheduler_.advance(deltaSeconds, generation, idle)) {
-            auto* worldContext = resolve_world_context(nullptr);
-            reconcile_catalog(worldContext);
         }
         publish_snapshot();
     }
@@ -212,6 +203,9 @@ public:
                 unregister_resource_hooks();
                 publish_snapshot();
             }
+            return;
+        }
+        if (hook_registration_complete(hooks_.size())) {
             return;
         }
 
@@ -232,17 +226,16 @@ public:
             if (function == nullptr) {
                 continue;
             }
-            const auto ids = UObjectGlobals::RegisterHook(
-                function,
-                [this, function, spec](UnrealScriptFunctionCallableContext& context, void*) {
-                    on_hook_pre(function, spec, context);
-                },
-                [this, function, spec](UnrealScriptFunctionCallableContext& context, void*) {
-                    on_hook_post(function, spec, context);
-                },
-                nullptr);
-            if (ids.first >= 0 && ids.second >= 0) {
-                hooks_.push_back({.function = function, .spec = spec, .ids = ids});
+            const auto functionPointer = function->GetFuncPtr();
+            const auto backend = select_resource_hook_backend(
+                functionPointer != nullptr,
+                functionPointer == UObject::ProcessInternalInternal.get_function_address(),
+                function->HasAnyFunctionFlags(EFunctionFlags::FUNC_Native));
+            if (backend == ResourceHookBackend::nativeFunction) {
+                register_native_hook(function, spec);
+            } else if (backend == ResourceHookBackend::scriptFunction &&
+                       ensure_script_dispatcher_registered()) {
+                hooks_.push_back({.function = function, .spec = spec, .backend = backend});
             }
         }
 
@@ -256,7 +249,7 @@ public:
         restore_or_disable("卸载 mod");
         sessions_.reset();
         currentBase_.reset();
-        scheduler_.reset();
+        catalogState_.reset();
         unregister_resource_hooks();
         runtime_.begin_world_transition(runtime_.generation() + 1);
         catalog_ = {};
@@ -323,36 +316,47 @@ private:
         }
     }
 
-    auto reconcile_catalog(UObject* worldContext) -> void {
+    [[nodiscard]] auto discover_catalog_for_acquire(UObject* worldContext) -> bool {
         const auto generation = runtime_.generation();
         const auto started = std::chrono::steady_clock::now();
         if (liveUnion_.active) {
-            scheduler_.complete(CatalogReconcileOutcome::structuralFailure, generation);
-            return;
+            runtimeError_ = "活动材料联合尚未恢复，拒绝发现新目录。";
+            snapshotDirty_.mark();
+            return false;
         }
 
         auto next = detail::discover_catalog(worldContext, generation);
-        const auto outcome =
-            classify_catalog_attempt(!next.error.empty(), next.pendingContainerCount);
-        scheduler_.complete(outcome, generation);
+        const bool generationCurrent = next.generation == generation;
+        const auto outcome = classify_catalog_attempt(!next.error.empty() || !generationCurrent,
+                                                      next.pendingContainerCount);
+        catalogState_.complete(outcome, generation);
         const auto elapsed =
             std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
                 .count();
         record_catalog_attempt(elapsed, outcome);
         if (outcome == CatalogReconcileOutcome::structuralFailure) {
-            runtimeError_ = next.error;
+            runtimeError_ =
+                next.error.empty() ? "按需目录发现的世界代次已过期。" : std::move(next.error);
             snapshotDirty_.mark();
-            return;
+            return false;
         }
 
         accept_catalog(std::move(next));
+        if (!catalog_ready()) {
+            runtimeError_ = pendingContainerCount_ > 0
+                                ? "共享目录正在等待已登记普通箱子加载；本次菜单保持原版行为。"
+                                : "未发现当前公会已加载的普通据点资源容器；本次菜单保持原版行为。";
+            snapshotDirty_.mark();
+            return false;
+        }
 
         Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: resource catalog reconciled in {:.3f} ms, bases={}, "
+            STR("PalworldEditor: resource catalog discovered on demand in {:.3f} ms, bases={}, "
                 "containers={}, pending={}, partial={}, union={}\n"),
             elapsed, baseCount_, containerCount_, pendingContainerCount_,
             outcome == CatalogReconcileOutcome::partial, liveUnion_.active);
         snapshotDirty_.mark();
+        return true;
     }
 
     [[nodiscard]] auto apply_live_union(UObject* worldContext, const ResourceExposurePlan& exposure)
@@ -478,41 +482,6 @@ private:
         }
     }
 
-    [[nodiscard]] auto bootstrap_catalog_for_acquire(UObject* worldContext,
-                                                     const ResourceOperation operation) -> bool {
-        const auto generation = runtime_.generation();
-        const auto capabilityReady = runtime_.capability(operation).available();
-        if (!should_bootstrap_catalog(runtime_.enabled(), runtime_.accessible(), capabilityReady,
-                                      catalog_initialized(), runtime_.generation(), generation)) {
-            return catalog_ready();
-        }
-
-        const auto started = std::chrono::steady_clock::now();
-        scheduler_.request_immediate(generation);
-        const bool schedulerTicket = scheduler_.advance(
-            0.0F, generation, !sessions_.active(generation).has_value() && !liveUnion_.active);
-        auto next = detail::discover_catalog(worldContext, generation);
-        const bool generationCurrent = next.generation == runtime_.generation();
-        const auto outcome = classify_catalog_attempt(!next.error.empty() || !generationCurrent,
-                                                      next.pendingContainerCount);
-        if (schedulerTicket) {
-            scheduler_.complete(outcome, generation);
-        }
-        const auto elapsed =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
-                .count();
-        record_catalog_attempt(elapsed, outcome);
-        if (outcome == CatalogReconcileOutcome::structuralFailure) {
-            runtimeError_ =
-                next.error.empty() ? "目录 bootstrap 的世界代次已过期。" : std::move(next.error);
-            snapshotDirty_.mark();
-            return false;
-        }
-
-        accept_catalog(std::move(next));
-        return catalog_ready();
-    }
-
     [[nodiscard]] auto ensure_exposure_before_original(UObject* context,
                                                        const ResourceOperation operation) -> bool {
         const auto generation = runtime_.generation();
@@ -521,42 +490,47 @@ private:
         }
         remember_world_context(context);
 
-        const bool bootstrapRequired = !catalog_initialized();
+        const auto transition = sessions_.acquire(operation, generation);
+        if (transition.kind == ForegroundTransitionKind::none) {
+            return false;
+        }
+        if (!should_discover_catalog(transition.kind)) {
+            return transition.kind == ForegroundTransitionKind::refreshed && liveUnion_.active &&
+                   liveUnion_.generation == generation &&
+                   liveUnion_.exposure.operation == operation &&
+                   liveUnion_.exposure.targetBaseId.has_value();
+        }
+
+        if (liveUnion_.active && !restore_live_union("前台材料操作切换")) {
+            static_cast<void>(sessions_.release(operation, generation));
+            safetyDisabled_ = true;
+            const std::string error = "旧材料联合未能完整恢复；本世界已禁用制作和建造共享。";
+            disable_operation(ResourceOperation::crafting, error);
+            disable_operation(ResourceOperation::building, error);
+            return false;
+        }
+
         const auto catalogStarted = std::chrono::steady_clock::now();
-        if (bootstrapRequired && !bootstrap_catalog_for_acquire(context, operation)) {
-            if (catalog_initialized()) {
-                runtimeError_ =
-                    pendingContainerCount_ > 0
-                        ? "共享目录正在等待已登记普通箱子加载；本次菜单保持原版行为。"
-                        : "未发现当前公会已加载的普通据点资源容器；本次菜单保持原版行为。";
-                snapshotDirty_.mark();
-            }
+        if (!discover_catalog_for_acquire(context)) {
+            static_cast<void>(sessions_.release(operation, generation));
             return false;
         }
         const auto catalogElapsed = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - catalogStarted)
                                         .count();
         if (generation != runtime_.generation()) {
+            static_cast<void>(sessions_.release(operation, generation));
             return false;
         }
 
-        const auto exposure = make_exposure_plan(operation);
+        std::string baseError;
+        const auto currentBase = detail::resolve_inside_base_id(context, catalog_, baseError);
+        const auto exposure = make_exposure_plan(operation, currentBase);
         if (exposure.surface == ResourceConsumerSurface::none) {
-            runtimeError_ = "当前材料操作没有可用的单一消费入口。";
-            snapshotDirty_.mark();
-            return false;
-        }
-        const auto transition = sessions_.acquire(operation, generation);
-        if (transition.kind == ForegroundTransitionKind::none) {
-            return false;
-        }
-        if (transition.kind == ForegroundTransitionKind::preempted &&
-            !restore_live_union("前台材料操作抢占")) {
             static_cast<void>(sessions_.release(operation, generation));
-            safetyDisabled_ = true;
-            const std::string error = "旧材料联合未能完整恢复；本世界已禁用制作和建造共享。";
-            disable_operation(ResourceOperation::crafting, error);
-            disable_operation(ResourceOperation::building, error);
+            runtimeError_ = baseError.empty() ? "无法确认当前据点，材料共享保持原版行为。"
+                                              : std::move(baseError);
+            snapshotDirty_.mark();
             return false;
         }
         const auto unionStarted = std::chrono::steady_clock::now();
@@ -580,11 +554,44 @@ private:
         return true;
     }
 
+    [[nodiscard]] auto validate_exposure_before_original(UObject* context,
+                                                         const ResourceOperation operation)
+        -> bool {
+        const auto generation = runtime_.generation();
+        if (!runtime_.can_extend(operation, generation)) {
+            return false;
+        }
+        if (!sessions_.touch(operation, generation) || !liveUnion_.active ||
+            liveUnion_.generation != generation || liveUnion_.exposure.operation != operation) {
+            if (!ensure_exposure_before_original(context, operation)) {
+                return false;
+            }
+        }
+
+        std::string error;
+        const auto currentBase = detail::resolve_inside_base_id(context, catalog_, error);
+        if (!currentBase.has_value() || liveUnion_.exposure.targetBaseId != currentBase) {
+            if (error.empty()) {
+                error = "材料提交时所在据点与活动联合不一致。";
+            }
+        } else if (detail::validate_union(liveUnion_, error)) {
+            return true;
+        }
+
+        static_cast<void>(sessions_.release(operation, generation));
+        restore_or_disable("材料提交前验证失败");
+        if (!safetyDisabled_) {
+            disable_operation(operation, std::move(error));
+        }
+        snapshotDirty_.mark();
+        return false;
+    }
+
     auto handle_touch(const ResourceOperation operation) -> void {
         static_cast<void>(sessions_.touch(operation, runtime_.generation()));
     }
 
-    auto handle_building_setup_complete(UObject* buildModel) -> void {
+    auto handle_building_menu_open_complete(UObject* buildModel) -> void {
         const auto generation = runtime_.generation();
         if (!sessions_.building_inventory_refresh_needed(generation) || !liveUnion_.active ||
             liveUnion_.generation != generation ||
@@ -612,8 +619,8 @@ private:
             return;
         }
 
-        Output::send<LogLevel::Verbose>(STR(
-            "PalworldEditor: building inventory eligibility refreshed once after menu setup\n"));
+        Output::send<LogLevel::Verbose>(
+            STR("PalworldEditor: building inventory eligibility refreshed once after Setup\n"));
     }
 
     auto handle_crafting_widget_closed(UObject* widget) -> void {
@@ -632,7 +639,7 @@ private:
     }
 
     auto handle_structure_changed() -> void {
-        scheduler_.request_immediate(runtime_.generation());
+        static_cast<void>(catalogState_.invalidate(runtime_.generation()));
     }
 
     auto handle_base_context(UFunction* function, UnrealScriptFunctionCallableContext& context,
@@ -675,8 +682,12 @@ private:
             case HookEvent::touch:
                 handle_touch(spec.operation);
                 break;
+            case HookEvent::validate:
+                static_cast<void>(
+                    validate_exposure_before_original(context.Context, spec.operation));
+                break;
             case HookEvent::refreshBuilding:
-                handle_building_setup_complete(context.Context);
+                handle_building_menu_open_complete(context.Context);
                 break;
             case HookEvent::closeCrafting:
                 handle_crafting_widget_closed(context.Context);
@@ -691,7 +702,7 @@ private:
                 handle_base_context(function, context, false);
                 break;
         }
-        if (event != HookEvent::touch) {
+        if (event != HookEvent::touch && event != HookEvent::structureChanged) {
             snapshotDirty_.mark();
         }
     }
@@ -706,12 +717,122 @@ private:
         dispatch_hook(function, HookPhase::post, spec, context);
     }
 
+    auto register_native_hook(UFunction* function, const HookSpec& spec) -> void {
+        CallbackId preId{-1};
+        CallbackId postId{-1};
+        if (spec.preEvent != HookEvent::none) {
+            preId = function->RegisterPreHook(
+                [this, function, spec](UnrealScriptFunctionCallableContext& context, void*) {
+                    on_hook_pre(function, spec, context);
+                });
+        }
+        if (spec.postEvent != HookEvent::none) {
+            postId = function->RegisterPostHook(
+                [this, function, spec](UnrealScriptFunctionCallableContext& context, void*) {
+                    on_hook_post(function, spec, context);
+                });
+        }
+
+        const bool preReady = spec.preEvent == HookEvent::none || preId >= 0;
+        const bool postReady = spec.postEvent == HookEvent::none || postId >= 0;
+        if (preReady && postReady) {
+            hooks_.push_back({.function = function,
+                              .spec = spec,
+                              .backend = ResourceHookBackend::nativeFunction,
+                              .preId = preId,
+                              .postId = postId});
+            return;
+        }
+
+        if (preId >= 0) {
+            static_cast<void>(function->UnregisterHook(preId));
+        }
+        if (postId >= 0) {
+            static_cast<void>(function->UnregisterHook(postId));
+        }
+    }
+
+    [[nodiscard]] auto ensure_script_dispatcher_registered() -> bool {
+        if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
+            return true;
+        }
+
+        const Hook::FCallbackOptions preOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("BaseResourceScriptPre"),
+        };
+        scriptPreCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPreCallback(
+            [this](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack,
+                   void* result) { dispatch_script_hook(HookPhase::pre, context, stack, result); },
+            preOptions);
+
+        const Hook::FCallbackOptions postOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("BaseResourceScriptPost"),
+        };
+        scriptPostCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPostCallback(
+            [this](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack,
+                   void* result) { dispatch_script_hook(HookPhase::post, context, stack, result); },
+            postOptions);
+
+        if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
+            return true;
+        }
+        unregister_script_dispatcher();
+        return false;
+    }
+
+    auto dispatch_script_hook(const HookPhase phase, UObject* context, FFrame& stack, void* result)
+        -> void {
+        auto* function = stack.Node();
+        for (const auto& hook : hooks_) {
+            if (hook.backend != ResourceHookBackend::scriptFunction || hook.function != function) {
+                continue;
+            }
+
+            UnrealScriptFunctionCallableContext callableContext{context, stack, result};
+            if (phase == HookPhase::pre) {
+                on_hook_pre(function, hook.spec, callableContext);
+            } else {
+                on_hook_post(function, hook.spec, callableContext);
+            }
+            return;
+        }
+    }
+
+    static auto unregister_global_callback(Hook::GlobalCallbackId& callbackId) -> void {
+        if (callbackId == Hook::ERROR_ID) {
+            return;
+        }
+        if (!Hook::UnregisterCallback(callbackId)) {
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: failed to unregister resource callback id={}\n"), callbackId);
+        }
+        callbackId = Hook::ERROR_ID;
+    }
+
+    auto unregister_script_dispatcher() -> void {
+        unregister_global_callback(scriptPreCallbackId_);
+        unregister_global_callback(scriptPostCallbackId_);
+    }
+
     auto unregister_resource_hooks() -> void {
         for (auto hook = hooks_.rbegin(); hook != hooks_.rend(); ++hook) {
-            if (hook->function != nullptr && hook->ids.first >= 0) {
-                UObjectGlobals::UnregisterHook(hook->function, hook->ids);
+            if (hook->backend != ResourceHookBackend::nativeFunction || hook->function == nullptr) {
+                continue;
+            }
+            if (hook->preId >= 0) {
+                static_cast<void>(hook->function->UnregisterHook(hook->preId));
+            }
+            if (hook->postId >= 0) {
+                static_cast<void>(hook->function->UnregisterHook(hook->postId));
             }
         }
+        unregister_script_dispatcher();
         hooks_.clear();
         resolutions_ = all_hook_resolutions(false);
         capabilitiesGeneration_ = 0;
@@ -800,13 +921,15 @@ private:
     }
 
     RuntimeState runtime_;
-    ReconcileScheduler scheduler_;
+    OnDemandCatalogState catalogState_;
     ForegroundMaterialSession sessions_;
     CurrentBaseState currentBase_;
     detail::ResourceCatalogSnapshot catalog_;
     detail::LiveUnion liveUnion_;
     std::vector<HookResolution> resolutions_{all_hook_resolutions(false)};
     std::vector<HookBinding> hooks_;
+    Hook::GlobalCallbackId scriptPreCallbackId_{Hook::ERROR_ID};
+    Hook::GlobalCallbackId scriptPostCallbackId_{Hook::ERROR_ID};
     std::array<std::string, 3> worldDisabledErrors_;
     std::uint64_t capabilitiesGeneration_{};
     std::size_t baseCount_{};

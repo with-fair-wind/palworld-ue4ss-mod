@@ -56,13 +56,14 @@ struct LiveUnion {
 [[nodiscard]] auto discover_catalog(RC::Unreal::UObject* worldContext, std::uint64_t generation)
     -> ResourceCatalogSnapshot;
 [[nodiscard]] auto read_base_id(RC::Unreal::UObject* baseModel) -> std::optional<GuidKey>;
-[[nodiscard]] auto resolve_nearest_base_id(RC::Unreal::UObject* worldContext,
-                                           const ResourceCatalogSnapshot& catalog,
-                                           std::string& error) -> std::optional<GuidKey>;
+[[nodiscard]] auto resolve_inside_base_id(RC::Unreal::UObject* worldContext,
+                                          const ResourceCatalogSnapshot& catalog,
+                                          std::string& error) -> std::optional<GuidKey>;
 [[nodiscard]] auto apply_union(RC::Unreal::UObject* worldContext,
                                const ResourceCatalogSnapshot& catalog,
                                const ResourceExposurePlan& exposure, LiveUnion& liveUnion,
                                std::string& error) -> bool;
+[[nodiscard]] auto validate_union(const LiveUnion& liveUnion, std::string& error) -> bool;
 [[nodiscard]] auto notify_building_inventory_changed(RC::Unreal::UObject* buildModel,
                                                      RC::Unreal::UObject* worldContext,
                                                      const ResourceCatalogSnapshot& catalog,
