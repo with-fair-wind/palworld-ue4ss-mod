@@ -1,21 +1,16 @@
 #pragma once
 
-#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 
 #include <base_resource_sharing/resource_pool.hpp>
 
 namespace base_resource_sharing {
-inline constexpr float kCatalogInitialRetrySeconds = 1.0F;
-inline constexpr float kCatalogMaximumRetrySeconds = 30.0F;
-inline constexpr float kCatalogReconcileSeconds = 60.0F;
-
 /** @brief 一次资源目录发现对后续调度的分类。 */
 enum class CatalogReconcileOutcome : std::uint8_t {
-    complete,         /**< 目录完整可用，恢复低频兜底校准。 */
-    partial,          /**< 至少一个容器瞬时未加载，按指数退避重试。 */
-    structuralFailure /**< 反射结构或权限失败，只等待低频兜底或显式失效事件。 */
+    complete,         /**< 目录完整可用。 */
+    partial,          /**< 至少一个容器瞬时未加载；下次材料操作时重新发现。 */
+    structuralFailure /**< 反射结构或权限失败；下次材料操作时重新发现。 */
 };
 
 /**
@@ -51,101 +46,47 @@ struct ResourceToggleTransition {
     return {.beginAccessibleWorld = worldAccessible};
 }
 
-/** @brief 判断首次资格回调是否获准同步执行一次目录 bootstrap。 */
-[[nodiscard]] constexpr auto should_bootstrap_catalog(
-    const bool enabled, const bool worldAccessible, const bool capabilityReady,
-    const bool catalogReady, const std::uint64_t currentGeneration,
-    const std::uint64_t requestedGeneration) noexcept -> bool {
-    return enabled && worldAccessible && capabilityReady && !catalogReady &&
-           currentGeneration == requestedGeneration;
-}
-
-class ReconcileScheduler {
+/**
+ * @brief 只合并目录失效状态，不拥有计时器，也不允许空闲时执行目录发现。
+ * @details 每个新的前台材料会话都会同步发现一次目录；该状态仅保留世界隔离和诊断语义。
+ */
+class OnDemandCatalogState {
 public:
     auto begin_world(const std::uint64_t generation) noexcept -> void {
         generation_ = generation;
-        pending_ = true;
-        inFlight_ = false;
-        elapsedSinceSuccess_ = 0.0F;
-        retryRemaining_ = 0.0F;
-        nextRetrySeconds_ = kCatalogInitialRetrySeconds;
+        invalidated_ = true;
     }
 
-    auto request_immediate(const std::uint64_t generation) noexcept -> void {
+    /** @return 本次调用是否把目录从干净状态改为失效状态。 */
+    [[nodiscard]] auto invalidate(const std::uint64_t generation) noexcept -> bool {
         if (generation != generation_) {
-            return;
-        }
-        pending_ = true;
-        retryRemaining_ = 0.0F;
-        nextRetrySeconds_ = kCatalogInitialRetrySeconds;
-    }
-
-    [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t generation,
-                               const bool mayRun) noexcept -> bool {
-        if (!mayRun || generation != generation_ || inFlight_) {
             return false;
         }
-
-        const auto elapsed = std::max(deltaSeconds, 0.0F);
-        if (pending_) {
-            retryRemaining_ = std::max(retryRemaining_ - elapsed, 0.0F);
-            if (retryRemaining_ > 0.0F) {
-                return false;
-            }
-        } else {
-            elapsedSinceSuccess_ += elapsed;
-            if (elapsedSinceSuccess_ < kCatalogReconcileSeconds) {
-                return false;
-            }
-        }
-
-        pending_ = false;
-        inFlight_ = true;
-        return true;
+        const bool changed = !invalidated_;
+        invalidated_ = true;
+        return changed;
     }
 
     auto complete(const CatalogReconcileOutcome outcome, const std::uint64_t generation) noexcept
         -> void {
-        if (generation != generation_ || !inFlight_) {
+        if (generation != generation_) {
             return;
         }
-        inFlight_ = false;
-        elapsedSinceSuccess_ = 0.0F;
-        switch (outcome) {
-            case CatalogReconcileOutcome::complete:
-                pending_ = false;
-                retryRemaining_ = 0.0F;
-                nextRetrySeconds_ = kCatalogInitialRetrySeconds;
-                break;
-            case CatalogReconcileOutcome::partial:
-                pending_ = true;
-                retryRemaining_ = nextRetrySeconds_;
-                nextRetrySeconds_ = std::min(nextRetrySeconds_ * 2.0F, kCatalogMaximumRetrySeconds);
-                break;
-            case CatalogReconcileOutcome::structuralFailure:
-                pending_ = false;
-                retryRemaining_ = 0.0F;
-                nextRetrySeconds_ = kCatalogInitialRetrySeconds;
-                break;
-        }
+        invalidated_ = outcome != CatalogReconcileOutcome::complete;
+    }
+
+    [[nodiscard]] auto invalidated(const std::uint64_t generation) const noexcept -> bool {
+        return generation == generation_ && invalidated_;
     }
 
     auto reset() noexcept -> void {
         generation_ = 0;
-        pending_ = false;
-        inFlight_ = false;
-        elapsedSinceSuccess_ = 0.0F;
-        retryRemaining_ = 0.0F;
-        nextRetrySeconds_ = kCatalogInitialRetrySeconds;
+        invalidated_ = false;
     }
 
 private:
     std::uint64_t generation_{};
-    bool pending_{};
-    bool inFlight_{};
-    float elapsedSinceSuccess_{};
-    float retryRemaining_{};
-    float nextRetrySeconds_{kCatalogInitialRetrySeconds};
+    bool invalidated_{};
 };
 
 /** @brief 单一前台材料操作所有权的转换类别。 */
@@ -156,6 +97,13 @@ enum class ForegroundTransitionKind : std::uint8_t {
     preempted,
     released,
 };
+
+/** @return 是否应为该前台转换同步执行一次目录发现。 */
+[[nodiscard]] constexpr auto should_discover_catalog(
+    const ForegroundTransitionKind transition) noexcept -> bool {
+    return transition == ForegroundTransitionKind::acquired ||
+           transition == ForegroundTransitionKind::preempted;
+}
 
 /** @brief 描述一次前台操作所有权变化，不保存任何 Unreal 对象。 */
 struct ForegroundTransition {
@@ -292,6 +240,19 @@ public:
     [[nodiscard]] auto enter(const GuidKey baseId, const std::uint64_t generation) noexcept
         -> bool {
         if (generation != generation_ || !baseId.valid()) {
+            return false;
+        }
+        current_ = baseId;
+        return true;
+    }
+
+    /**
+     * @brief 用本次原生据点查询结果替换当前状态。
+     * @details 空值表示游戏当前未确认玩家位于任何可共享据点。
+     */
+    [[nodiscard]] auto observe(const std::optional<GuidKey> baseId,
+                               const std::uint64_t generation) noexcept -> bool {
+        if (generation != generation_ || (baseId.has_value() && !baseId->valid())) {
             return false;
         }
         current_ = baseId;

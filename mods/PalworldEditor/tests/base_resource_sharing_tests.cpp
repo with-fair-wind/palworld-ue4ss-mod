@@ -467,6 +467,13 @@ void test_current_base_state_never_leaks_across_worlds() {
     CHECK(!state.current(7).has_value());
     state.begin_world(8);
     CHECK(!state.current(8).has_value());
+
+    state.begin_world(9);
+    CHECK(state.observe(baseA, 9));
+    CHECK(state.current(9) == baseA);
+    CHECK(state.observe(std::nullopt, 9));
+    CHECK(!state.current(9).has_value());
+    CHECK(!state.observe(baseB, 8));
 }
 
 void test_current_base_resolution_uses_native_inside_base_route() {

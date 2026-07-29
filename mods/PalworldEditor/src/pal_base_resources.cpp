@@ -525,6 +525,7 @@ private:
 
         std::string baseError;
         const auto currentBase = detail::resolve_inside_base_id(context, catalog_, baseError);
+        static_cast<void>(currentBase_.observe(currentBase, generation));
         const auto exposure = make_exposure_plan(operation, currentBase);
         if (exposure.surface == ResourceConsumerSurface::none) {
             static_cast<void>(sessions_.release(operation, generation));
@@ -570,6 +571,7 @@ private:
 
         std::string error;
         const auto currentBase = detail::resolve_inside_base_id(context, catalog_, error);
+        static_cast<void>(currentBase_.observe(currentBase, generation));
         if (!currentBase.has_value() || liveUnion_.exposure.targetBaseId != currentBase) {
             if (error.empty()) {
                 error = "材料提交时所在据点与活动联合不一致。";
