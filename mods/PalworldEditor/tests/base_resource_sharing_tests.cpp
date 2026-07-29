@@ -193,34 +193,46 @@ void test_disabled_resource_sharing_has_no_runtime_work() {
     CHECK(dirty.consume());
 }
 
-void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
+void test_hook_manifest_uses_low_frequency_building_menu_boundaries() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
-    const auto buildList = std::ranges::find(
-        hooks, std::string_view{"/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay"},
-        &HookSpec::path);
+    const auto findHook = [&](const std::string_view path) {
+        return std::ranges::find(hooks, path, &HookSpec::path);
+    };
+
+    const auto open = findHook("/Script/Pal.PalUIBuildModel:OnOpenMenu");
+    CHECK(open != hooks.end());
+    CHECK(event_for_phase(*open, HookPhase::pre) == HookEvent::beginBuildingMenu);
+    CHECK(open->requirement == HookRequirement::required);
+
+    const auto buildList =
+        findHook("/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay");
     CHECK(buildList != hooks.end());
-    CHECK(event_for_phase(*buildList, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*buildList, HookPhase::pre) == HookEvent::touch);
     CHECK(buildList->requirement == HookRequirement::required);
 
-    const auto buildEligibility = std::ranges::find(
-        hooks, std::string_view{"/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject"},
-        &HookSpec::path);
+    const auto buildEligibility =
+        findHook("/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject");
     CHECK(buildEligibility != hooks.end());
-    CHECK(event_for_phase(*buildEligibility, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*buildEligibility, HookPhase::pre) == HookEvent::touch);
     CHECK(buildEligibility->requirement == HookRequirement::required);
 
-    const auto buildSetup = std::ranges::find(
-        hooks, std::string_view{"/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
-        &HookSpec::path);
+    const auto buildSetup =
+        findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Setup");
     CHECK(buildSetup != hooks.end());
-    CHECK(event_for_phase(*buildSetup, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*buildSetup, HookPhase::pre) == HookEvent::beginBuildingMenu);
     CHECK(event_for_phase(*buildSetup, HookPhase::post) == HookEvent::refreshBuilding);
     CHECK(buildSetup->requirement == HookRequirement::required);
 
-    const auto craftInitialize = std::ranges::find(
-        hooks, std::string_view{"/Script/Pal.PalUIConvertItemModel:Initialize"}, &HookSpec::path);
+    const auto dispose =
+        findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Dispose");
+    CHECK(dispose != hooks.end());
+    CHECK(event_for_phase(*dispose, HookPhase::post) == HookEvent::closeBuilding);
+    CHECK(dispose->requirement == HookRequirement::required);
+
+    const auto craftInitialize =
+        findHook("/Script/Pal.PalUIConvertItemModel:Initialize");
     CHECK(craftInitialize != hooks.end());
     CHECK(event_for_phase(*craftInitialize, HookPhase::pre) == HookEvent::acquire);
     CHECK(event_for_phase(*craftInitialize, HookPhase::post) == HookEvent::none);
@@ -231,7 +243,7 @@ void test_hook_manifest_contains_only_exact_foreground_hooks() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
-    CHECK(hooks.size() == 8);
+    CHECK(hooks.size() == 10);
     for (const auto& hook : hooks) {
         CHECK(hook.preEvent != HookEvent::structureChanged);
         CHECK(hook.postEvent != HookEvent::structureChanged);
@@ -244,8 +256,8 @@ void test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete
     using namespace base_resource_sharing;
 
     CHECK(!hook_registration_complete(0));
-    CHECK(!hook_registration_complete(7));
-    CHECK(hook_registration_complete(8));
+    CHECK(!hook_registration_complete(9));
+    CHECK(hook_registration_complete(10));
 }
 
 void test_hook_backend_avoids_the_generic_full_name_dispatcher() {
@@ -708,7 +720,7 @@ auto main() -> int {
     test_recorded_injection_removal_preserves_runtime_native_changes();
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
-    test_hook_manifest_acquires_before_first_build_and_craft_eligibility();
+    test_hook_manifest_uses_low_frequency_building_menu_boundaries();
     test_hook_manifest_contains_only_exact_foreground_hooks();
     test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete();
     test_hook_backend_avoids_the_generic_full_name_dispatcher();
