@@ -151,15 +151,18 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 不注册 `OnRep_ContainerInfos`、ConcreteModel 可用性、`OnRep_ModuleArray`、配方预览或建造资格等结构/高频
 Hook。目录不存在空闲定时校准或后台重试；每个新的制作或建造会话只在对应 pre-hook 中同步执行一次有界目录
 发现，同一会话不重复发现。原生 UFunction 直接注册到目标函数；Blueprint UFunction 共用一对可注销的
-`ProcessLocalScriptFunction` 回调，并只按最多八个缓存的 `UFunction*` 做指针比较，不使用
+`ProcessLocalScriptFunction` 回调，并只按最多十个缓存的 `UFunction*` 做指针比较，不使用
 `UObjectGlobals::RegisterHook` 的逐调用函数全名构造与散列表分发。
-`PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay`、`PalBuilderComponent:IsExistsMaterialForBuildObject`、
-`PalUIInGameMainMenuBuildModel:Setup` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前
-获取会话并建立联合。制作只向本地主背包 `InventoryMultiHelper` 追加其他据点的普通箱子，明确排除当前据点；
+`PalUIBuildModel:OnOpenMenu` 和 `PalUIInGameMainMenuBuildModel:Setup` 的 pre-hook 是仅有的建造菜单获取边界；
+列表生成和材料资格高频 Hook 只触碰固定大小会话状态，不发现目录、解析据点或修改数组。`Setup` post 对
+`currentBaseModule` 联合只发送一次 `OnUpdateInventory(Container)`，`Dispose` post 恢复联合并释放建造会话。
+若新菜单边界观察到不同据点，则先恢复旧联合再为新据点建立联合。`PalUIConvertItemModel:Initialize` 的
+pre-hook 建立制作联合。制作只向本地主背包 `InventoryMultiHelper` 追加其他据点的普通箱子，明确排除当前据点；
 建造只向当前据点仓储模块追加其他据点箱子，使预览和原版扣料使用同一入口。制作与建造会话互斥，新操作必须
 先恢复旧联合再抢占。`StartProduction` 与 `RequestBuild_ToServer` 只在真实提交前重读并验证当前据点、世界代次
 和联合序列，不执行目录发现或数组修改；制作界面由
-`PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式释放建造会话。
+`PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式仍作为建造会话
+恢复兜底。
 当前据点通过 `PalUtility:GetLocalPalPlayerController`、控制器 `K2_GetPawn`、Pawn 的
 `InsideBaseCampCheckComponent` 和组件 `GetInsideBaseCampModel` 获取，再调用模型 `GetId` 读取 GUID 并验证其属于同公会
 普通仓储目录。不得调用 `GetPawn`、`K2_GetActorLocation` 或 `PalBaseCampManager:GetNearestBaseCamp` 回退猜测；
@@ -167,7 +170,7 @@ Hook。目录不存在空闲定时校准或后台重试；每个新的制作或�
 写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
 停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。每次新材料会话都在
 pre-hook 同步完成一次有界目录发现和联合，不允许空闲或逐帧重试。只有终端而没有普通仓储模块的据点计入据点数
-但不贡献材料，且无法作为建造共享目标。建筑菜单 `Setup` 完成后只向该建造模型发送一次原生
+但不贡献材料，且无法作为建造共享目标。每个建筑菜单会话的 `Setup` 完成后只向该建造模型发送一次原生
 `OnUpdateInventory(Container)` 事件以重算首次资格，不重复调用 Helper 的 `OnRep_Containers`。跨帧只持有
 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
 

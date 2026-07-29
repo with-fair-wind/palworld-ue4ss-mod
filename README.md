@@ -163,18 +163,21 @@ mod 卸载，手动刷新只重试新增和先前失败的技能。中文名与 
 箱子不会使整次发现失败：已加载部分立即可用，未加载部分从本次联合排除，并在下一次材料操作开始时重新尝试。
 同一世界内重新开启只重置按需目录状态，不增加线程、全局扫描、槽位扫描或逐帧任务；关闭状态保持零资源 Hook
 和零目录发现。原生 UFunction 直接挂接；Blueprint UFunction 共用一对可注销的轻量分发回调，每次只比较最多
-八个缓存函数指针，不构造函数全名，也不进入 UE4SS 通用 UFunction Hook 的全名散列表分发。
+十个缓存函数指针，不构造函数全名，也不进入 UE4SS 通用 UFunction Hook 的全名散列表分发。
 
-原版建筑列表、材料资格、菜单 `Setup` 和制作模型 `Initialize` 都在原函数执行前建立短生命周期资源联合，使
-首次图标/配方资格计算即可读取共享材料。制作只向本地主背包 `InventoryMultiHelper` 注入其他据点的普通箱子，
+`PalUIBuildModel:OnOpenMenu` 和菜单 `Setup` 的 pre-hook 是仅有的建造菜单获取边界；原版建筑列表与材料资格
+高频 Hook 只触碰固定大小会话状态，不发现目录、解析据点或修改数组。制作模型 `Initialize` 在原函数执行前建立
+制作联合，使首次图标/配方资格计算即可读取共享材料。制作只向本地主背包 `InventoryMultiHelper` 注入其他据点的普通箱子，
 排除当前据点原版已经能够访问的箱子；建造只向当前据点仓储模块注入其他据点箱子，使预览、实际扣料和取消返还
 使用同一个原版入口。制作与建造不能并存，新的前台操作会先恢复旧联合再抢占。写入后会调用原版 `OnRep`、重读
 并验证每个注入容器恰好出现一次；数量或顺序异常会回滚并在本世界安全停用对应能力。
 `StartProduction` 和 `RequestBuild_ToServer` 在真实提交前只读验证当前据点、世界代次和联合序列。制作界面由
-`PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式时释放建造会话。
-建筑菜单 `Setup` 完成后只向当前建造模型发送一次原生 `OnUpdateInventory(Container)` 事件，使首次资格缓存
-立即重算；不会重复触发 Helper 的 `OnRep_Containers`，也不会增加逐物品或逐帧 Hook。
-跨帧只保存 GUID、对象全名和序列账本，不保存 `UObject*` 或 Unreal 数组地址。资源 Hook 清单只保留八个精确
+`PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放；建筑菜单 `Dispose` post
+恢复建造联合，退出建造模式仍作为恢复兜底。若下一次菜单边界观察到不同据点，会先恢复旧联合再为新据点重建。
+建筑菜单 `Setup` 完成后只为 `currentBaseModule` 联合向当前建造模型发送一次原生
+`OnUpdateInventory(Container)` 事件，使首次资格缓存立即重算；不会重复触发 Helper 的
+`OnRep_Containers`，也不会增加逐物品或逐帧 Hook。
+跨帧只保存 GUID、对象全名和序列账本，不保存 `UObject*` 或 Unreal 数组地址。资源 Hook 清单只保留十个精确
 前台资格、提交和生命周期入口。若首次资格回调早于目录初始化，会在该次
 pre-hook 中同步执行一次有界目录 bootstrap 并建立联合，不需要先打开另一座建筑，也不会进入逐帧重试。
 
