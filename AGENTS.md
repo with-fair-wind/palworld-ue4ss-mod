@@ -150,10 +150,11 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 `OnRep_ContainerInfos`、仓储 ConcreteModel 可用性和 `OnRep_ModuleArray` 只负责合并目录失效标记；活动材料
 会话期间目录调度器不得执行校准或拆装联合，会话结束后处理一次失效，8 秒校准仅为空闲兜底。
 `PalUIBuildModel:OnOpenMenu` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前获取
-会话并建立联合。制作只向本地主背包 `InventoryMultiHelper` 追加去重后的同公会普通箱子；建造只扩展当前据点
-仓储模块。制作与建造会话互斥，新操作必须先恢复旧联合再抢占。高频列表、配方和资格 Hook 只刷新固定大小状态，
-不做 UObject 查找、反射、目录发现、数组修改或日志。`StartProduction` 只续租，制作会话由 1.5 秒空闲租约释放；
-退出建造模式释放建造会话。写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
+会话并建立联合。制作和建造都只向本地主背包 `InventoryMultiHelper` 追加去重后的同公会普通箱子，不同时扩展
+据点模块。制作与建造会话互斥，新操作必须先恢复旧联合再抢占。高频列表、配方和资格 Hook 只刷新固定大小状态，
+不做 UObject 查找、反射、目录发现、数组修改或日志。`StartProduction` 只确认会话仍活动；制作界面由
+`PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式释放建造会话。
+写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
 停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。首次资格回调早于目录
 初始化时在该次 pre-hook 同步完成一次有界目录发现和联合，不允许逐帧重试。只有终端而没有普通仓储模块的据点
 计入据点数但不贡献材料。跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。

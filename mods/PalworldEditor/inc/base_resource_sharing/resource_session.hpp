@@ -8,7 +8,6 @@
 namespace base_resource_sharing {
 inline constexpr float kCatalogRetrySeconds = 1.0F;
 inline constexpr float kCatalogReconcileSeconds = 8.0F;
-inline constexpr float kCraftingLeaseIdleSeconds = 1.5F;
 
 struct ResourceToggleTransition {
     bool disableRuntime{};
@@ -127,7 +126,7 @@ struct ForegroundTransition {
 
 /**
  * @brief 串行化制作与建造材料会话，确保同一时刻只有一个消费面拥有联合。
- * @details 制作使用 1.5 秒空闲租约；建造只由显式离开事件释放。
+ * @details 制作与建造都由显式界面/模式关闭事件释放。
  */
 class ForegroundMaterialSession {
 public:
@@ -135,7 +134,6 @@ public:
     auto begin_world(const std::uint64_t generation) noexcept -> void {
         generation_ = generation;
         active_.reset();
-        idleSeconds_ = 0.0F;
     }
 
     /** @brief 获取前台所有权；不同操作会确定性抢占旧操作。 */
@@ -146,14 +144,12 @@ public:
         }
         if (!active_.has_value()) {
             active_ = operation;
-            idleSeconds_ = 0.0F;
             return {
                 .kind = ForegroundTransitionKind::acquired,
                 .current = operation,
             };
         }
         if (*active_ == operation) {
-            idleSeconds_ = 0.0F;
             return {
                 .kind = ForegroundTransitionKind::refreshed,
                 .previous = operation,
@@ -163,7 +159,6 @@ public:
 
         const auto previous = active_;
         active_ = operation;
-        idleSeconds_ = 0.0F;
         return {
             .kind = ForegroundTransitionKind::preempted,
             .previous = previous,
@@ -171,13 +166,12 @@ public:
         };
     }
 
-    /** @brief 仅刷新当前同类前台操作的空闲租约。 */
+    /** @brief 验证当前同类前台操作仍处于活动状态。 */
     [[nodiscard]] auto touch(const ResourceOperation operation,
                              const std::uint64_t generation) noexcept -> bool {
         if (generation != generation_ || active_ != operation) {
             return false;
         }
-        idleSeconds_ = 0.0F;
         return true;
     }
 
@@ -189,24 +183,18 @@ public:
         }
         const auto previous = active_;
         active_.reset();
-        idleSeconds_ = 0.0F;
         return {
             .kind = ForegroundTransitionKind::released,
             .previous = previous,
         };
     }
 
-    /** @brief 推进制作空闲租约；建造不会因计时自动释放。 */
+    /** @brief 保留统一的逐帧接口；前台会话只由显式关闭事件释放。 */
     [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t generation) noexcept
         -> ForegroundTransition {
-        if (generation != generation_ || active_ != ResourceOperation::crafting) {
-            return {};
-        }
-        idleSeconds_ += std::max(deltaSeconds, 0.0F);
-        if (idleSeconds_ < kCraftingLeaseIdleSeconds) {
-            return {};
-        }
-        return release(ResourceOperation::crafting, generation);
+        static_cast<void>(deltaSeconds);
+        static_cast<void>(generation);
+        return {};
     }
 
     /** @return 匹配世界代次的当前前台操作。 */
@@ -219,13 +207,11 @@ public:
     auto reset() noexcept -> void {
         generation_ = 0;
         active_.reset();
-        idleSeconds_ = 0.0F;
     }
 
 private:
     std::uint64_t generation_{};
     std::optional<ResourceOperation> active_;
-    float idleSeconds_{};
 };
 
 /** @brief 只以 GUID 和世界代次跟踪本地玩家当前所在据点。 */

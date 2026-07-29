@@ -14,6 +14,8 @@ enum class HookEvent : std::uint8_t {
     structureChanged,
     acquire,
     touch,
+    refreshBuilding,
+    closeCrafting,
     updateBuildingMode,
     enterBase,
     exitBase,
@@ -48,13 +50,13 @@ inline constexpr std::array kPalworld101HookManifest{
     HookSpec{ResourceOperation::repair, HookEvent::none, HookEvent::structureChanged,
              HookRequirement::optional, "/Script/Pal.PalBaseCampModel:OnRep_ModuleArray"},
     HookSpec{ResourceOperation::building, HookEvent::enterBase, HookEvent::none,
-             HookRequirement::required, "/Script/Pal.PalBuilderComponent:OnEnterBaseCamp"},
+             HookRequirement::optional, "/Script/Pal.PalBuilderComponent:OnEnterBaseCamp"},
     HookSpec{ResourceOperation::building, HookEvent::exitBase, HookEvent::none,
-             HookRequirement::required, "/Script/Pal.PalBuilderComponent:OnExitBaseCamp"},
+             HookRequirement::optional, "/Script/Pal.PalBuilderComponent:OnExitBaseCamp"},
     HookSpec{ResourceOperation::building, HookEvent::acquire, HookEvent::none,
              HookRequirement::required, "/Script/Pal.PalUIBuildModel:OnOpenMenu"},
-    HookSpec{ResourceOperation::building, HookEvent::acquire, HookEvent::none,
-             HookRequirement::optional, "/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
+    HookSpec{ResourceOperation::building, HookEvent::acquire, HookEvent::refreshBuilding,
+             HookRequirement::required, "/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
     HookSpec{ResourceOperation::building, HookEvent::touch, HookEvent::none,
              HookRequirement::optional,
              "/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay"},
@@ -82,7 +84,16 @@ inline constexpr std::array kPalworld101HookManifest{
              HookRequirement::required, "/Script/Pal.PalUIConvertItemModel:CanStartProduction"},
     HookSpec{ResourceOperation::crafting, HookEvent::touch, HookEvent::touch,
              HookRequirement::required, "/Script/Pal.PalUIConvertItemModel:StartProduction"},
+    HookSpec{ResourceOperation::crafting, HookEvent::closeCrafting, HookEvent::none,
+             HookRequirement::required, "/Script/Pal.PalUserWidget:OnClosed"},
 };
+
+/** @brief 精确识别制作界面的 HUD dispatch parameter 对象全名。 */
+[[nodiscard]] constexpr auto is_convert_item_dispatch_parameter(
+    const std::wstring_view fullName) noexcept -> bool {
+    constexpr std::wstring_view prefix{L"PalHUDDispatchParameter_ConvertItem "};
+    return fullName.starts_with(prefix);
+}
 
 [[nodiscard]] constexpr auto palworld_1_0_1_hook_manifest() noexcept -> std::span<const HookSpec> {
     return kPalworld101HookManifest;

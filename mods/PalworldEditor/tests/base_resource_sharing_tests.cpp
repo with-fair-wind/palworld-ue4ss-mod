@@ -201,6 +201,15 @@ void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
     CHECK(event_for_phase(*buildOpen, HookPhase::post) == HookEvent::none);
     CHECK(buildOpen->requirement == HookRequirement::required);
 
+    const auto buildSetup =
+        std::ranges::find(hooks,
+                          std::string_view{"/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
+                          &HookSpec::path);
+    CHECK(buildSetup != hooks.end());
+    CHECK(event_for_phase(*buildSetup, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*buildSetup, HookPhase::post) == HookEvent::refreshBuilding);
+    CHECK(buildSetup->requirement == HookRequirement::required);
+
     const auto craftInitialize = std::ranges::find(
         hooks, std::string_view{"/Script/Pal.PalUIConvertItemModel:Initialize"}, &HookSpec::path);
     CHECK(craftInitialize != hooks.end());
@@ -228,6 +237,27 @@ void test_hook_manifest_keeps_crafting_alive_through_submission() {
             CHECK(event_for_phase(hook, HookPhase::pre) == HookEvent::none);
         }
     }
+}
+
+void test_hook_manifest_releases_crafting_when_convert_widget_closes() {
+    using namespace base_resource_sharing;
+
+    const auto hooks = palworld_1_0_1_hook_manifest();
+    const auto closed = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalUserWidget:OnClosed"}, &HookSpec::path);
+    CHECK(closed != hooks.end());
+    if (closed != hooks.end()) {
+        CHECK(event_for_phase(*closed, HookPhase::pre) == HookEvent::closeCrafting);
+        CHECK(event_for_phase(*closed, HookPhase::post) == HookEvent::none);
+        CHECK(closed->requirement == HookRequirement::required);
+    }
+
+    CHECK(is_convert_item_dispatch_parameter(
+        L"PalHUDDispatchParameter_ConvertItem /Engine/Transient.Param_0"));
+    CHECK(!is_convert_item_dispatch_parameter(
+        L"PalHUDDispatchParameter_ItemChest /Engine/Transient.Param_0"));
+    CHECK(!is_convert_item_dispatch_parameter(
+        L"PalHUDDispatchParameter_ItemChest /Game/PalHUDDispatchParameter_ConvertItem"));
 }
 
 void test_missing_early_build_acquire_disables_only_building() {
@@ -258,13 +288,15 @@ void test_hook_manifest_tracks_current_base_context() {
     CHECK(exit != hooks.end());
     if (enter != hooks.end()) {
         CHECK(event_for_phase(*enter, HookPhase::pre) == HookEvent::enterBase);
+        CHECK(enter->requirement == HookRequirement::optional);
     }
     if (exit != hooks.end()) {
         CHECK(event_for_phase(*exit, HookPhase::pre) == HookEvent::exitBase);
+        CHECK(exit->requirement == HookRequirement::optional);
     }
 }
 
-void test_missing_current_base_hook_disables_only_building() {
+void test_missing_current_base_hook_does_not_disable_helper_based_building() {
     using namespace base_resource_sharing;
 
     auto resolved = all_hook_resolutions(true);
@@ -274,7 +306,7 @@ void test_missing_current_base_hook_disables_only_building() {
         }
     }
     const auto capabilities = evaluate_capabilities(resolved);
-    CHECK(!capabilities[operation_index(ResourceOperation::building)].available());
+    CHECK(capabilities[operation_index(ResourceOperation::building)].available());
     CHECK(capabilities[operation_index(ResourceOperation::crafting)].available());
 }
 
@@ -372,18 +404,17 @@ void test_foreground_session_ignores_stale_touch_and_release() {
     CHECK(!sessions.active(8).has_value());
 }
 
-void test_foreground_crafting_session_expires_only_after_idle_lease() {
+void test_foreground_crafting_session_remains_active_until_explicit_release() {
     using namespace base_resource_sharing;
 
     ForegroundMaterialSession sessions;
     sessions.begin_world(7);
     static_cast<void>(sessions.acquire(ResourceOperation::crafting, 7));
-    CHECK(sessions.advance(1.49F, 7).kind == ForegroundTransitionKind::none);
-    CHECK(sessions.touch(ResourceOperation::crafting, 7));
-    CHECK(sessions.advance(1.49F, 7).kind == ForegroundTransitionKind::none);
-    const auto expired = sessions.advance(0.01F, 7);
-    CHECK(expired.kind == ForegroundTransitionKind::released);
-    CHECK(expired.previous == ResourceOperation::crafting);
+    CHECK(sessions.advance(60.0F, 7).kind == ForegroundTransitionKind::none);
+    CHECK(sessions.active(7) == ResourceOperation::crafting);
+    const auto closed = sessions.release(ResourceOperation::crafting, 7);
+    CHECK(closed.kind == ForegroundTransitionKind::released);
+    CHECK(closed.previous == ResourceOperation::crafting);
     CHECK(!sessions.active(7).has_value());
 }
 
@@ -407,16 +438,13 @@ void test_current_base_state_never_leaks_across_worlds() {
 void test_resource_exposure_uses_exactly_one_consumer_surface() {
     using namespace base_resource_sharing;
 
-    const GuidKey base{{10, 0, 0, 0}};
     const auto crafting = make_exposure_plan(ResourceOperation::crafting);
     CHECK(crafting.surface == ResourceConsumerSurface::playerHelper);
     CHECK(!crafting.targetBaseId.has_value());
 
-    const auto building = make_exposure_plan(ResourceOperation::building, base);
-    CHECK(building.surface == ResourceConsumerSurface::currentBaseModule);
-    CHECK(building.targetBaseId == base);
-
-    CHECK(make_exposure_plan(ResourceOperation::building).surface == ResourceConsumerSurface::none);
+    const auto building = make_exposure_plan(ResourceOperation::building);
+    CHECK(building.surface == ResourceConsumerSurface::playerHelper);
+    CHECK(!building.targetBaseId.has_value());
     CHECK(make_exposure_plan(ResourceOperation::repair).surface == ResourceConsumerSurface::none);
 }
 
@@ -590,15 +618,16 @@ auto main() -> int {
     test_disabled_resource_sharing_has_no_runtime_work();
     test_hook_manifest_acquires_before_first_build_and_craft_eligibility();
     test_hook_manifest_keeps_crafting_alive_through_submission();
+    test_hook_manifest_releases_crafting_when_convert_widget_closes();
     test_missing_early_build_acquire_disables_only_building();
     test_hook_manifest_tracks_current_base_context();
-    test_missing_current_base_hook_disables_only_building();
+    test_missing_current_base_hook_does_not_disable_helper_based_building();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
     test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
     test_catalog_bootstrap_rejects_stale_or_unavailable_acquires();
     test_foreground_session_preempts_instead_of_combining_operations();
     test_foreground_session_ignores_stale_touch_and_release();
-    test_foreground_crafting_session_expires_only_after_idle_lease();
+    test_foreground_crafting_session_remains_active_until_explicit_release();
     test_current_base_state_never_leaks_across_worlds();
     test_resource_exposure_uses_exactly_one_consumer_surface();
     test_applied_sequence_rejects_duplicate_remote_container();

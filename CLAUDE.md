@@ -70,9 +70,10 @@ ImGui 回调只处理标准库值、原子请求和互斥锁快照。UObject 反
 `ItemSlotArray` / `StackCount`。
 
 结构事件只合并目录失效标记；活动材料会话期间不校准或重建联合，8 秒低频校准仅在空闲时兜底。
-建筑菜单 `OnOpenMenu` 与制作模型 `Initialize` 的 pre-hook 在首次资格计算前建立联合。制作只扩展本地
-`InventoryMultiHelper`，建造只扩展当前据点仓储模块；两个前台操作互斥并以恢复旧联合后抢占的方式切换。
-`StartProduction` 只续租，制作会话在 1.5 秒空闲后释放；首次资格回调早于目录初始化时在该次 pre-hook
+建筑菜单 `OnOpenMenu` 与制作模型 `Initialize` 的 pre-hook 在首次资格计算前建立联合。制作和建造都只扩展
+本地 `InventoryMultiHelper`；两个前台操作互斥并以恢复旧联合后抢占的方式切换。`StartProduction` 只确认
+会话仍活动，制作界面由 `PalUserWidget:OnClosed` 精确识别 dispatch parameter 后释放；首次资格回调早于目录
+初始化时在该次 pre-hook
 同步执行一次有界 bootstrap，不逐帧重试。联合经 `OnRep` 后必须重读并验证每个注入容器恰好出现一次，异常
 回滚并按世界停用对应能力；退出建造模式后按注入次数恢复。只有终端而没有普通仓储模块的据点计入据点数量，
 但不贡献材料。

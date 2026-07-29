@@ -70,6 +70,16 @@ namespace {
     return property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(locals));
 }
 
+[[nodiscard]] auto read_object_property(UObject* object, const CharType* propertyName) -> UObject* {
+    auto* property =
+        object == nullptr
+            ? nullptr
+            : CastField<FObjectPropertyBase>(object->GetPropertyByNameInChain(propertyName));
+    return property == nullptr
+               ? nullptr
+               : property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
+}
+
 [[nodiscard]] constexpr auto operation_log_name(const ResourceOperation operation) noexcept
     -> const CharType* {
     switch (operation) {
@@ -498,17 +508,7 @@ private:
             return false;
         }
 
-        if (operation == ResourceOperation::building &&
-            !currentBase_.current(generation).has_value()) {
-            std::string error;
-            const auto nearest = detail::resolve_nearest_base_id(context, catalog_, error);
-            if (!nearest.has_value() || !currentBase_.enter(*nearest, generation)) {
-                disable_operation(ResourceOperation::building,
-                                  error.empty() ? "无法确认当前建造所在据点。" : std::move(error));
-                return false;
-            }
-        }
-        const auto exposure = make_exposure_plan(operation, currentBase_.current(generation));
+        const auto exposure = make_exposure_plan(operation);
         if (exposure.surface == ResourceConsumerSurface::none) {
             runtimeError_ = "当前材料操作没有可用的单一消费入口。";
             snapshotDirty_.mark();
@@ -550,6 +550,52 @@ private:
 
     auto handle_touch(const ResourceOperation operation) -> void {
         static_cast<void>(sessions_.touch(operation, runtime_.generation()));
+    }
+
+    auto handle_building_setup_complete() -> void {
+        const auto generation = runtime_.generation();
+        if (sessions_.active(generation) != ResourceOperation::building || !liveUnion_.active ||
+            liveUnion_.generation != generation ||
+            liveUnion_.exposure.operation != ResourceOperation::building ||
+            liveUnion_.exposure.surface != ResourceConsumerSurface::playerHelper ||
+            !liveUnion_.entry.has_value() || !liveUnion_.entry->helperArray) {
+            return;
+        }
+
+        auto* helper = find_object_by_full_name(liveUnion_.entry->objectFullName);
+        auto* onRepContainers =
+            helper == nullptr ? nullptr : helper->GetFunctionByNameInChain(STR("OnRep_Containers"));
+        if (onRepContainers == nullptr) {
+            static_cast<void>(sessions_.release(ResourceOperation::building, generation));
+            restore_or_disable("建筑材料观察者刷新失败");
+            if (!safetyDisabled_) {
+                disable_operation(ResourceOperation::building,
+                                  "建筑菜单 Setup 后无法刷新材料观察者。");
+            }
+            return;
+        }
+
+        {
+            MutationScope mutation{selfMutation_};
+            helper->ProcessEvent(onRepContainers, nullptr);
+        }
+        Output::send<LogLevel::Verbose>(
+            STR("PalworldEditor: building material observers refreshed after menu setup\n"));
+    }
+
+    auto handle_crafting_widget_closed(UObject* widget) -> void {
+        const auto generation = runtime_.generation();
+        if (sessions_.active(generation) != ResourceOperation::crafting) {
+            return;
+        }
+        auto* parameter = read_object_property(widget, STR("Param"));
+        if (!is_convert_item_dispatch_parameter(object_name(parameter))) {
+            return;
+        }
+        const auto transition = sessions_.release(ResourceOperation::crafting, generation);
+        if (transition.kind == ForegroundTransitionKind::released) {
+            restore_or_disable("制作界面关闭");
+        }
     }
 
     auto handle_structure_changed() -> void {
@@ -595,6 +641,12 @@ private:
                 break;
             case HookEvent::touch:
                 handle_touch(spec.operation);
+                break;
+            case HookEvent::refreshBuilding:
+                handle_building_setup_complete();
+                break;
+            case HookEvent::closeCrafting:
+                handle_crafting_widget_closed(context.Context);
                 break;
             case HookEvent::updateBuildingMode:
                 update_building_mode(context.Context);

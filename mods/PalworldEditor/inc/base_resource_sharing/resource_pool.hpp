@@ -105,25 +105,16 @@ struct ResourceExposurePlan {
     auto operator<=>(const ResourceExposurePlan&) const = default;
 };
 
-/** @brief 为制作或建造选择唯一消费面；缺少有效当前据点时建造拒绝扩展。 */
-[[nodiscard]] inline auto make_exposure_plan(
-    const ResourceOperation operation,
-    const std::optional<GuidKey> currentBaseId = std::nullopt) noexcept -> ResourceExposurePlan {
+/** @brief 为制作或建造选择玩家原生材料 Helper 这一唯一消费面。 */
+[[nodiscard]] inline auto make_exposure_plan(const ResourceOperation operation) noexcept
+    -> ResourceExposurePlan {
     switch (operation) {
         case ResourceOperation::crafting:
+        case ResourceOperation::building:
             return {
                 .operation = operation,
                 .surface = ResourceConsumerSurface::playerHelper,
             };
-        case ResourceOperation::building:
-            if (currentBaseId.has_value() && currentBaseId->valid()) {
-                return {
-                    .operation = operation,
-                    .surface = ResourceConsumerSurface::currentBaseModule,
-                    .targetBaseId = currentBaseId,
-                };
-            }
-            return {.operation = operation};
         case ResourceOperation::repair:
             return {.operation = operation};
     }
