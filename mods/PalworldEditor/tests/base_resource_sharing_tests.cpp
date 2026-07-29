@@ -535,6 +535,39 @@ void test_building_inventory_refresh_targets_only_the_build_model() {
           BuildingInventoryRefreshTarget::none);
 }
 
+void test_building_menu_boundary_reuses_only_the_same_live_base() {
+    using namespace base_resource_sharing;
+
+    const GuidKey baseA{{7, 0, 0, 0}};
+    const GuidKey baseB{{8, 0, 0, 0}};
+    const auto buildingA = make_exposure_plan(ResourceOperation::building, baseA);
+
+    CHECK(decide_building_menu_boundary(false, 7, 7, buildingA, baseA) ==
+          BuildingMenuBoundaryAction::acquire);
+    CHECK(decide_building_menu_boundary(true, 7, 7, buildingA, baseA) ==
+          BuildingMenuBoundaryAction::reuse);
+    CHECK(decide_building_menu_boundary(true, 7, 7, buildingA, baseB) ==
+          BuildingMenuBoundaryAction::replace);
+    CHECK(decide_building_menu_boundary(true, 6, 7, buildingA, baseA) ==
+          BuildingMenuBoundaryAction::replace);
+    CHECK(decide_building_menu_boundary(true, 7, 7, buildingA, std::nullopt) ==
+          BuildingMenuBoundaryAction::replace);
+}
+
+void test_building_inventory_refresh_accepts_only_current_base_module_ledger() {
+    using namespace base_resource_sharing;
+
+    const GuidKey base{{7, 0, 0, 0}};
+    const auto building = make_exposure_plan(ResourceOperation::building, base);
+    const auto crafting = make_exposure_plan(ResourceOperation::crafting, base);
+
+    CHECK(should_refresh_building_inventory(true, true, 7, 7, building, true, false));
+    CHECK(!should_refresh_building_inventory(false, true, 7, 7, building, true, false));
+    CHECK(!should_refresh_building_inventory(true, true, 6, 7, building, true, false));
+    CHECK(!should_refresh_building_inventory(true, true, 7, 7, crafting, true, true));
+    CHECK(!should_refresh_building_inventory(true, true, 7, 7, building, true, true));
+}
+
 void test_current_base_containers_are_not_injected_into_another_consumer_surface() {
     using namespace base_resource_sharing;
 
@@ -740,6 +773,8 @@ auto main() -> int {
     test_current_base_resolution_uses_native_inside_base_route();
     test_resource_exposure_uses_exactly_one_consumer_surface();
     test_building_inventory_refresh_targets_only_the_build_model();
+    test_building_menu_boundary_reuses_only_the_same_live_base();
+    test_building_inventory_refresh_accepts_only_current_base_module_ledger();
     test_current_base_containers_are_not_injected_into_another_consumer_surface();
     test_applied_sequence_rejects_duplicate_remote_container();
     test_applied_sequence_rejects_injection_of_existing_id();

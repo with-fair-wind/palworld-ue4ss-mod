@@ -169,6 +169,35 @@ enum class BuildingInventoryRefreshTarget : std::uint8_t {
     return BuildingInventoryRefreshTarget::none;
 }
 
+enum class BuildingMenuBoundaryAction : std::uint8_t { acquire, reuse, replace };
+
+/** @return 新建筑菜单边界应获取、复用还是替换当前联合。 */
+[[nodiscard]] constexpr auto decide_building_menu_boundary(
+    const bool unionActive, const std::uint64_t unionGeneration,
+    const std::uint64_t currentGeneration, const ResourceExposurePlan& exposure,
+    const std::optional<GuidKey> observedBase) noexcept -> BuildingMenuBoundaryAction {
+    if (!unionActive) {
+        return BuildingMenuBoundaryAction::acquire;
+    }
+    const bool sameBase =
+        unionGeneration == currentGeneration && observedBase.has_value() &&
+        exposure.operation == ResourceOperation::building &&
+        exposure.surface == ResourceConsumerSurface::currentBaseModule &&
+        exposure.targetBaseId == observedBase;
+    return sameBase ? BuildingMenuBoundaryAction::reuse : BuildingMenuBoundaryAction::replace;
+}
+
+/** @return 当前 Setup post 是否应向 BuildModel 发送一次原生库存更新。 */
+[[nodiscard]] constexpr auto should_refresh_building_inventory(
+    const bool refreshNeeded, const bool unionActive, const std::uint64_t unionGeneration,
+    const std::uint64_t currentGeneration, const ResourceExposurePlan& exposure,
+    const bool hasLedgerEntry, const bool helperArray) noexcept -> bool {
+    return refreshNeeded && unionGeneration == currentGeneration && hasLedgerEntry &&
+           !helperArray &&
+           select_building_inventory_refresh_target(unionActive, exposure) ==
+               BuildingInventoryRefreshTarget::buildModel;
+}
+
 [[nodiscard]] constexpr auto resource_hooks_required(const bool enabled,
                                                      const bool worldAccessible) noexcept -> bool {
     return enabled && worldAccessible;
