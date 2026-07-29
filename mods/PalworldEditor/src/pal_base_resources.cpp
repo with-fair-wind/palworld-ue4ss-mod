@@ -555,6 +555,39 @@ private:
         return true;
     }
 
+    [[nodiscard]] auto ensure_building_menu_before_original(UObject* context) -> bool {
+        const auto generation = runtime_.generation();
+        if (!runtime_.can_extend(ResourceOperation::building, generation)) {
+            return false;
+        }
+        remember_world_context(context);
+
+        const auto active = sessions_.active(generation);
+        if (active == ResourceOperation::building && !liveUnion_.active) {
+            static_cast<void>(sessions_.release(ResourceOperation::building, generation));
+        }
+        if (!liveUnion_.active || active != ResourceOperation::building) {
+            return ensure_exposure_before_original(context, ResourceOperation::building);
+        }
+
+        std::string error;
+        const auto observedBase = detail::resolve_inside_base_id(context, catalog_, error);
+        static_cast<void>(currentBase_.observe(observedBase, generation));
+        const auto action =
+            decide_building_menu_boundary(liveUnion_.active, liveUnion_.generation, generation,
+                                          liveUnion_.exposure, observedBase);
+        if (action == BuildingMenuBoundaryAction::reuse) {
+            return true;
+        }
+
+        static_cast<void>(sessions_.release(ResourceOperation::building, generation));
+        restore_or_disable("建筑菜单据点边界变化");
+        if (safetyDisabled_) {
+            return false;
+        }
+        return ensure_exposure_before_original(context, ResourceOperation::building);
+    }
+
     [[nodiscard]] auto validate_exposure_before_original(UObject* context,
                                                          const ResourceOperation operation)
         -> bool {
@@ -595,11 +628,11 @@ private:
 
     auto handle_building_menu_open_complete(UObject* buildModel) -> void {
         const auto generation = runtime_.generation();
-        if (!sessions_.building_inventory_refresh_needed(generation) || !liveUnion_.active ||
-            liveUnion_.generation != generation ||
-            liveUnion_.exposure.operation != ResourceOperation::building ||
-            liveUnion_.exposure.surface != ResourceConsumerSurface::playerHelper ||
-            !liveUnion_.entry.has_value() || !liveUnion_.entry->helperArray) {
+        const bool hasEntry = liveUnion_.entry.has_value();
+        const bool helperArray = hasEntry && liveUnion_.entry->helperArray;
+        if (!should_refresh_building_inventory(
+                sessions_.building_inventory_refresh_needed(generation), liveUnion_.active,
+                liveUnion_.generation, generation, liveUnion_.exposure, hasEntry, helperArray)) {
             return;
         }
 
@@ -623,6 +656,14 @@ private:
 
         Output::send<LogLevel::Verbose>(
             STR("PalworldEditor: building inventory eligibility refreshed once after Setup\n"));
+    }
+
+    auto handle_building_menu_closed() -> void {
+        const auto generation = runtime_.generation();
+        const auto transition = sessions_.release(ResourceOperation::building, generation);
+        if (transition.kind == ForegroundTransitionKind::released) {
+            restore_or_disable("关闭建筑菜单");
+        }
     }
 
     auto handle_crafting_widget_closed(UObject* widget) -> void {
@@ -681,6 +722,9 @@ private:
             case HookEvent::acquire:
                 static_cast<void>(ensure_exposure_before_original(context.Context, spec.operation));
                 break;
+            case HookEvent::beginBuildingMenu:
+                static_cast<void>(ensure_building_menu_before_original(context.Context));
+                break;
             case HookEvent::touch:
                 handle_touch(spec.operation);
                 break;
@@ -690,6 +734,9 @@ private:
                 break;
             case HookEvent::refreshBuilding:
                 handle_building_menu_open_complete(context.Context);
+                break;
+            case HookEvent::closeBuilding:
+                handle_building_menu_closed();
                 break;
             case HookEvent::closeCrafting:
                 handle_crafting_widget_closed(context.Context);
