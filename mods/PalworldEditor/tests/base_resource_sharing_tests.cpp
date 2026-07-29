@@ -218,21 +218,18 @@ void test_hook_manifest_uses_low_frequency_building_menu_boundaries() {
     CHECK(event_for_phase(*buildEligibility, HookPhase::pre) == HookEvent::touch);
     CHECK(buildEligibility->requirement == HookRequirement::required);
 
-    const auto buildSetup =
-        findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Setup");
+    const auto buildSetup = findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Setup");
     CHECK(buildSetup != hooks.end());
     CHECK(event_for_phase(*buildSetup, HookPhase::pre) == HookEvent::beginBuildingMenu);
     CHECK(event_for_phase(*buildSetup, HookPhase::post) == HookEvent::refreshBuilding);
     CHECK(buildSetup->requirement == HookRequirement::required);
 
-    const auto dispose =
-        findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Dispose");
+    const auto dispose = findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Dispose");
     CHECK(dispose != hooks.end());
     CHECK(event_for_phase(*dispose, HookPhase::post) == HookEvent::closeBuilding);
     CHECK(dispose->requirement == HookRequirement::required);
 
-    const auto craftInitialize =
-        findHook("/Script/Pal.PalUIConvertItemModel:Initialize");
+    const auto craftInitialize = findHook("/Script/Pal.PalUIConvertItemModel:Initialize");
     CHECK(craftInitialize != hooks.end());
     CHECK(event_for_phase(*craftInitialize, HookPhase::pre) == HookEvent::acquire);
     CHECK(event_for_phase(*craftInitialize, HookPhase::post) == HookEvent::none);

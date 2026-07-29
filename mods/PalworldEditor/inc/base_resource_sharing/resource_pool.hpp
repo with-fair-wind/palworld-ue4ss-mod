@@ -179,11 +179,10 @@ enum class BuildingMenuBoundaryAction : std::uint8_t { acquire, reuse, replace }
     if (!unionActive) {
         return BuildingMenuBoundaryAction::acquire;
     }
-    const bool sameBase =
-        unionGeneration == currentGeneration && observedBase.has_value() &&
-        exposure.operation == ResourceOperation::building &&
-        exposure.surface == ResourceConsumerSurface::currentBaseModule &&
-        exposure.targetBaseId == observedBase;
+    const bool sameBase = unionGeneration == currentGeneration && observedBase.has_value() &&
+                          exposure.operation == ResourceOperation::building &&
+                          exposure.surface == ResourceConsumerSurface::currentBaseModule &&
+                          exposure.targetBaseId == observedBase;
     return sameBase ? BuildingMenuBoundaryAction::reuse : BuildingMenuBoundaryAction::replace;
 }
 
