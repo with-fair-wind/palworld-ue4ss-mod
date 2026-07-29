@@ -2,6 +2,7 @@
 #include <iostream>
 #include <vector>
 
+#include <base_resource_sharing/current_base_resolution.hpp>
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 #include <base_resource_sharing/resource_session.hpp>
@@ -196,12 +197,19 @@ void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
-    const auto buildOpen = std::ranges::find(
-        hooks, std::string_view{"/Script/Pal.PalUIBuildModel:OnOpenMenu"}, &HookSpec::path);
-    CHECK(buildOpen != hooks.end());
-    CHECK(event_for_phase(*buildOpen, HookPhase::pre) == HookEvent::acquire);
-    CHECK(event_for_phase(*buildOpen, HookPhase::post) == HookEvent::none);
-    CHECK(buildOpen->requirement == HookRequirement::required);
+    const auto buildList = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay"},
+        &HookSpec::path);
+    CHECK(buildList != hooks.end());
+    CHECK(event_for_phase(*buildList, HookPhase::pre) == HookEvent::acquire);
+    CHECK(buildList->requirement == HookRequirement::required);
+
+    const auto buildEligibility = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject"},
+        &HookSpec::path);
+    CHECK(buildEligibility != hooks.end());
+    CHECK(event_for_phase(*buildEligibility, HookPhase::pre) == HookEvent::acquire);
+    CHECK(buildEligibility->requirement == HookRequirement::required);
 
     const auto buildSetup = std::ranges::find(
         hooks, std::string_view{"/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
@@ -219,7 +227,38 @@ void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
     CHECK(craftInitialize->requirement == HookRequirement::required);
 }
 
-void test_hook_manifest_keeps_crafting_alive_through_submission() {
+void test_hook_manifest_contains_only_exact_foreground_hooks() {
+    using namespace base_resource_sharing;
+
+    const auto hooks = palworld_1_0_1_hook_manifest();
+    CHECK(hooks.size() == 8);
+    for (const auto& hook : hooks) {
+        CHECK(hook.preEvent != HookEvent::structureChanged);
+        CHECK(hook.postEvent != HookEvent::structureChanged);
+        CHECK(hook.preEvent != HookEvent::enterBase);
+        CHECK(hook.preEvent != HookEvent::exitBase);
+    }
+}
+
+void test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete() {
+    using namespace base_resource_sharing;
+
+    CHECK(!hook_registration_complete(0));
+    CHECK(!hook_registration_complete(7));
+    CHECK(hook_registration_complete(8));
+}
+
+void test_hook_backend_avoids_the_generic_full_name_dispatcher() {
+    using namespace base_resource_sharing;
+
+    CHECK(select_resource_hook_backend(true, false, true) == ResourceHookBackend::nativeFunction);
+    CHECK(select_resource_hook_backend(true, true, false) == ResourceHookBackend::scriptFunction);
+    CHECK(select_resource_hook_backend(false, false, false) == ResourceHookBackend::unsupported);
+    CHECK(select_resource_hook_backend(true, false, false) == ResourceHookBackend::unsupported);
+    CHECK(select_resource_hook_backend(true, true, true) == ResourceHookBackend::unsupported);
+}
+
+void test_hook_manifest_validates_live_unions_before_original_consumption() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
@@ -227,17 +266,15 @@ void test_hook_manifest_keeps_crafting_alive_through_submission() {
         hooks, std::string_view{"/Script/Pal.PalUIConvertItemModel:StartProduction"},
         &HookSpec::path);
     CHECK(startProduction != hooks.end());
-    CHECK(event_for_phase(*startProduction, HookPhase::pre) == HookEvent::touch);
-    CHECK(event_for_phase(*startProduction, HookPhase::post) == HookEvent::touch);
+    CHECK(event_for_phase(*startProduction, HookPhase::pre) == HookEvent::validate);
+    CHECK(startProduction->requirement == HookRequirement::required);
 
-    for (const auto& hook : hooks) {
-        if (event_for_phase(hook, HookPhase::pre) == HookEvent::touch) {
-            CHECK(event_for_phase(hook, HookPhase::pre) != HookEvent::acquire);
-        }
-        if (event_for_phase(hook, HookPhase::post) == HookEvent::structureChanged) {
-            CHECK(event_for_phase(hook, HookPhase::pre) == HookEvent::none);
-        }
-    }
+    const auto requestBuild = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer"},
+        &HookSpec::path);
+    CHECK(requestBuild != hooks.end());
+    CHECK(event_for_phase(*requestBuild, HookPhase::pre) == HookEvent::validate);
+    CHECK(requestBuild->requirement == HookRequirement::required);
 }
 
 void test_hook_manifest_releases_crafting_when_convert_widget_closes() {
@@ -266,7 +303,7 @@ void test_missing_early_build_acquire_disables_only_building() {
 
     auto resolved = all_hook_resolutions(true);
     for (auto& resolution : resolved) {
-        if (resolution.spec.path == "/Script/Pal.PalUIBuildModel:OnOpenMenu") {
+        if (resolution.spec.path == "/Script/Pal.PalUIInGameMainMenuBuildModel:Setup") {
             resolution.resolved = false;
         }
     }
@@ -276,7 +313,7 @@ void test_missing_early_build_acquire_disables_only_building() {
     CHECK(!capabilities[operation_index(ResourceOperation::repair)].available());
 }
 
-void test_hook_manifest_tracks_current_base_context() {
+void test_hook_manifest_does_not_track_current_base_context() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
@@ -285,30 +322,8 @@ void test_hook_manifest_tracks_current_base_context() {
         &HookSpec::path);
     const auto exit = std::ranges::find(
         hooks, std::string_view{"/Script/Pal.PalBuilderComponent:OnExitBaseCamp"}, &HookSpec::path);
-    CHECK(enter != hooks.end());
-    CHECK(exit != hooks.end());
-    if (enter != hooks.end()) {
-        CHECK(event_for_phase(*enter, HookPhase::pre) == HookEvent::enterBase);
-        CHECK(enter->requirement == HookRequirement::optional);
-    }
-    if (exit != hooks.end()) {
-        CHECK(event_for_phase(*exit, HookPhase::pre) == HookEvent::exitBase);
-        CHECK(exit->requirement == HookRequirement::optional);
-    }
-}
-
-void test_missing_current_base_hook_does_not_disable_helper_based_building() {
-    using namespace base_resource_sharing;
-
-    auto resolved = all_hook_resolutions(true);
-    for (auto& resolution : resolved) {
-        if (resolution.spec.path == "/Script/Pal.PalBuilderComponent:OnEnterBaseCamp") {
-            resolution.resolved = false;
-        }
-    }
-    const auto capabilities = evaluate_capabilities(resolved);
-    CHECK(capabilities[operation_index(ResourceOperation::building)].available());
-    CHECK(capabilities[operation_index(ResourceOperation::crafting)].available());
+    CHECK(enter == hooks.end());
+    CHECK(exit == hooks.end());
 }
 
 void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable() {
@@ -335,67 +350,33 @@ void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenab
     CHECK(transition.beginAccessibleWorld);
 }
 
-void test_reconcile_scheduler_coalesces_events_and_uses_slow_watchdog() {
+void test_on_demand_catalog_state_coalesces_invalidations_without_idle_work() {
     using namespace base_resource_sharing;
 
-    ReconcileScheduler scheduler;
-    scheduler.begin_world(7);
-    CHECK(scheduler.advance(0.0F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::complete, 7);
-    CHECK(!scheduler.advance(20.0F, 7, false));
-    CHECK(!scheduler.advance(59.0F, 7, true));
-    CHECK(scheduler.advance(1.0F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::complete, 7);
-
-    scheduler.request_immediate(7);
-    scheduler.request_immediate(7);
-    CHECK(!scheduler.advance(10.0F, 7, false));
-    CHECK(scheduler.advance(0.0F, 7, true));
-    CHECK(!scheduler.advance(0.0F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::partial, 7);
-    CHECK(!scheduler.advance(0.5F, 7, true));
-    CHECK(scheduler.advance(0.5F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::partial, 7);
-    CHECK(!scheduler.advance(1.0F, 7, true));
-    CHECK(scheduler.advance(1.0F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::complete, 7);
-
-    CHECK(!scheduler.advance(60.0F, 8, true));
-
-    scheduler.reset();
-    CHECK(!scheduler.advance(0.0F, 7, true));
-    scheduler.begin_world(7);
-    CHECK(scheduler.advance(0.0F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::complete, 7);
-    CHECK(!scheduler.advance(0.0F, 7, true));
+    OnDemandCatalogState state;
+    state.begin_world(7);
+    CHECK(state.invalidated(7));
+    CHECK(!state.invalidate(7));
+    CHECK(!state.invalidate(7));
+    state.complete(CatalogReconcileOutcome::complete, 7);
+    CHECK(!state.invalidated(7));
+    CHECK(state.invalidate(7));
+    CHECK(!state.invalidate(7));
+    CHECK(state.invalidated(7));
+    CHECK(!state.invalidate(8));
+    CHECK(!state.invalidated(8));
+    state.reset();
+    CHECK(!state.invalidated(7));
 }
 
-void test_reconcile_scheduler_does_not_retry_structural_failure_every_second() {
+void test_catalog_discovery_runs_once_only_for_a_new_foreground_session() {
     using namespace base_resource_sharing;
 
-    ReconcileScheduler scheduler;
-    scheduler.begin_world(7);
-    CHECK(scheduler.advance(0.0F, 7, true));
-    scheduler.complete(CatalogReconcileOutcome::structuralFailure, 7);
-    CHECK(!scheduler.advance(1.0F, 7, true));
-    CHECK(!scheduler.advance(58.0F, 7, true));
-    CHECK(scheduler.advance(1.0F, 7, true));
-}
-
-void test_reconcile_scheduler_caps_partial_retry_and_resets_on_event() {
-    using namespace base_resource_sharing;
-
-    ReconcileScheduler scheduler;
-    scheduler.begin_world(7);
-    CHECK(scheduler.advance(0.0F, 7, true));
-    for (const float interval : {1.0F, 2.0F, 4.0F, 8.0F, 16.0F, 30.0F, 30.0F}) {
-        scheduler.complete(CatalogReconcileOutcome::partial, 7);
-        CHECK(!scheduler.advance(interval / 2.0F, 7, true));
-        CHECK(scheduler.advance(interval / 2.0F, 7, true));
-    }
-    scheduler.complete(CatalogReconcileOutcome::partial, 7);
-    scheduler.request_immediate(7);
-    CHECK(scheduler.advance(0.0F, 7, true));
+    CHECK(should_discover_catalog(ForegroundTransitionKind::acquired));
+    CHECK(should_discover_catalog(ForegroundTransitionKind::preempted));
+    CHECK(!should_discover_catalog(ForegroundTransitionKind::refreshed));
+    CHECK(!should_discover_catalog(ForegroundTransitionKind::released));
+    CHECK(!should_discover_catalog(ForegroundTransitionKind::none));
 }
 
 void test_catalog_attempt_classifies_unloaded_containers_as_partial() {
@@ -405,17 +386,6 @@ void test_catalog_attempt_classifies_unloaded_containers_as_partial() {
     CHECK(classify_catalog_attempt(false, 3) == CatalogReconcileOutcome::partial);
     CHECK(classify_catalog_attempt(true, 0) == CatalogReconcileOutcome::structuralFailure);
     CHECK(classify_catalog_attempt(true, 3) == CatalogReconcileOutcome::structuralFailure);
-}
-
-void test_catalog_bootstrap_rejects_stale_or_unavailable_acquires() {
-    using namespace base_resource_sharing;
-
-    CHECK(should_bootstrap_catalog(true, true, true, false, 7, 7));
-    CHECK(!should_bootstrap_catalog(false, true, true, false, 7, 7));
-    CHECK(!should_bootstrap_catalog(true, false, true, false, 7, 7));
-    CHECK(!should_bootstrap_catalog(true, true, false, false, 7, 7));
-    CHECK(!should_bootstrap_catalog(true, true, true, true, 7, 7));
-    CHECK(!should_bootstrap_catalog(true, true, true, false, 7, 8));
 }
 
 void test_foreground_session_preempts_instead_of_combining_operations() {
@@ -499,17 +469,68 @@ void test_current_base_state_never_leaks_across_worlds() {
     CHECK(!state.current(8).has_value());
 }
 
+void test_current_base_resolution_uses_native_inside_base_route() {
+    using namespace base_resource_sharing;
+    using Names = CurrentBaseReflectionNames<char>;
+
+    CHECK(Names::controllerPawnFunction == "K2_GetPawn");
+    CHECK(Names::insideComponentProperty == "InsideBaseCampCheckComponent");
+    CHECK(Names::insideBaseModelFunction == "GetInsideBaseCampModel");
+    CHECK(Names::baseIdProperty == "BaseCampId");
+    CHECK(!kAllowsNearestBaseFallback);
+
+    const GuidKey current{{7, 0, 0, 0}};
+    CHECK(accept_current_base(current, true) == current);
+    CHECK(!accept_current_base(current, false).has_value());
+    CHECK(!accept_current_base(GuidKey{}, true).has_value());
+}
+
 void test_resource_exposure_uses_exactly_one_consumer_surface() {
     using namespace base_resource_sharing;
 
-    const auto crafting = make_exposure_plan(ResourceOperation::crafting);
+    const GuidKey currentBase{{7, 0, 0, 0}};
+    const auto crafting = make_exposure_plan(ResourceOperation::crafting, currentBase);
     CHECK(crafting.surface == ResourceConsumerSurface::playerHelper);
-    CHECK(!crafting.targetBaseId.has_value());
+    CHECK(crafting.targetBaseId == currentBase);
 
-    const auto building = make_exposure_plan(ResourceOperation::building);
-    CHECK(building.surface == ResourceConsumerSurface::playerHelper);
-    CHECK(!building.targetBaseId.has_value());
+    const auto building = make_exposure_plan(ResourceOperation::building, currentBase);
+    CHECK(building.surface == ResourceConsumerSurface::currentBaseModule);
+    CHECK(building.targetBaseId == currentBase);
+
+    CHECK(make_exposure_plan(ResourceOperation::crafting).surface == ResourceConsumerSurface::none);
+    CHECK(make_exposure_plan(ResourceOperation::building).surface == ResourceConsumerSurface::none);
     CHECK(make_exposure_plan(ResourceOperation::repair).surface == ResourceConsumerSurface::none);
+}
+
+void test_building_inventory_refresh_targets_only_the_build_model() {
+    using namespace base_resource_sharing;
+
+    const GuidKey currentBase{{7, 0, 0, 0}};
+    const auto building = make_exposure_plan(ResourceOperation::building, currentBase);
+    CHECK(select_building_inventory_refresh_target(true, building) ==
+          BuildingInventoryRefreshTarget::buildModel);
+    CHECK(select_building_inventory_refresh_target(false, building) ==
+          BuildingInventoryRefreshTarget::none);
+    CHECK(select_building_inventory_refresh_target(
+              true, make_exposure_plan(ResourceOperation::crafting, currentBase)) ==
+          BuildingInventoryRefreshTarget::none);
+}
+
+void test_current_base_containers_are_not_injected_into_another_consumer_surface() {
+    using namespace base_resource_sharing;
+
+    const GuidKey currentBase{{7, 0, 0, 0}};
+    const GuidKey remoteBase{{8, 0, 0, 0}};
+    const GuidKey currentContainer{{70, 0, 0, 0}};
+    const GuidKey remoteContainer{{80, 0, 0, 0}};
+    const std::array descriptors{
+        ContainerDescriptor{.baseId = currentBase, .containerId = currentContainer},
+        ContainerDescriptor{.baseId = remoteBase, .containerId = remoteContainer},
+    };
+
+    const auto selected = select_shared_container_ids(descriptors, currentBase);
+    CHECK(selected.size() == 1);
+    CHECK(selected.front() == remoteContainer);
 }
 
 void test_applied_sequence_rejects_duplicate_remote_container() {
@@ -681,23 +702,26 @@ auto main() -> int {
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
     test_hook_manifest_acquires_before_first_build_and_craft_eligibility();
-    test_hook_manifest_keeps_crafting_alive_through_submission();
+    test_hook_manifest_contains_only_exact_foreground_hooks();
+    test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete();
+    test_hook_backend_avoids_the_generic_full_name_dispatcher();
+    test_hook_manifest_validates_live_unions_before_original_consumption();
     test_hook_manifest_releases_crafting_when_convert_widget_closes();
     test_missing_early_build_acquire_disables_only_building();
-    test_hook_manifest_tracks_current_base_context();
-    test_missing_current_base_hook_does_not_disable_helper_based_building();
+    test_hook_manifest_does_not_track_current_base_context();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
-    test_reconcile_scheduler_coalesces_events_and_uses_slow_watchdog();
-    test_reconcile_scheduler_does_not_retry_structural_failure_every_second();
-    test_reconcile_scheduler_caps_partial_retry_and_resets_on_event();
+    test_on_demand_catalog_state_coalesces_invalidations_without_idle_work();
+    test_catalog_discovery_runs_once_only_for_a_new_foreground_session();
     test_catalog_attempt_classifies_unloaded_containers_as_partial();
-    test_catalog_bootstrap_rejects_stale_or_unavailable_acquires();
     test_foreground_session_preempts_instead_of_combining_operations();
     test_foreground_session_ignores_stale_touch_and_release();
     test_foreground_crafting_session_remains_active_until_explicit_release();
     test_building_inventory_refresh_is_consumed_once_per_foreground_session();
     test_current_base_state_never_leaks_across_worlds();
+    test_current_base_resolution_uses_native_inside_base_route();
     test_resource_exposure_uses_exactly_one_consumer_surface();
+    test_building_inventory_refresh_targets_only_the_build_model();
+    test_current_base_containers_are_not_injected_into_another_consumer_surface();
     test_applied_sequence_rejects_duplicate_remote_container();
     test_applied_sequence_rejects_injection_of_existing_id();
     test_grapple_cooldown_default_off_is_idle_and_enabled_state_is_idempotent();
