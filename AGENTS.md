@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.8），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.6.9），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -83,7 +83,7 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 
 - `inc/game/pal_game.hpp`：背包、物品和帕鲁 UObject 反射访问；
 - `inc/base_resource_sharing/resource_pool.hpp`：公会资源过滤/排序、能力与按注入次数恢复的纯逻辑；
-- `inc/base_resource_sharing/resource_session.hpp`：8 秒目录校准调度与固定大小制作/建造操作会话；
+- `inc/base_resource_sharing/resource_session.hpp`：60 秒目录兜底、部分结果退避调度与固定大小制作/建造操作会话；
 - `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 分阶段制作/建造 Hook 清单；
 - `inc/base_resource_sharing/pal_base_resources.hpp` + `src/pal_base_resources.cpp`：事件驱动目录调度、
   制作/建造会话与 Hook 适配；
@@ -144,11 +144,12 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 
 跨据点资源共享通过 `PalBaseCampManager:GetBaseCampIds` / `TryGetModel` 读取同公会据点，再从
 `PalBaseCampModel.ModuleArray` 的 `PalBaseCampModuleItemStorage.ContainerInfos` 筛选 `Chest` 类型普通仓储；
-每个登记项都必须通过 `PalMapObjectManager:FindConcreteModel` 解析到已加载的 `PalItemContainer`。该功能
-不使用全局 `FindAllOf`，不扫描或写入 `ItemSlotArray`/`StackCount`，也没有一秒一次的物品数量预览缓存。
+每个登记项都尝试通过 `PalMapObjectManager:FindConcreteModel` 解析到已加载的 `PalItemContainer`；暂未加载的
+普通箱子从本次联合排除，已加载部分仍可用，并按 1、2、4 秒指数退避、最高 30 秒重试。该功能不使用全局
+`FindAllOf`，不扫描或写入 `ItemSlotArray`/`StackCount`，也没有一秒一次的物品数量预览缓存。
 
 `OnRep_ContainerInfos`、仓储 ConcreteModel 可用性和 `OnRep_ModuleArray` 只负责合并目录失效标记；活动材料
-会话期间目录调度器不得执行校准或拆装联合，会话结束后处理一次失效，8 秒校准仅为空闲兜底。
+会话期间目录调度器不得执行校准或拆装联合，会话结束后处理一次失效，60 秒校准仅为空闲兜底。
 `PalUIBuildModel:OnOpenMenu` 与 `PalUIConvertItemModel:Initialize` 的 pre-hook 在原版首次资格计算前获取
 会话并建立联合。制作和建造都只向本地主背包 `InventoryMultiHelper` 追加去重后的同公会普通箱子，不同时扩展
 据点模块。制作与建造会话互斥，新操作必须先恢复旧联合再抢占。高频列表、配方和资格 Hook 只刷新固定大小状态，
@@ -157,7 +158,9 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
 停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。首次资格回调早于目录
 初始化时在该次 pre-hook 同步完成一次有界目录发现和联合，不允许逐帧重试。只有终端而没有普通仓储模块的据点
-计入据点数但不贡献材料。跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
+计入据点数但不贡献材料。建筑菜单 `Setup` 完成后只向该建造模型发送一次原生
+`OnUpdateInventory(Container)` 事件以重算首次资格，不重复调用 Helper 的 `OnRep_Containers`，也不增加逐物品
+或逐帧 Hook。跨帧只持有 GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
 
 本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先恢复活动联合再注销
 资源 Hook。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
@@ -171,7 +174,8 @@ UObject 扫描、槽位扫描或逐帧任务。恢复失败造成的本世界安
 开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
 入口和活动会话校准抑制。1.6.8 增加进程内动态开关、资源单一消费面、首次资格同步 bootstrap、联合序列验证
 及有界诊断；爪钩等待 Common 主背包就绪后只执行一次精确目标扫描，未找到时仅允许显式重试。关闭和 LoadMap
-前在游戏线程按账本恢复。热卸载前必须先关闭开关，析构不得访问 Unreal。相关功能均不增加空闲逐帧工作。
+前在游戏线程按账本恢复。1.6.9 增加部分目录成功、指数退避、60 秒空闲兜底和建造 Setup 单次库存更新通知。
+热卸载前必须先关闭开关，析构不得访问 Unreal。相关功能均不增加空闲逐帧工作。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -204,7 +208,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.8)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.9)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
@@ -222,8 +226,9 @@ git diff --check
 已加载据点的普通箱子材料；
 材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
 显示不可用；同一世界内关闭后重新开启会自动恢复非零计数且每次只产生一次成功的初始校准；日志中目录校准
-仅在无活动材料会话时最多每 8 秒一次，活动菜单期间不出现联合反复恢复/重建；每次实时联合都有匹配且无错误
-的恢复和耗时记录。不要与
+仅在无活动材料会话时最多每 60 秒一次，未加载箱子按指数退避且不阻塞已加载箱子；活动菜单期间不出现联合反复
+恢复/重建；每次实时联合都有匹配且无错误的恢复和耗时记录。首次按 B 打开建造菜单应立即可建造，无需先打开
+任意制作设施；同一建造会话日志中只出现一次建造库存资格刷新。不要与
 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时测试。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common 主背包

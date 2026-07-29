@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -140,12 +141,8 @@ struct CooldownOverrideRecord {
         std::string_view{"GrapplingGun_2"}, std::string_view{"GrapplingGun_3"},
         std::string_view{"GrapplingGun_4"}, std::string_view{"GrapplingGun_5"},
     };
-    for (const auto knownId : knownIds) {
-        if (itemId == knownId) {
-            return true;
-        }
-    }
-    return false;
+    return std::ranges::any_of(knownIds,
+                               [itemId](const auto knownId) { return itemId == knownId; });
 }
 
 /**

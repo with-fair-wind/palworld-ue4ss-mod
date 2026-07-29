@@ -15,11 +15,15 @@ struct BaseResourceSharingSnapshot {
     std::uint64_t worldGeneration{};
     std::size_t baseCount{};
     std::size_t containerCount{};
+    std::size_t pendingContainerCount{};
     std::array<CapabilityState, 3> capabilities{};
     std::optional<ResourceOperation> foregroundOperation;
     ResourceConsumerSurface consumerSurface{ResourceConsumerSurface::none};
     std::optional<GuidKey> currentBaseId;
     double lastCatalogMilliseconds{};
+    double lastSuccessfulCatalogMilliseconds{};
+    double maximumCatalogMilliseconds{};
+    std::size_t catalogAttemptCount{};
     double lastUnionMilliseconds{};
     bool safetyDisabled{};
     std::string status;

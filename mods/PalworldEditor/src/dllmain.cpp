@@ -58,18 +58,18 @@ public:
      */
     PalworldEditorMod() : CppUserModBase() {
         ModName = STR("PalworldEditor");
-        ModVersion = STR("1.6.8");
+        ModVersion = STR("1.6.9");
         ModDescription =
             STR("Item, Pal skill, and same-guild base resource editor for Palworld 1.0");
         ModAuthors = STR("with-fair-wind");
 
-        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.8)\n"));
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.9)\n"));
 
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
             ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
-            if (ImGui::Begin("PalworldEditor v1.6.8", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            if (ImGui::Begin("PalworldEditor v1.6.9", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
                 ImGui::Separator();
                 render_item_browser(self);
@@ -1414,9 +1414,14 @@ private:
             return "未知";
         }();
         ImGui::TextDisabled("前台材料会话：%s；联合入口：%s", operationLabel, surfaceLabel);
-        ImGui::TextDisabled("当前据点：%s；最近目录/联合耗时：%.2f / %.2f ms",
+        ImGui::TextDisabled("当前据点：%s；可用/待加载容器：%zu / %zu",
                             snapshot.currentBaseId.has_value() ? "已确认" : "未确认",
-                            snapshot.lastCatalogMilliseconds, snapshot.lastUnionMilliseconds);
+                            snapshot.containerCount, snapshot.pendingContainerCount);
+        ImGui::TextDisabled(
+            "目录耗时（最近/最近成功/本世界峰值）：%.2f / %.2f / %.2f ms；尝试：%zu 次",
+            snapshot.lastCatalogMilliseconds, snapshot.lastSuccessfulCatalogMilliseconds,
+            snapshot.maximumCatalogMilliseconds, snapshot.catalogAttemptCount);
+        ImGui::TextDisabled("最近联合耗时：%.2f ms", snapshot.lastUnionMilliseconds);
         if (snapshot.safetyDisabled) {
             ImGui::TextColored(
                 ImVec4(1.0F, 0.35F, 0.2F, 1.0F),

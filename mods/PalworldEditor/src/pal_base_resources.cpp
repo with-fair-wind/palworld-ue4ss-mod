@@ -136,6 +136,7 @@ public:
             catalog_ = {};
             baseCount_ = 0;
             containerCount_ = 0;
+            pendingContainerCount_ = 0;
             worldContextFullName_.clear();
             runtimeError_.clear();
         }
@@ -163,7 +164,11 @@ public:
         catalog_ = {};
         baseCount_ = 0;
         containerCount_ = 0;
+        pendingContainerCount_ = 0;
         lastCatalogMilliseconds_ = 0.0;
+        lastSuccessfulCatalogMilliseconds_ = 0.0;
+        maximumCatalogMilliseconds_ = 0.0;
+        catalogAttemptCount_ = 0;
         lastUnionMilliseconds_ = 0.0;
         worldContextFullName_.clear();
         runtime_.begin_world_transition(generation);
@@ -257,6 +262,7 @@ public:
         catalog_ = {};
         baseCount_ = 0;
         containerCount_ = 0;
+        pendingContainerCount_ = 0;
         worldContextFullName_.clear();
         snapshotDirty_.mark();
         publish_snapshot();
@@ -290,46 +296,62 @@ private:
     }
 
     [[nodiscard]] auto catalog_ready() const noexcept -> bool {
-        return catalog_.generation == runtime_.generation() && catalog_.guildId.valid() &&
-               catalog_.error.empty() && !catalog_.plan.ordered.empty();
+        return catalog_initialized() && !catalog_.plan.ordered.empty();
+    }
+
+    [[nodiscard]] auto catalog_initialized() const noexcept -> bool {
+        return catalog_.initialized && catalog_.generation == runtime_.generation() &&
+               catalog_.guildId.valid() && catalog_.error.empty();
     }
 
     auto accept_catalog(detail::ResourceCatalogSnapshot next) -> void {
         catalog_ = std::move(next);
         baseCount_ = catalog_.sameGuildBaseCount;
         containerCount_ = catalog_.plan.ordered.size();
+        pendingContainerCount_ = catalog_.pendingContainerCount;
         runtimeError_.clear();
         snapshotDirty_.mark();
+    }
+
+    auto record_catalog_attempt(const double elapsed, const CatalogReconcileOutcome outcome)
+        -> void {
+        lastCatalogMilliseconds_ = elapsed;
+        maximumCatalogMilliseconds_ = std::max(maximumCatalogMilliseconds_, elapsed);
+        ++catalogAttemptCount_;
+        if (outcome != CatalogReconcileOutcome::structuralFailure) {
+            lastSuccessfulCatalogMilliseconds_ = elapsed;
+        }
     }
 
     auto reconcile_catalog(UObject* worldContext) -> void {
         const auto generation = runtime_.generation();
         const auto started = std::chrono::steady_clock::now();
         if (liveUnion_.active) {
-            scheduler_.complete(false, generation);
+            scheduler_.complete(CatalogReconcileOutcome::structuralFailure, generation);
             return;
         }
 
         auto next = detail::discover_catalog(worldContext, generation);
-        const bool discovered = next.error.empty();
-        scheduler_.complete(discovered, generation);
-        if (!discovered) {
+        const auto outcome =
+            classify_catalog_attempt(!next.error.empty(), next.pendingContainerCount);
+        scheduler_.complete(outcome, generation);
+        const auto elapsed =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                .count();
+        record_catalog_attempt(elapsed, outcome);
+        if (outcome == CatalogReconcileOutcome::structuralFailure) {
             runtimeError_ = next.error;
-            catalog_.error = next.error;
             snapshotDirty_.mark();
             return;
         }
 
         accept_catalog(std::move(next));
 
-        const auto elapsed =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
-                .count();
-        lastCatalogMilliseconds_ = elapsed;
         Output::send<LogLevel::Verbose>(
             STR("PalworldEditor: resource catalog reconciled in {:.3f} ms, bases={}, "
-                "containers={}, union={}\n"),
-            elapsed, baseCount_, containerCount_, liveUnion_.active);
+                "containers={}, pending={}, partial={}, union={}\n"),
+            elapsed, baseCount_, containerCount_, pendingContainerCount_,
+            outcome == CatalogReconcileOutcome::partial, liveUnion_.active);
         snapshotDirty_.mark();
     }
 
@@ -461,19 +483,26 @@ private:
         const auto generation = runtime_.generation();
         const auto capabilityReady = runtime_.capability(operation).available();
         if (!should_bootstrap_catalog(runtime_.enabled(), runtime_.accessible(), capabilityReady,
-                                      catalog_ready(), runtime_.generation(), generation)) {
+                                      catalog_initialized(), runtime_.generation(), generation)) {
             return catalog_ready();
         }
 
+        const auto started = std::chrono::steady_clock::now();
         scheduler_.request_immediate(generation);
         const bool schedulerTicket = scheduler_.advance(
             0.0F, generation, !sessions_.active(generation).has_value() && !liveUnion_.active);
         auto next = detail::discover_catalog(worldContext, generation);
-        const bool discovered = next.error.empty() && next.generation == runtime_.generation();
+        const bool generationCurrent = next.generation == runtime_.generation();
+        const auto outcome = classify_catalog_attempt(!next.error.empty() || !generationCurrent,
+                                                      next.pendingContainerCount);
         if (schedulerTicket) {
-            scheduler_.complete(discovered, generation);
+            scheduler_.complete(outcome, generation);
         }
-        if (!discovered) {
+        const auto elapsed =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                .count();
+        record_catalog_attempt(elapsed, outcome);
+        if (outcome == CatalogReconcileOutcome::structuralFailure) {
             runtimeError_ =
                 next.error.empty() ? "目录 bootstrap 的世界代次已过期。" : std::move(next.error);
             snapshotDirty_.mark();
@@ -481,7 +510,7 @@ private:
         }
 
         accept_catalog(std::move(next));
-        return true;
+        return catalog_ready();
     }
 
     [[nodiscard]] auto ensure_exposure_before_original(UObject* context,
@@ -492,18 +521,21 @@ private:
         }
         remember_world_context(context);
 
-        const bool bootstrapRequired = !catalog_ready();
+        const bool bootstrapRequired = !catalog_initialized();
         const auto catalogStarted = std::chrono::steady_clock::now();
         if (bootstrapRequired && !bootstrap_catalog_for_acquire(context, operation)) {
+            if (catalog_initialized()) {
+                runtimeError_ =
+                    pendingContainerCount_ > 0
+                        ? "共享目录正在等待已登记普通箱子加载；本次菜单保持原版行为。"
+                        : "未发现当前公会已加载的普通据点资源容器；本次菜单保持原版行为。";
+                snapshotDirty_.mark();
+            }
             return false;
         }
         const auto catalogElapsed = std::chrono::duration<double, std::milli>(
                                         std::chrono::steady_clock::now() - catalogStarted)
                                         .count();
-        if (bootstrapRequired) {
-            lastCatalogMilliseconds_ = catalogElapsed;
-            snapshotDirty_.mark();
-        }
         if (generation != runtime_.generation()) {
             return false;
         }
@@ -552,9 +584,9 @@ private:
         static_cast<void>(sessions_.touch(operation, runtime_.generation()));
     }
 
-    auto handle_building_setup_complete() -> void {
+    auto handle_building_setup_complete(UObject* buildModel) -> void {
         const auto generation = runtime_.generation();
-        if (sessions_.active(generation) != ResourceOperation::building || !liveUnion_.active ||
+        if (!sessions_.building_inventory_refresh_needed(generation) || !liveUnion_.active ||
             liveUnion_.generation != generation ||
             liveUnion_.exposure.operation != ResourceOperation::building ||
             liveUnion_.exposure.surface != ResourceConsumerSurface::playerHelper ||
@@ -562,25 +594,26 @@ private:
             return;
         }
 
-        auto* helper = find_object_by_full_name(liveUnion_.entry->objectFullName);
-        auto* onRepContainers =
-            helper == nullptr ? nullptr : helper->GetFunctionByNameInChain(STR("OnRep_Containers"));
-        if (onRepContainers == nullptr) {
+        std::string error;
+        bool notified{};
+        {
+            MutationScope mutation{selfMutation_};
+            notified = detail::notify_building_inventory_changed(
+                buildModel, resolve_world_context(buildModel), catalog_, liveUnion_, error);
+        }
+        if (!notified || !sessions_.complete_building_inventory_refresh(generation)) {
             static_cast<void>(sessions_.release(ResourceOperation::building, generation));
-            restore_or_disable("建筑材料观察者刷新失败");
+            restore_or_disable("建造库存更新通知失败");
             if (!safetyDisabled_) {
-                disable_operation(ResourceOperation::building,
-                                  "建筑菜单 Setup 后无法刷新材料观察者。");
+                disable_operation(
+                    ResourceOperation::building,
+                    error.empty() ? "建筑菜单 Setup 后无法刷新库存资格。" : std::move(error));
             }
             return;
         }
 
-        {
-            MutationScope mutation{selfMutation_};
-            helper->ProcessEvent(onRepContainers, nullptr);
-        }
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: building material observers refreshed after menu setup\n"));
+        Output::send<LogLevel::Verbose>(STR(
+            "PalworldEditor: building inventory eligibility refreshed once after menu setup\n"));
     }
 
     auto handle_crafting_widget_closed(UObject* widget) -> void {
@@ -643,7 +676,7 @@ private:
                 handle_touch(spec.operation);
                 break;
             case HookEvent::refreshBuilding:
-                handle_building_setup_complete();
+                handle_building_setup_complete(context.Context);
                 break;
             case HookEvent::closeCrafting:
                 handle_crafting_widget_closed(context.Context);
@@ -730,11 +763,15 @@ private:
         next.worldGeneration = runtime_.generation();
         next.baseCount = baseCount_;
         next.containerCount = containerCount_;
+        next.pendingContainerCount = pendingContainerCount_;
         next.foregroundOperation = sessions_.active(next.worldGeneration);
         next.consumerSurface =
             liveUnion_.active ? liveUnion_.exposure.surface : ResourceConsumerSurface::none;
         next.currentBaseId = currentBase_.current(next.worldGeneration);
         next.lastCatalogMilliseconds = lastCatalogMilliseconds_;
+        next.lastSuccessfulCatalogMilliseconds = lastSuccessfulCatalogMilliseconds_;
+        next.maximumCatalogMilliseconds = maximumCatalogMilliseconds_;
+        next.catalogAttemptCount = catalogAttemptCount_;
         next.lastUnionMilliseconds = lastUnionMilliseconds_;
         next.safetyDisabled = safetyDisabled_;
         for (std::size_t index{}; index < next.capabilities.size(); ++index) {
@@ -746,6 +783,7 @@ private:
              .detectingCapabilities = next.worldAccessible && !required_hooks_ready(),
              .baseCount = next.baseCount,
              .containerCount = next.containerCount,
+             .pendingContainerCount = next.pendingContainerCount,
              .craftingAvailable =
                  next.capabilities[operation_index(ResourceOperation::crafting)].available(),
              .buildingAvailable =
@@ -773,10 +811,14 @@ private:
     std::uint64_t capabilitiesGeneration_{};
     std::size_t baseCount_{};
     std::size_t containerCount_{};
+    std::size_t pendingContainerCount_{};
     std::wstring worldContextFullName_;
     std::string runtimeError_;
     std::chrono::steady_clock::time_point nextHookAttempt_{};
     double lastCatalogMilliseconds_{};
+    double lastSuccessfulCatalogMilliseconds_{};
+    double maximumCatalogMilliseconds_{};
+    std::size_t catalogAttemptCount_{};
     double lastUnionMilliseconds_{};
     bool selfMutation_{};
     bool safetyDisabled_{};

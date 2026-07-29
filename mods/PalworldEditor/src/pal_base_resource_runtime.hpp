@@ -27,7 +27,10 @@ struct CatalogModule {
 struct ResourceCatalogSnapshot {
     std::uint64_t generation{};
     GuidKey guildId;
+    bool initialized{};
     std::size_t sameGuildBaseCount{};
+    std::size_t registeredContainerCount{};
+    std::size_t pendingContainerCount{};
     ResourceUnionPlan plan;
     std::vector<CatalogModule> modules;
     std::string error;
@@ -60,5 +63,10 @@ struct LiveUnion {
                                const ResourceCatalogSnapshot& catalog,
                                const ResourceExposurePlan& exposure, LiveUnion& liveUnion,
                                std::string& error) -> bool;
+[[nodiscard]] auto notify_building_inventory_changed(RC::Unreal::UObject* buildModel,
+                                                     RC::Unreal::UObject* worldContext,
+                                                     const ResourceCatalogSnapshot& catalog,
+                                                     const LiveUnion& liveUnion, std::string& error)
+    -> bool;
 [[nodiscard]] auto restore_union(LiveUnion& liveUnion, std::string& error) -> bool;
 }  // namespace base_resource_sharing::detail

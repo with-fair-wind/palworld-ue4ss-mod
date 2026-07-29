@@ -334,6 +334,7 @@ struct BaseResourceSharingStatus {
     bool detectingCapabilities{};
     std::size_t baseCount{};
     std::size_t containerCount{};
+    std::size_t pendingContainerCount{};
     bool craftingAvailable{};
     bool buildingAvailable{};
     bool repairAvailable{};
@@ -363,6 +364,10 @@ struct BaseResourceSharingStatus {
 
     std::string text = "已发现 " + std::to_string(status.baseCount) + " 个据点、" +
                        std::to_string(status.containerCount) + " 个资源容器。\n";
+    if (status.pendingContainerCount > 0) {
+        text += std::to_string(status.pendingContainerCount) +
+                " 个容器暂未加载，已排除并安排低频重试。\n";
+    }
     text += status.craftingAvailable ? "制作：可用" : "制作：不可用";
     text += status.buildingAvailable ? "；建造：可用" : "；建造：不可用";
     text += status.repairAvailable ? "；修理：可用" : "；修理：不可用";

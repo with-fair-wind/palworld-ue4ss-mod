@@ -703,9 +703,10 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
             const CatalogContainer entry{.containerId = to_key(containerId),
                                          .ownerMapObjectId = to_key(ownerMapObjectId)};
             if (catalogIds.insert(entry.containerId).second) {
+                ++result.registeredContainerCount;
                 if (resolve_live_container(mapObjectManager, entry) == nullptr) {
-                    result.error = "至少一个已登记普通箱子尚未解析为有效容器。";
-                    return result;
+                    ++result.pendingContainerCount;
+                    continue;
                 }
                 catalogModule.containers.push_back(entry);
                 descriptors.push_back({.baseId = catalogModule.baseId,
@@ -717,10 +718,14 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
         result.modules.push_back(std::move(catalogModule));
     }
 
-    result.plan = make_resource_union_plan(descriptors, result.guildId);
-    if (!result.plan.error.empty()) {
-        result.error = result.plan.error;
+    if (!descriptors.empty()) {
+        result.plan = make_resource_union_plan(descriptors, result.guildId);
+        if (!result.plan.error.empty()) {
+            result.error = result.plan.error;
+            return result;
+        }
     }
+    result.initialized = true;
     return result;
 }
 
@@ -737,8 +742,8 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
         error = "当前材料操作没有可用的单一消费入口。";
         return false;
     }
-    if (worldContext == nullptr || catalog.generation == 0 || !catalog.guildId.valid() ||
-        !catalog.error.empty() || catalog.plan.ordered.empty()) {
+    if (worldContext == nullptr || !catalog.initialized || catalog.generation == 0 ||
+        !catalog.guildId.valid() || !catalog.error.empty() || catalog.plan.ordered.empty()) {
         error = "资源目录尚未完成安全校准。";
         return false;
     }
@@ -863,6 +868,61 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
         return rollback("制作联合序列验证失败：" +
                         std::string{sequence_status_text(validation.status)});
     }
+    return true;
+}
+
+auto notify_building_inventory_changed(UObject* buildModel, UObject* worldContext,
+                                       const ResourceCatalogSnapshot& catalog,
+                                       const LiveUnion& liveUnion, std::string& error) -> bool {
+    error.clear();
+    if (buildModel == nullptr || worldContext == nullptr || !liveUnion.active ||
+        liveUnion.exposure.operation != ResourceOperation::building ||
+        liveUnion.exposure.surface != ResourceConsumerSurface::playerHelper ||
+        !liveUnion.entry.has_value()) {
+        error = "建造库存更新通知缺少活动的玩家资源联合。";
+        return false;
+    }
+    if (liveUnion.entry->injected.empty()) {
+        return true;
+    }
+
+    auto* function = buildModel->GetFunctionByNameInChain(STR("OnUpdateInventory"));
+    auto* containerProperty =
+        function == nullptr ? nullptr
+                            : CastField<FObjectPropertyBase>(
+                                  function->FindProperty(FName(STR("Container"), FNAME_Find)));
+    if (function == nullptr || containerProperty == nullptr ||
+        !containerProperty->HasAnyPropertyFlags(CPF_Parm)) {
+        error = "建造模型缺少 OnUpdateInventory(Container) 接口。";
+        return false;
+    }
+
+    UObject* mapObjectManager{};
+    if (!call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager)) {
+        error = "建造库存更新时无法解析地图物体管理器。";
+        return false;
+    }
+
+    UObject* changedContainer{};
+    for (const auto& id : liveUnion.entry->injected) {
+        const auto [module, container] = locate_catalog_container(catalog, id);
+        static_cast<void>(module);
+        if (container != nullptr) {
+            changedContainer = resolve_live_container(mapObjectManager, *container);
+        }
+        if (changedContainer != nullptr) {
+            break;
+        }
+    }
+    if (changedContainer == nullptr) {
+        error = "建造库存更新时无法重新解析任一已注入容器。";
+        return false;
+    }
+
+    FunctionParams params{function};
+    containerProperty->SetObjectPropertyValue(
+        containerProperty->ContainerPtrToValuePtr<void>(params.data()), changedContainer);
+    buildModel->ProcessEvent(function, params.data());
     return true;
 }
 

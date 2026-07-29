@@ -1,13 +1,37 @@
 #pragma once
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 
 #include <base_resource_sharing/resource_pool.hpp>
 
 namespace base_resource_sharing {
-inline constexpr float kCatalogRetrySeconds = 1.0F;
-inline constexpr float kCatalogReconcileSeconds = 8.0F;
+inline constexpr float kCatalogInitialRetrySeconds = 1.0F;
+inline constexpr float kCatalogMaximumRetrySeconds = 30.0F;
+inline constexpr float kCatalogReconcileSeconds = 60.0F;
+
+/** @brief 一次资源目录发现对后续调度的分类。 */
+enum class CatalogReconcileOutcome : std::uint8_t {
+    complete,         /**< 目录完整可用，恢复低频兜底校准。 */
+    partial,          /**< 至少一个容器瞬时未加载，按指数退避重试。 */
+    structuralFailure /**< 反射结构或权限失败，只等待低频兜底或显式失效事件。 */
+};
+
+/**
+ * @brief 根据结构错误和瞬时未加载容器数量分类目录发现结果。
+ * @param[in] hasStructuralError 是否遇到不兼容结构、权限或无效数据。
+ * @param[in] pendingContainerCount 暂未解析为活动容器的登记项数量。
+ */
+[[nodiscard]] constexpr auto classify_catalog_attempt(
+    const bool hasStructuralError, const std::size_t pendingContainerCount) noexcept
+    -> CatalogReconcileOutcome {
+    if (hasStructuralError) {
+        return CatalogReconcileOutcome::structuralFailure;
+    }
+    return pendingContainerCount == 0 ? CatalogReconcileOutcome::complete
+                                      : CatalogReconcileOutcome::partial;
+}
 
 struct ResourceToggleTransition {
     bool disableRuntime{};
@@ -44,6 +68,7 @@ public:
         inFlight_ = false;
         elapsedSinceSuccess_ = 0.0F;
         retryRemaining_ = 0.0F;
+        nextRetrySeconds_ = kCatalogInitialRetrySeconds;
     }
 
     auto request_immediate(const std::uint64_t generation) noexcept -> void {
@@ -52,6 +77,7 @@ public:
         }
         pending_ = true;
         retryRemaining_ = 0.0F;
+        nextRetrySeconds_ = kCatalogInitialRetrySeconds;
     }
 
     [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t generation,
@@ -78,17 +104,29 @@ public:
         return true;
     }
 
-    auto complete(const bool success, const std::uint64_t generation) noexcept -> void {
+    auto complete(const CatalogReconcileOutcome outcome, const std::uint64_t generation) noexcept
+        -> void {
         if (generation != generation_ || !inFlight_) {
             return;
         }
         inFlight_ = false;
         elapsedSinceSuccess_ = 0.0F;
-        if (success) {
-            retryRemaining_ = 0.0F;
-        } else {
-            pending_ = true;
-            retryRemaining_ = kCatalogRetrySeconds;
+        switch (outcome) {
+            case CatalogReconcileOutcome::complete:
+                pending_ = false;
+                retryRemaining_ = 0.0F;
+                nextRetrySeconds_ = kCatalogInitialRetrySeconds;
+                break;
+            case CatalogReconcileOutcome::partial:
+                pending_ = true;
+                retryRemaining_ = nextRetrySeconds_;
+                nextRetrySeconds_ = std::min(nextRetrySeconds_ * 2.0F, kCatalogMaximumRetrySeconds);
+                break;
+            case CatalogReconcileOutcome::structuralFailure:
+                pending_ = false;
+                retryRemaining_ = 0.0F;
+                nextRetrySeconds_ = kCatalogInitialRetrySeconds;
+                break;
         }
     }
 
@@ -98,6 +136,7 @@ public:
         inFlight_ = false;
         elapsedSinceSuccess_ = 0.0F;
         retryRemaining_ = 0.0F;
+        nextRetrySeconds_ = kCatalogInitialRetrySeconds;
     }
 
 private:
@@ -106,6 +145,7 @@ private:
     bool inFlight_{};
     float elapsedSinceSuccess_{};
     float retryRemaining_{};
+    float nextRetrySeconds_{kCatalogInitialRetrySeconds};
 };
 
 /** @brief 单一前台材料操作所有权的转换类别。 */
@@ -134,6 +174,7 @@ public:
     auto begin_world(const std::uint64_t generation) noexcept -> void {
         generation_ = generation;
         active_.reset();
+        buildingInventoryRefreshed_ = false;
     }
 
     /** @brief 获取前台所有权；不同操作会确定性抢占旧操作。 */
@@ -144,6 +185,7 @@ public:
         }
         if (!active_.has_value()) {
             active_ = operation;
+            buildingInventoryRefreshed_ = false;
             return {
                 .kind = ForegroundTransitionKind::acquired,
                 .current = operation,
@@ -159,6 +201,7 @@ public:
 
         const auto previous = active_;
         active_ = operation;
+        buildingInventoryRefreshed_ = false;
         return {
             .kind = ForegroundTransitionKind::preempted,
             .previous = previous,
@@ -183,6 +226,7 @@ public:
         }
         const auto previous = active_;
         active_.reset();
+        buildingInventoryRefreshed_ = false;
         return {
             .kind = ForegroundTransitionKind::released,
             .previous = previous,
@@ -203,15 +247,38 @@ public:
         return generation == generation_ ? active_ : std::nullopt;
     }
 
+    /** @return 当前建造会话是否仍需在 Setup 后通知一次库存内容更新。 */
+    [[nodiscard]] auto building_inventory_refresh_needed(
+        const std::uint64_t generation) const noexcept -> bool {
+        return generation == generation_ && active_ == ResourceOperation::building &&
+               !buildingInventoryRefreshed_;
+    }
+
+    /**
+     * @brief 标记当前建造会话已经成功发送库存内容更新。
+     * @retval true 首次完成当前有效建造会话的通知。
+     * @retval false 世界或会话不匹配，或该会话已经通知。
+     */
+    [[nodiscard]] auto complete_building_inventory_refresh(const std::uint64_t generation) noexcept
+        -> bool {
+        if (!building_inventory_refresh_needed(generation)) {
+            return false;
+        }
+        buildingInventoryRefreshed_ = true;
+        return true;
+    }
+
     /** @brief 清空所有代次和所有权状态。 */
     auto reset() noexcept -> void {
         generation_ = 0;
         active_.reset();
+        buildingInventoryRefreshed_ = false;
     }
 
 private:
     std::uint64_t generation_{};
     std::optional<ResourceOperation> active_;
+    bool buildingInventoryRefreshed_{};
 };
 
 /** @brief 只以 GUID 和世界代次跟踪本地玩家当前所在据点。 */

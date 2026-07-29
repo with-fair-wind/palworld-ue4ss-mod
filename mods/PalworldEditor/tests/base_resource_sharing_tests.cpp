@@ -153,6 +153,7 @@ void test_status_text_reports_partial_support() {
         .enabled = true,
         .baseCount = 3,
         .containerCount = 12,
+        .pendingContainerCount = 2,
         .craftingAvailable = true,
         .buildingAvailable = true,
         .repairAvailable = false,
@@ -161,6 +162,7 @@ void test_status_text_reports_partial_support() {
     const auto text = format_status(status);
     CHECK(text.find("3 个据点") != std::string::npos);
     CHECK(text.find("12 个资源容器") != std::string::npos);
+    CHECK(text.find("2 个容器暂未加载") != std::string::npos);
     CHECK(text.find("制作：可用") != std::string::npos);
     CHECK(text.find("建造：可用") != std::string::npos);
     CHECK(text.find("修理：不可用") != std::string::npos);
@@ -201,10 +203,9 @@ void test_hook_manifest_acquires_before_first_build_and_craft_eligibility() {
     CHECK(event_for_phase(*buildOpen, HookPhase::post) == HookEvent::none);
     CHECK(buildOpen->requirement == HookRequirement::required);
 
-    const auto buildSetup =
-        std::ranges::find(hooks,
-                          std::string_view{"/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
-                          &HookSpec::path);
+    const auto buildSetup = std::ranges::find(
+        hooks, std::string_view{"/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
+        &HookSpec::path);
     CHECK(buildSetup != hooks.end());
     CHECK(event_for_phase(*buildSetup, HookPhase::pre) == HookEvent::acquire);
     CHECK(event_for_phase(*buildSetup, HookPhase::post) == HookEvent::refreshBuilding);
@@ -334,36 +335,76 @@ void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenab
     CHECK(transition.beginAccessibleWorld);
 }
 
-void test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals() {
+void test_reconcile_scheduler_coalesces_events_and_uses_slow_watchdog() {
     using namespace base_resource_sharing;
 
     ReconcileScheduler scheduler;
     scheduler.begin_world(7);
     CHECK(scheduler.advance(0.0F, 7, true));
-    scheduler.complete(true, 7);
+    scheduler.complete(CatalogReconcileOutcome::complete, 7);
     CHECK(!scheduler.advance(20.0F, 7, false));
-    CHECK(!scheduler.advance(7.999F, 7, true));
-    CHECK(scheduler.advance(0.001F, 7, true));
-    scheduler.complete(true, 7);
+    CHECK(!scheduler.advance(59.0F, 7, true));
+    CHECK(scheduler.advance(1.0F, 7, true));
+    scheduler.complete(CatalogReconcileOutcome::complete, 7);
 
     scheduler.request_immediate(7);
     scheduler.request_immediate(7);
     CHECK(!scheduler.advance(10.0F, 7, false));
     CHECK(scheduler.advance(0.0F, 7, true));
     CHECK(!scheduler.advance(0.0F, 7, true));
-    scheduler.complete(false, 7);
-    CHECK(!scheduler.advance(0.999F, 7, true));
-    CHECK(scheduler.advance(0.001F, 7, true));
-    scheduler.complete(true, 7);
+    scheduler.complete(CatalogReconcileOutcome::partial, 7);
+    CHECK(!scheduler.advance(0.5F, 7, true));
+    CHECK(scheduler.advance(0.5F, 7, true));
+    scheduler.complete(CatalogReconcileOutcome::partial, 7);
+    CHECK(!scheduler.advance(1.0F, 7, true));
+    CHECK(scheduler.advance(1.0F, 7, true));
+    scheduler.complete(CatalogReconcileOutcome::complete, 7);
 
-    CHECK(!scheduler.advance(8.0F, 8, true));
+    CHECK(!scheduler.advance(60.0F, 8, true));
 
     scheduler.reset();
     CHECK(!scheduler.advance(0.0F, 7, true));
     scheduler.begin_world(7);
     CHECK(scheduler.advance(0.0F, 7, true));
-    scheduler.complete(true, 7);
+    scheduler.complete(CatalogReconcileOutcome::complete, 7);
     CHECK(!scheduler.advance(0.0F, 7, true));
+}
+
+void test_reconcile_scheduler_does_not_retry_structural_failure_every_second() {
+    using namespace base_resource_sharing;
+
+    ReconcileScheduler scheduler;
+    scheduler.begin_world(7);
+    CHECK(scheduler.advance(0.0F, 7, true));
+    scheduler.complete(CatalogReconcileOutcome::structuralFailure, 7);
+    CHECK(!scheduler.advance(1.0F, 7, true));
+    CHECK(!scheduler.advance(58.0F, 7, true));
+    CHECK(scheduler.advance(1.0F, 7, true));
+}
+
+void test_reconcile_scheduler_caps_partial_retry_and_resets_on_event() {
+    using namespace base_resource_sharing;
+
+    ReconcileScheduler scheduler;
+    scheduler.begin_world(7);
+    CHECK(scheduler.advance(0.0F, 7, true));
+    for (const float interval : {1.0F, 2.0F, 4.0F, 8.0F, 16.0F, 30.0F, 30.0F}) {
+        scheduler.complete(CatalogReconcileOutcome::partial, 7);
+        CHECK(!scheduler.advance(interval / 2.0F, 7, true));
+        CHECK(scheduler.advance(interval / 2.0F, 7, true));
+    }
+    scheduler.complete(CatalogReconcileOutcome::partial, 7);
+    scheduler.request_immediate(7);
+    CHECK(scheduler.advance(0.0F, 7, true));
+}
+
+void test_catalog_attempt_classifies_unloaded_containers_as_partial() {
+    using namespace base_resource_sharing;
+
+    CHECK(classify_catalog_attempt(false, 0) == CatalogReconcileOutcome::complete);
+    CHECK(classify_catalog_attempt(false, 3) == CatalogReconcileOutcome::partial);
+    CHECK(classify_catalog_attempt(true, 0) == CatalogReconcileOutcome::structuralFailure);
+    CHECK(classify_catalog_attempt(true, 3) == CatalogReconcileOutcome::structuralFailure);
 }
 
 void test_catalog_bootstrap_rejects_stale_or_unavailable_acquires() {
@@ -416,6 +457,29 @@ void test_foreground_crafting_session_remains_active_until_explicit_release() {
     CHECK(closed.kind == ForegroundTransitionKind::released);
     CHECK(closed.previous == ResourceOperation::crafting);
     CHECK(!sessions.active(7).has_value());
+}
+
+void test_building_inventory_refresh_is_consumed_once_per_foreground_session() {
+    using namespace base_resource_sharing;
+
+    ForegroundMaterialSession sessions;
+    sessions.begin_world(7);
+    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
+    CHECK(sessions.building_inventory_refresh_needed(7));
+    CHECK(sessions.complete_building_inventory_refresh(7));
+    CHECK(!sessions.building_inventory_refresh_needed(7));
+    CHECK(!sessions.complete_building_inventory_refresh(7));
+
+    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
+    CHECK(!sessions.building_inventory_refresh_needed(7));
+
+    static_cast<void>(sessions.acquire(ResourceOperation::crafting, 7));
+    CHECK(!sessions.building_inventory_refresh_needed(7));
+    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
+    CHECK(sessions.building_inventory_refresh_needed(7));
+
+    CHECK(!sessions.complete_building_inventory_refresh(8));
+    CHECK(sessions.building_inventory_refresh_needed(7));
 }
 
 void test_current_base_state_never_leaks_across_worlds() {
@@ -623,11 +687,15 @@ auto main() -> int {
     test_hook_manifest_tracks_current_base_context();
     test_missing_current_base_hook_does_not_disable_helper_based_building();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
-    test_reconcile_scheduler_coalesces_events_and_uses_bounded_intervals();
+    test_reconcile_scheduler_coalesces_events_and_uses_slow_watchdog();
+    test_reconcile_scheduler_does_not_retry_structural_failure_every_second();
+    test_reconcile_scheduler_caps_partial_retry_and_resets_on_event();
+    test_catalog_attempt_classifies_unloaded_containers_as_partial();
     test_catalog_bootstrap_rejects_stale_or_unavailable_acquires();
     test_foreground_session_preempts_instead_of_combining_operations();
     test_foreground_session_ignores_stale_touch_and_release();
     test_foreground_crafting_session_remains_active_until_explicit_release();
+    test_building_inventory_refresh_is_consumed_once_per_foreground_session();
     test_current_base_state_never_leaks_across_worlds();
     test_resource_exposure_uses_exactly_one_consumer_surface();
     test_applied_sequence_rejects_duplicate_remote_container();
