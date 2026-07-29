@@ -22,7 +22,7 @@ struct CurrentBaseReflectionNames<char> {
     static constexpr std::string_view controllerPawnFunction{"K2_GetPawn"};
     static constexpr std::string_view insideComponentProperty{"InsideBaseCampCheckComponent"};
     static constexpr std::string_view insideBaseModelFunction{"GetInsideBaseCampModel"};
-    static constexpr std::string_view baseIdProperty{"BaseCampId"};
+    static constexpr std::string_view baseIdFunction{"GetId"};
 };
 
 template <>
@@ -30,7 +30,7 @@ struct CurrentBaseReflectionNames<wchar_t> {
     static constexpr std::wstring_view controllerPawnFunction{L"K2_GetPawn"};
     static constexpr std::wstring_view insideComponentProperty{L"InsideBaseCampCheckComponent"};
     static constexpr std::wstring_view insideBaseModelFunction{L"GetInsideBaseCampModel"};
-    static constexpr std::wstring_view baseIdProperty{L"BaseCampId"};
+    static constexpr std::wstring_view baseIdFunction{L"GetId"};
 };
 
 /** @brief 当前据点解析不得以空间距离猜测据点。 */

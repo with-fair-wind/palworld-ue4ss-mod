@@ -26,7 +26,7 @@
 2. 调用反射函数 `K2_GetPawn` 获取本地 Pawn；
 3. 从 Pawn 的 `InsideBaseCampCheckComponent` 对象属性取得游戏原生据点检测组件；
 4. 调用 `PalInsideBaseCampCheckComponent:GetInsideBaseCampModel`；
-5. 从返回模型读取 `BaseCampId`；
+5. 调用返回模型的公开反射函数 `GetId` 读取 GUID；
 6. 验证该 ID 属于当前同公会资源目录，并且存在普通仓储模块；
 7. 制作排除当前据点容器后向玩家 Helper 注入其他据点容器；
 8. 建造向该当前据点仓储模块注入其他据点容器。

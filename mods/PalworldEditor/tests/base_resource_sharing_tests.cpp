@@ -483,7 +483,7 @@ void test_current_base_resolution_uses_native_inside_base_route() {
     CHECK(Names::controllerPawnFunction == "K2_GetPawn");
     CHECK(Names::insideComponentProperty == "InsideBaseCampCheckComponent");
     CHECK(Names::insideBaseModelFunction == "GetInsideBaseCampModel");
-    CHECK(Names::baseIdProperty == "BaseCampId");
+    CHECK(Names::baseIdFunction == "GetId");
     CHECK(!kAllowsNearestBaseFallback);
 
     const GuidKey current{{7, 0, 0, 0}};

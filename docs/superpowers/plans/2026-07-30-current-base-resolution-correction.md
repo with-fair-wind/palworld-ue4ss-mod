@@ -4,7 +4,7 @@
 
 **Goal:** Replace the broken nearest-base safety gate with Palworld's native inside-base component so the first crafting or building menu can establish a correct, consumable shared-resource union.
 
-**Architecture:** A small Unreal-independent contract header owns the reflected route names and the pure acceptance rule. The UE4SS runtime follows that contract on the game thread (`controller -> K2_GetPawn -> InsideBaseCampCheckComponent -> GetInsideBaseCampModel -> BaseCampId`), then the foreground session layer records the observed base and rejects stale unions at submit time.
+**Architecture:** A small Unreal-independent contract header owns the reflected route names and the pure acceptance rule. The UE4SS runtime follows that contract on the game thread (`controller -> K2_GetPawn -> InsideBaseCampCheckComponent -> GetInsideBaseCampModel -> GetId`), then the foreground session layer records the observed base and rejects stale unions at submit time.
 
 **Tech Stack:** C++23, UE4SS Experimental, Palworld 1.0.1 reflected `UFunction`/`FProperty` access, CMake, Ninja, MSVC, CTest.
 
@@ -47,7 +47,7 @@ void test_current_base_resolution_uses_native_inside_base_route() {
     CHECK(Names::controllerPawnFunction == "K2_GetPawn");
     CHECK(Names::insideComponentProperty == "InsideBaseCampCheckComponent");
     CHECK(Names::insideBaseModelFunction == "GetInsideBaseCampModel");
-    CHECK(Names::baseIdProperty == "BaseCampId");
+    CHECK(Names::baseIdFunction == "GetId");
     CHECK(!kAllowsNearestBaseFallback);
 
     const GuidKey current{{7, 0, 0, 0}};
@@ -90,7 +90,7 @@ struct CurrentBaseReflectionNames<char> {
     static constexpr std::string_view controllerPawnFunction{"K2_GetPawn"};
     static constexpr std::string_view insideComponentProperty{"InsideBaseCampCheckComponent"};
     static constexpr std::string_view insideBaseModelFunction{"GetInsideBaseCampModel"};
-    static constexpr std::string_view baseIdProperty{"BaseCampId"};
+    static constexpr std::string_view baseIdFunction{"GetId"};
 };
 
 template <>
@@ -98,7 +98,7 @@ struct CurrentBaseReflectionNames<wchar_t> {
     static constexpr std::wstring_view controllerPawnFunction{L"K2_GetPawn"};
     static constexpr std::wstring_view insideComponentProperty{L"InsideBaseCampCheckComponent"};
     static constexpr std::wstring_view insideBaseModelFunction{L"GetInsideBaseCampModel"};
-    static constexpr std::wstring_view baseIdProperty{L"BaseCampId"};
+    static constexpr std::wstring_view baseIdFunction{L"GetId"};
 };
 
 inline constexpr bool kAllowsNearestBaseFallback = false;
@@ -176,16 +176,15 @@ The returned pointer must remain local to the current hook callback.
 
 - [ ] **Step 3: Implement the native inside-base route**
 
-Update `read_base_id` to consume the shared `baseIdProperty` contract instead of a second
-hard-coded literal:
+Update `read_base_id` to consume the shared `baseIdFunction` contract and the existing
+GUID-returning function helper:
 
 ```cpp
 using Names = CurrentBaseReflectionNames<CharType>;
-auto* property =
-    baseModel == nullptr
-        ? nullptr
-        : CastField<FStructProperty>(
-              baseModel->GetPropertyByNameInChain(Names::baseIdProperty.data()));
+FGuid value{};
+if (!try_get_guid(baseModel, Names::baseIdFunction.data(), value)) {
+    return std::nullopt;
+}
 ```
 
 Replace the entire location/manager/nearest-base implementation with:
@@ -223,7 +222,7 @@ auto resolve_inside_base_id(UObject* worldContext, const ResourceCatalogSnapshot
 
     const auto candidate = read_base_id(baseModel);
     if (!candidate.has_value()) {
-        error = "当前据点模型缺少有效 BaseCampId。";
+        error = "当前据点模型的 GetId 未返回有效 GUID。";
         return std::nullopt;
     }
 

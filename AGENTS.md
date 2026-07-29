@@ -161,7 +161,7 @@ Hook。目录不存在空闲定时校准或后台重试；每个新的制作或�
 和联合序列，不执行目录发现或数组修改；制作界面由
 `PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式释放建造会话。
 当前据点通过 `PalUtility:GetLocalPalPlayerController`、控制器 `K2_GetPawn`、Pawn 的
-`InsideBaseCampCheckComponent` 和组件 `GetInsideBaseCampModel` 获取，再读取 `BaseCampId` 并验证其属于同公会
+`InsideBaseCampCheckComponent` 和组件 `GetInsideBaseCampModel` 获取，再调用模型 `GetId` 读取 GUID 并验证其属于同公会
 普通仓储目录。不得调用 `GetPawn`、`K2_GetActorLocation` 或 `PalBaseCampManager:GetNearestBaseCamp` 回退猜测；
 解析失败时不建立联合。该查询只发生在新前台材料会话与真实提交验证中，不增加 Hook、定时器或逐帧工作。
 写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全

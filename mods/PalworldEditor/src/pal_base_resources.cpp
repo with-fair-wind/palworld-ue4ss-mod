@@ -650,7 +650,7 @@ private:
         const auto baseId = detail::read_base_id(baseModel);
         if (!baseId.has_value()) {
             disable_operation(ResourceOperation::building,
-                              "据点进入/离开回调缺少有效 BaseCampModel.BaseCampId。");
+                              "据点进入/离开回调的 BaseCampModel.GetId 未返回有效 GUID。");
             return;
         }
         const auto generation = runtime_.generation();

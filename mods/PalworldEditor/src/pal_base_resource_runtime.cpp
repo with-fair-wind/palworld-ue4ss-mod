@@ -528,16 +528,10 @@ auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
 
 auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
     using Names = CurrentBaseReflectionNames<CharType>;
-    auto* property = baseModel == nullptr
-                         ? nullptr
-                         : CastField<FStructProperty>(
-                               baseModel->GetPropertyByNameInChain(Names::baseIdProperty.data()));
-    if (property == nullptr || property->GetSize() != static_cast<int32>(sizeof(FGuid))) {
+    FGuid value{};
+    if (!try_get_guid(baseModel, Names::baseIdFunction.data(), value)) {
         return std::nullopt;
     }
-
-    FGuid value{};
-    property->CopyCompleteValue(&value, property->ContainerPtrToValuePtr<void>(baseModel));
     const auto key = to_key(value);
     return key.valid() ? std::optional{key} : std::nullopt;
 }
@@ -573,7 +567,7 @@ auto resolve_inside_base_id(UObject* worldContext, const ResourceCatalogSnapshot
 
     const auto candidate = read_base_id(baseModel);
     if (!candidate.has_value()) {
-        error = "当前据点模型缺少有效 BaseCampId。";
+        error = "当前据点模型的 GetId 未返回有效 GUID。";
         return std::nullopt;
     }
 
