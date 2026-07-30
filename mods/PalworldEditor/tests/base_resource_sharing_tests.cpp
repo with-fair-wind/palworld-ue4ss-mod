@@ -1,9 +1,11 @@
 #include <array>
+#include <chrono>
 #include <iostream>
 #include <vector>
 
 #include <base_resource_sharing/current_base_resolution.hpp>
 #include <base_resource_sharing/hook_manifest.hpp>
+#include <base_resource_sharing/persistent_union.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 #include <base_resource_sharing/resource_session.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
@@ -93,7 +95,9 @@ void test_hook_capabilities_require_preview_and_consume_paths() {
 
     auto resolved = all_hook_resolutions(false);
     for (const auto& hook : palworld_1_0_1_hook_manifest()) {
-        if (hook.operation == ResourceOperation::crafting &&
+        const bool global = hook.preEvent == HookEvent::structureChanged ||
+                            hook.postEvent == HookEvent::structureChanged;
+        if ((global || hook.operation == ResourceOperation::crafting) &&
             hook.requirement == HookRequirement::required) {
             mark_resolved(resolved, hook.path);
         }
@@ -203,58 +207,70 @@ void test_hook_manifest_uses_low_frequency_building_menu_boundaries() {
 
     const auto open = findHook("/Script/Pal.PalUIBuildModel:OnOpenMenu");
     CHECK(open != hooks.end());
-    CHECK(event_for_phase(*open, HookPhase::pre) == HookEvent::beginBuildingMenu);
-    CHECK(open->requirement == HookRequirement::required);
-
-    const auto buildList =
-        findHook("/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay");
-    CHECK(buildList != hooks.end());
-    CHECK(event_for_phase(*buildList, HookPhase::pre) == HookEvent::touch);
-    CHECK(buildList->requirement == HookRequirement::required);
-
-    const auto buildEligibility =
-        findHook("/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject");
-    CHECK(buildEligibility != hooks.end());
-    CHECK(event_for_phase(*buildEligibility, HookPhase::pre) == HookEvent::touch);
-    CHECK(buildEligibility->requirement == HookRequirement::required);
-
-    const auto buildSetup = findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Setup");
-    CHECK(buildSetup != hooks.end());
-    CHECK(event_for_phase(*buildSetup, HookPhase::pre) == HookEvent::beginBuildingMenu);
-    CHECK(event_for_phase(*buildSetup, HookPhase::post) == HookEvent::refreshBuilding);
-    CHECK(buildSetup->requirement == HookRequirement::required);
-
-    const auto dispose = findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Dispose");
-    CHECK(dispose != hooks.end());
-    CHECK(event_for_phase(*dispose, HookPhase::post) == HookEvent::closeBuilding);
-    CHECK(dispose->requirement == HookRequirement::required);
+    CHECK(event_for_phase(*open, HookPhase::pre) == HookEvent::ensurePersistentUnion);
+    CHECK(open->requirement == HookRequirement::optional);
 
     const auto craftInitialize = findHook("/Script/Pal.PalUIConvertItemModel:Initialize");
     CHECK(craftInitialize != hooks.end());
-    CHECK(event_for_phase(*craftInitialize, HookPhase::pre) == HookEvent::acquire);
+    CHECK(event_for_phase(*craftInitialize, HookPhase::pre) == HookEvent::ensurePersistentUnion);
     CHECK(event_for_phase(*craftInitialize, HookPhase::post) == HookEvent::none);
-    CHECK(craftInitialize->requirement == HookRequirement::required);
+    CHECK(craftInitialize->requirement == HookRequirement::optional);
+}
+
+void test_persistent_union_hook_manifest_has_no_menu_lifetime_or_high_frequency_queries() {
+    using namespace base_resource_sharing;
+
+    const auto hooks = palworld_1_0_1_hook_manifest();
+    const auto findHook = [&](const std::string_view path) {
+        return std::ranges::find(hooks, path, &HookSpec::path);
+    };
+
+    CHECK(findHook("/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay") ==
+          hooks.end());
+    CHECK(findHook("/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject") ==
+          hooks.end());
+    CHECK(findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Setup") == hooks.end());
+    CHECK(findHook("/Script/Pal.PalUIInGameMainMenuBuildModel:Dispose") == hooks.end());
+    CHECK(findHook("/Script/Pal.PalBuilderComponent:ChangeMode") == hooks.end());
+    CHECK(findHook("/Script/Pal.PalUserWidget:OnClosed") == hooks.end());
+
+    const auto available = findHook(
+        "/Script/Pal.PalBaseCampModuleItemStorage:OnAvailableConcreteModel_ServerInternal");
+    const auto unavailable = findHook(
+        "/Script/Pal.PalBaseCampModuleItemStorage:OnNotAvailableConcreteModel_ServerInternal");
+    const auto modulesChanged = findHook("/Script/Pal.PalBaseCampModel:OnRep_ModuleArray");
+    CHECK(available != hooks.end());
+    CHECK(unavailable != hooks.end());
+    CHECK(modulesChanged != hooks.end());
+    CHECK(event_for_phase(*available, HookPhase::post) == HookEvent::structureChanged);
+    CHECK(event_for_phase(*unavailable, HookPhase::post) == HookEvent::structureChanged);
+    CHECK(event_for_phase(*modulesChanged, HookPhase::post) == HookEvent::structureChanged);
+
+    const auto buildOpen = findHook("/Script/Pal.PalUIBuildModel:OnOpenMenu");
+    const auto buildSubmit =
+        findHook("/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer");
+    const auto craftOpen = findHook("/Script/Pal.PalUIConvertItemModel:Initialize");
+    const auto craftSubmit = findHook("/Script/Pal.PalUIConvertItemModel:StartProduction");
+    CHECK(buildOpen != hooks.end());
+    CHECK(buildSubmit != hooks.end());
+    CHECK(craftOpen != hooks.end());
+    CHECK(craftSubmit != hooks.end());
+    CHECK(event_for_phase(*buildOpen, HookPhase::pre) == HookEvent::ensurePersistentUnion);
+    CHECK(event_for_phase(*craftOpen, HookPhase::pre) == HookEvent::ensurePersistentUnion);
+    CHECK(event_for_phase(*buildSubmit, HookPhase::pre) == HookEvent::validatePersistentUnion);
+    CHECK(event_for_phase(*craftSubmit, HookPhase::pre) == HookEvent::validatePersistentUnion);
 }
 
 void test_hook_manifest_contains_only_exact_foreground_hooks() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
-    CHECK(hooks.size() == 10);
-    for (const auto& hook : hooks) {
-        CHECK(hook.preEvent != HookEvent::structureChanged);
-        CHECK(hook.postEvent != HookEvent::structureChanged);
-        CHECK(hook.preEvent != HookEvent::enterBase);
-        CHECK(hook.preEvent != HookEvent::exitBase);
-    }
+    CHECK(hooks.size() == 7);
+    CHECK(std::ranges::count(hooks, HookEvent::structureChanged, &HookSpec::postEvent) == 3);
 }
 
 void test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete() {
     using namespace base_resource_sharing;
-
-    CHECK(!hook_registration_complete(0));
-    CHECK(!hook_registration_complete(9));
-    CHECK(hook_registration_complete(10));
 }
 
 void test_hook_backend_avoids_the_generic_full_name_dispatcher() {
@@ -275,36 +291,24 @@ void test_hook_manifest_validates_live_unions_before_original_consumption() {
         hooks, std::string_view{"/Script/Pal.PalUIConvertItemModel:StartProduction"},
         &HookSpec::path);
     CHECK(startProduction != hooks.end());
-    CHECK(event_for_phase(*startProduction, HookPhase::pre) == HookEvent::validate);
+    CHECK(event_for_phase(*startProduction, HookPhase::pre) == HookEvent::validatePersistentUnion);
     CHECK(startProduction->requirement == HookRequirement::required);
 
     const auto requestBuild = std::ranges::find(
         hooks, std::string_view{"/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer"},
         &HookSpec::path);
     CHECK(requestBuild != hooks.end());
-    CHECK(event_for_phase(*requestBuild, HookPhase::pre) == HookEvent::validate);
+    CHECK(event_for_phase(*requestBuild, HookPhase::pre) == HookEvent::validatePersistentUnion);
     CHECK(requestBuild->requirement == HookRequirement::required);
 }
 
-void test_hook_manifest_releases_crafting_when_convert_widget_closes() {
+void test_hook_manifest_does_not_bind_crafting_widget_lifetime() {
     using namespace base_resource_sharing;
 
     const auto hooks = palworld_1_0_1_hook_manifest();
     const auto closed = std::ranges::find(
         hooks, std::string_view{"/Script/Pal.PalUserWidget:OnClosed"}, &HookSpec::path);
-    CHECK(closed != hooks.end());
-    if (closed != hooks.end()) {
-        CHECK(event_for_phase(*closed, HookPhase::pre) == HookEvent::closeCrafting);
-        CHECK(event_for_phase(*closed, HookPhase::post) == HookEvent::none);
-        CHECK(closed->requirement == HookRequirement::required);
-    }
-
-    CHECK(is_convert_item_dispatch_parameter(
-        L"PalHUDDispatchParameter_ConvertItem /Engine/Transient.Param_0"));
-    CHECK(!is_convert_item_dispatch_parameter(
-        L"PalHUDDispatchParameter_ItemChest /Engine/Transient.Param_0"));
-    CHECK(!is_convert_item_dispatch_parameter(
-        L"PalHUDDispatchParameter_ItemChest /Game/PalHUDDispatchParameter_ConvertItem"));
+    CHECK(closed == hooks.end());
 }
 
 void test_missing_early_build_acquire_disables_only_building() {
@@ -312,7 +316,7 @@ void test_missing_early_build_acquire_disables_only_building() {
 
     auto resolved = all_hook_resolutions(true);
     for (auto& resolution : resolved) {
-        if (resolution.spec.path == "/Script/Pal.PalUIInGameMainMenuBuildModel:Setup") {
+        if (resolution.spec.path == "/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer") {
             resolution.resolved = false;
         }
     }
@@ -742,6 +746,190 @@ void test_grapple_cooldown_restores_each_original_before_changing_world() {
     CHECK(ledger.next_work(8, true) == CooldownWork::none);
 }
 
+void test_persistent_union_plan_connects_each_base_to_only_remote_normal_containers() {
+    using namespace base_resource_sharing;
+
+    const GuidKey baseA{{10, 0, 0, 0}};
+    const GuidKey baseB{{20, 0, 0, 0}};
+    const GuidKey baseC{{30, 0, 0, 0}};
+    const GuidKey containerA{{101, 0, 0, 0}};
+    const GuidKey containerB{{201, 0, 0, 0}};
+    const GuidKey ownerA{{1001, 0, 0, 0}};
+    const GuidKey ownerB{{2001, 0, 0, 0}};
+    const std::vector<PersistentStorageModule> modules{
+        {.baseId = baseA,
+         .objectFullName = L"StorageModule A",
+         .containers = {{.containerId = containerA, .ownerMapObjectId = ownerA},
+                        {.containerId = containerA, .ownerMapObjectId = ownerA},
+                        {.containerId = {}, .ownerMapObjectId = {{999, 0, 0, 0}}}}},
+        {.baseId = baseB,
+         .objectFullName = L"StorageModule B",
+         .containers = {{.containerId = containerB, .ownerMapObjectId = ownerB}}},
+        {.baseId = baseC, .objectFullName = L"StorageModule C"},
+    };
+
+    const auto plan = make_persistent_union_plan(modules);
+    CHECK(plan.error.empty());
+    CHECK(plan.edges.size() == 4);
+    CHECK(std::ranges::count(plan.edges, containerA, &PersistentUnionEdge::containerId) == 2);
+    CHECK(std::ranges::count(plan.edges, containerB, &PersistentUnionEdge::containerId) == 2);
+    CHECK(std::ranges::none_of(
+        plan.edges, [](const auto& edge) { return edge.targetBaseId == edge.sourceBaseId; }));
+    CHECK(std::ranges::is_sorted(plan.edges));
+}
+
+void test_persistent_union_diff_is_idempotent_and_removes_stale_edges() {
+    using namespace base_resource_sharing;
+
+    const PersistentUnionEdge keep{
+        .targetBaseId = {{10, 0, 0, 0}},
+        .targetModuleFullName = L"StorageModule A",
+        .sourceBaseId = {{20, 0, 0, 0}},
+        .containerId = {{201, 0, 0, 0}},
+        .ownerMapObjectId = {{2001, 0, 0, 0}},
+    };
+    const PersistentUnionEdge add{
+        .targetBaseId = {{10, 0, 0, 0}},
+        .targetModuleFullName = L"StorageModule A",
+        .sourceBaseId = {{30, 0, 0, 0}},
+        .containerId = {{301, 0, 0, 0}},
+        .ownerMapObjectId = {{3001, 0, 0, 0}},
+    };
+    const PersistentUnionEdge remove{
+        .targetBaseId = {{20, 0, 0, 0}},
+        .targetModuleFullName = L"StorageModule B",
+        .sourceBaseId = {{10, 0, 0, 0}},
+        .containerId = {{101, 0, 0, 0}},
+        .ownerMapObjectId = {{1001, 0, 0, 0}},
+    };
+
+    const auto diff = diff_persistent_union(std::array{keep, add}, std::array{keep, remove});
+    CHECK(diff.added == std::vector{add});
+    CHECK(diff.removed == std::vector{remove});
+
+    const auto unchanged = diff_persistent_union(std::array{keep}, std::array{keep});
+    CHECK(unchanged.added.empty());
+    CHECK(unchanged.removed.empty());
+}
+
+void test_persistent_union_removes_its_applied_edges_before_replanning() {
+    using namespace base_resource_sharing;
+
+    const GuidKey baseA{{10, 0, 0, 0}};
+    const GuidKey baseB{{20, 0, 0, 0}};
+    const PersistentStorageContainer containerA{
+        .containerId = {{101, 0, 0, 0}},
+        .ownerMapObjectId = {{1001, 0, 0, 0}},
+    };
+    const PersistentStorageContainer containerB{
+        .containerId = {{201, 0, 0, 0}},
+        .ownerMapObjectId = {{2001, 0, 0, 0}},
+    };
+    const std::vector<PersistentStorageModule> observed{
+        {.baseId = baseA,
+         .objectFullName = L"StorageModule A",
+         .containers = {containerA, containerB}},
+        {.baseId = baseB,
+         .objectFullName = L"StorageModule B",
+         .containers = {containerB, containerA}},
+    };
+    const std::array applied{
+        PersistentUnionEdge{.targetBaseId = baseA,
+                            .targetModuleFullName = L"StorageModule A",
+                            .sourceBaseId = baseB,
+                            .containerId = containerB.containerId,
+                            .ownerMapObjectId = containerB.ownerMapObjectId},
+        PersistentUnionEdge{.targetBaseId = baseB,
+                            .targetModuleFullName = L"StorageModule B",
+                            .sourceBaseId = baseA,
+                            .containerId = containerA.containerId,
+                            .ownerMapObjectId = containerA.ownerMapObjectId},
+    };
+
+    const auto nativeModules = remove_applied_target_edges(observed, applied);
+    CHECK(nativeModules[0].containers == std::vector{containerA});
+    CHECK(nativeModules[1].containers == std::vector{containerB});
+    const auto replanned = make_persistent_union_plan(nativeModules);
+    CHECK(replanned.error.empty());
+    const std::vector<PersistentUnionEdge> expected{applied.begin(), applied.end()};
+    CHECK(replanned.edges == expected);
+}
+
+void test_persistent_union_lifecycle_is_world_scoped_and_fails_closed() {
+    using namespace base_resource_sharing;
+
+    PersistentUnionLifecycle lifecycle;
+    lifecycle.begin_world(7);
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::off);
+    CHECK(lifecycle.request_enable(7));
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::initializing);
+    CHECK(lifecycle.complete_apply(7));
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::ready);
+    CHECK(lifecycle.invalidate(7));
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::reconciling);
+    CHECK(!lifecycle.invalidate(7));
+    CHECK(lifecycle.complete_apply(7));
+    CHECK(lifecycle.request_disable(7));
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::restoring);
+    CHECK(lifecycle.complete_restore(7));
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::off);
+
+    CHECK(!lifecycle.request_enable(6));
+    lifecycle.fail(7);
+    CHECK(lifecycle.phase(7) == PersistentUnionPhase::failed);
+    CHECK(!lifecycle.request_enable(7));
+    CHECK(lifecycle.request_disable(7));
+    CHECK(lifecycle.complete_restore(7));
+    lifecycle.begin_world(8);
+    CHECK(lifecycle.phase(8) == PersistentUnionPhase::off);
+}
+
+void test_persistent_union_ledger_and_budget_are_bounded_and_idempotent() {
+    using namespace base_resource_sharing;
+
+    const PersistentUnionEdge edge{
+        .targetBaseId = {{10, 0, 0, 0}},
+        .targetModuleFullName = L"StorageModule A",
+        .sourceBaseId = {{20, 0, 0, 0}},
+        .containerId = {{201, 0, 0, 0}},
+        .ownerMapObjectId = {{2001, 0, 0, 0}},
+    };
+    PersistentUnionLedger ledger;
+    CHECK(ledger.record(edge));
+    CHECK(!ledger.record(edge));
+    CHECK(ledger.contains(edge));
+    CHECK(ledger.edges().size() == 1);
+    CHECK(ledger.erase(edge));
+    CHECK(!ledger.erase(edge));
+    CHECK(ledger.empty());
+
+    PersistentUnionWorkBudget budget;
+    CHECK(budget.can_process(std::chrono::microseconds{0}));
+    budget.record_operation();
+    budget.record_operation();
+    budget.record_operation();
+    budget.record_operation();
+    CHECK(!budget.can_process(std::chrono::microseconds{0}));
+    budget.reset();
+    CHECK(budget.can_process(std::chrono::microseconds{499}));
+    CHECK(!budget.can_process(std::chrono::microseconds{500}));
+}
+
+void test_persistent_edge_mutation_requires_an_exact_native_transition() {
+    using namespace base_resource_sharing;
+
+    CHECK(classify_persistent_edge_add(0, 1) == PersistentEdgeMutation::added);
+    CHECK(classify_persistent_edge_add(1, 1) == PersistentEdgeMutation::unchanged);
+    CHECK(classify_persistent_edge_add(0, 0) == PersistentEdgeMutation::invalid);
+    CHECK(classify_persistent_edge_add(1, 2) == PersistentEdgeMutation::invalid);
+    CHECK(classify_persistent_edge_add(2, 2) == PersistentEdgeMutation::invalid);
+
+    CHECK(classify_persistent_edge_remove(1, 0) == PersistentEdgeMutation::removed);
+    CHECK(classify_persistent_edge_remove(0, 0) == PersistentEdgeMutation::unchanged);
+    CHECK(classify_persistent_edge_remove(1, 1) == PersistentEdgeMutation::invalid);
+    CHECK(classify_persistent_edge_remove(2, 1) == PersistentEdgeMutation::invalid);
+}
+
 auto main() -> int {
     test_resource_pool_filters_deduplicates_and_orders();
     test_runtime_state_fails_closed_across_worlds();
@@ -751,11 +939,12 @@ auto main() -> int {
     test_status_text_reports_partial_support();
     test_disabled_resource_sharing_has_no_runtime_work();
     test_hook_manifest_uses_low_frequency_building_menu_boundaries();
+    test_persistent_union_hook_manifest_has_no_menu_lifetime_or_high_frequency_queries();
     test_hook_manifest_contains_only_exact_foreground_hooks();
     test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete();
     test_hook_backend_avoids_the_generic_full_name_dispatcher();
     test_hook_manifest_validates_live_unions_before_original_consumption();
-    test_hook_manifest_releases_crafting_when_convert_widget_closes();
+    test_hook_manifest_does_not_bind_crafting_widget_lifetime();
     test_missing_early_build_acquire_disables_only_building();
     test_hook_manifest_does_not_track_current_base_context();
     test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
@@ -783,5 +972,11 @@ auto main() -> int {
     test_grapple_readiness_scheduler_polls_only_when_requested_and_at_interval();
     test_grapple_target_filter_accepts_only_known_item_ids();
     test_grapple_cooldown_restores_each_original_before_changing_world();
+    test_persistent_union_plan_connects_each_base_to_only_remote_normal_containers();
+    test_persistent_union_diff_is_idempotent_and_removes_stale_edges();
+    test_persistent_union_removes_its_applied_edges_before_replanning();
+    test_persistent_union_lifecycle_is_world_scoped_and_fails_closed();
+    test_persistent_union_ledger_and_budget_are_bounded_and_idempotent();
+    test_persistent_edge_mutation_requires_an_exact_native_transition();
     return failures == 0 ? 0 : 1;
 }

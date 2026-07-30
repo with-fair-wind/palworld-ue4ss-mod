@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 这是什么
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.9），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.6.10），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，以及数字键当前高亮、下一次按 E 会召唤的
 队伍帕鲁主动/被动技能编辑；还提供默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。
@@ -83,12 +83,13 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 
 - `inc/game/pal_game.hpp`：背包、物品和帕鲁 UObject 反射访问；
 - `inc/base_resource_sharing/resource_pool.hpp`：公会资源过滤/排序、能力与按注入次数恢复的纯逻辑；
-- `inc/base_resource_sharing/resource_session.hpp`：按需目录失效状态与固定大小制作/建造操作会话；
-- `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 最小制作/建造前台会话 Hook 清单；
-- `inc/base_resource_sharing/pal_base_resources.hpp` + `src/pal_base_resources.cpp`：按需目录发现、
-  制作/建造会话与 Hook 适配；
+- `inc/base_resource_sharing/persistent_union.hpp`：持久登记图、差量、生命周期、边账本与帧预算纯逻辑；
+- `inc/base_resource_sharing/resource_session.hpp`：旧菜单会话契约的纯逻辑回归覆盖，不再参与运行时协调；
+- `inc/base_resource_sharing/hook_manifest.hpp`：Palworld 1.0.1 持久登记结构事件与提交边界 Hook 清单；
+- `inc/base_resource_sharing/pal_base_resources.hpp` + `src/pal_base_resources.cpp`：世界级持久登记生命周期、
+  结构失效合并、增量差量调度与 Hook 适配；
 - `src/pal_base_resource_runtime.hpp` + `src/pal_base_resource_runtime.cpp`：通过游戏管理器发现同公会普通仓储、
-  建立可逆临时资源联合并按账本恢复；
+  调用原生 ConcreteModel 登记/注销接口并按边账本恢复；
 - `inc/items/item_catalog.hpp`：本地化物品标签、搜索、去重和索引；
 - `inc/skills/active_skill_definitions.hpp`：生成的 Palworld 1.0 主动技能数值/Raw ID 表；
 - `inc/skills/passive_skill_presets.hpp`：编译期四词条预设目录及单请求工厂；
@@ -144,51 +145,44 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 
 跨据点资源共享通过 `PalBaseCampManager:GetBaseCampIds` / `TryGetModel` 读取同公会据点，再从
 `PalBaseCampModel.ModuleArray` 的 `PalBaseCampModuleItemStorage.ContainerInfos` 筛选 `Chest` 类型普通仓储；
-每个登记项都尝试通过 `PalMapObjectManager:FindConcreteModel` 解析到已加载的 `PalItemContainer`；暂未加载的
-普通箱子从本次联合排除，已加载部分仍可用，并在下一次材料操作开始时重新尝试。该功能不使用全局
-`FindAllOf`，不扫描或写入 `ItemSlotArray`/`StackCount`，也没有一秒一次的物品数量预览缓存。
+每个原生来源项都必须通过 `PalMapObjectManager:FindConcreteModel` 解析到已加载 ConcreteModel。该功能
+不使用全局 `FindAllOf`，不扫描或写入 `ItemSlotArray` / `StackCount`，也没有物品数量预览缓存。
 
-不注册 `OnRep_ContainerInfos`、ConcreteModel 可用性、`OnRep_ModuleArray`、配方预览或建造资格等结构/高频
-Hook。目录不存在空闲定时校准或后台重试；每个新的制作或建造会话只在对应 pre-hook 中同步执行一次有界目录
-发现，同一会话不重复发现。原生 UFunction 直接注册到目标函数；Blueprint UFunction 共用一对可注销的
-`ProcessLocalScriptFunction` 回调，并只按最多十个缓存的 `UFunction*` 做指针比较，不使用
-`UObjectGlobals::RegisterHook` 的逐调用函数全名构造与散列表分发。
-`PalUIBuildModel:OnOpenMenu` 和 `PalUIInGameMainMenuBuildModel:Setup` 的 pre-hook 是仅有的建造菜单获取边界；
-列表生成和材料资格高频 Hook 只触碰固定大小会话状态，不发现目录、解析据点或修改数组。`Setup` post 对
-`currentBaseModule` 联合只发送一次 `OnUpdateInventory(Container)`，`Dispose` post 恢复联合并释放建造会话。
-若新菜单边界观察到不同据点，则先恢复旧联合再为新据点建立联合。`PalUIConvertItemModel:Initialize` 的
-pre-hook 建立制作联合。制作只向本地主背包 `InventoryMultiHelper` 追加其他据点的普通箱子，明确排除当前据点；
-建造只向当前据点仓储模块追加其他据点箱子，使预览和原版扣料使用同一入口。制作与建造会话互斥，新操作必须
-先恢复旧联合再抢占。`StartProduction` 与 `RequestBuild_ToServer` 只在真实提交前重读并验证当前据点、世界代次
-和联合序列，不执行目录发现或数组修改；制作界面由
-`PalUserWidget:OnClosed` 精确识别 `PalHUDDispatchParameter_ConvertItem` 后释放，退出建造模式仍作为建造会话
-恢复兜底。
-当前据点通过 `PalUtility:GetLocalPalPlayerController`、控制器 `K2_GetPawn`、Pawn 的
-`InsideBaseCampCheckComponent` 和组件 `GetInsideBaseCampModel` 获取，再调用模型 `GetId` 读取 GUID 并验证其属于同公会
-普通仓储目录。不得调用 `GetPawn`、`K2_GetActorLocation` 或 `PalBaseCampManager:GetNearestBaseCamp` 回退猜测；
-解析失败时不建立联合。该查询只发生在新前台材料会话与真实提交验证中，不增加 Hook、定时器或逐帧工作。
-写入后调用 `OnRep`、重读并验证每个注入容器恰好出现一次，异常回滚并按世界安全
-停用对应能力。恢复按原始次数、注入次数和当前序列执行，运行时新增的非注入引用会保留。每次新材料会话都在
-pre-hook 同步完成一次有界目录发现和联合，不允许空闲或逐帧重试。只有终端而没有普通仓储模块的据点计入据点数
-但不贡献材料，且无法作为建造共享目标。每个建筑菜单会话的 `Setup` 完成后只向该建造模型发送一次原生
-`OnUpdateInventory(Container)` 事件以重算首次资格，不重复调用 Helper 的 `OnRep_Containers`。跨帧只持有
-GUID、对象全名和标准库账本，不持有 Unreal 对象或数组地址。
+共享实现是世界代次内持续存在、可逆的公会仓储登记图：对每个同公会目标仓储模块，使用
+`OnAvailableConcreteModel_ServerInternal` 登记其他据点已加载的普通箱子；目标据点自己的原生容器不重复登记。
+制作和建造都只依赖 Palworld 原生仓储关系，不再修改本地主背包 `InventoryMultiHelper`，也不再把联合绑定到
+建筑或制作菜单生命周期。菜单关闭、进入放置预览、连续建造和提交扣除期间不得恢复或重建联合。
 
-本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先恢复活动联合再注销
-资源 Hook。制作、建造、修理能力独立失败关闭；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
-校准、联合建立及恢复耗时。资源共享与爪钩无冷却都是本次游戏进程内的动态开关，每次 DLL 加载默认关闭，
-不读取、创建或写入 `config.ini`。不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 或等价的资源路径
-mod 同时启用。
+`OnAvailableConcreteModel_ServerInternal`、`OnNotAvailableConcreteModel_ServerInternal` 和
+`PalBaseCampModel:OnRep_ModuleArray` 的 post-hook 只合并结构失效；不得在 Hook 回调内发现目录、遍历容器或
+修改数组。下一次 EngineTick 重新发现一次安全目录、剔除边账本中已注入到目标模块的容器，再计算期望边与已应用
+边的最小差量，避免把本 Mod 的注入结果当成原生来源并递归扩张。新增/删除每帧最多执行 4 条，并受 500 微秒
+软预算限制；每次 `ProcessEvent` 后检查时间。持久联合进入 `ready` 后，空闲 EngineTick 只做常量时间阶段判断，
+不存在 8 秒或其他周期性校准、定时扫描、后台线程和逐帧容器遍历。
 
-同一可访问世界内从关闭切换为开启时，资源桥必须按当前世界代次重新初始化会话和按需目录状态；直到下一次
-制作或建造会话开始前不执行目录发现。不得在 GUI 回调中扫描，也不得为重新开启增加线程、全局 UObject 扫描、
-槽位扫描、空闲定时校准或逐帧任务。恢复失败造成的本世界安全禁用不能通过切换开关绕过。1.6.1 修复该
-开关生命周期；1.6.2 移除技能目标的空闲后台解析；1.6.3 实现首次资格计算前的资源联合、制作唯一 Helper
-入口和活动会话校准抑制。1.6.8 增加进程内动态开关、资源单一消费面、首次资格同步 bootstrap、联合序列验证
-及有界诊断；爪钩等待 Common 主背包就绪后只执行一次精确目标扫描，未找到时仅允许显式重试。关闭和 LoadMap
-前在游戏线程按账本恢复。1.6.9 后续修订移除空闲目录兜底与后台退避，把目录发现限制在新材料会话，并将建造
-资格刷新改为实际建筑模型的单次通知；制作排除当前据点容器，建造使用当前据点模块，真实提交前执行只读验证。
-热卸载前必须先关闭开关，析构不得访问 Unreal。相关功能均不增加空闲逐帧工作。
+Hook 清单不得包含 `GetBuildObjectDataArrayForUIDisplay`、`IsExistsMaterialForBuildObject`、
+`PalUIInGameMainMenuBuildModel:Setup` / `Dispose`、`PalBuilderComponent:ChangeMode` 或
+`PalUserWidget:OnClosed`。可选的 `PalUIBuildModel:OnOpenMenu` 与
+`PalUIConvertItemModel:Initialize` 只在初始化等待安全上下文时允许触发一次重试，不建立或恢复联合。
+`RequestBuild_ToServer` 与 `StartProduction` 只做当前世界代次和持久联合阶段的常量时间检查，不执行 UObject
+查找、目录发现、数组读写或日志。所有必需 Hook 已注册后不得继续 5 秒注册轮询；可选 Hook 缺失不阻止稳定状态。
+
+每条由本 Mod 新增的边只保存目标/来源据点 GUID、容器 GUID、ConcreteModel 所有者 GUID 和目标模块对象全名。
+登记前后必须验证目标容器为精确 0→1 且只在原序列尾部追加；异常立即调用原生注销接口回滚。若回滚无法验证，
+必须把可能已新增的边纳入账本并安全停用本世界制作和建造共享。注销必须验证精确 1→0 且其他序列不变；
+ConcreteModel 已卸载时只能删除账本对应的精确数组项并调用 OnRep。恢复失败造成的本世界安全禁用不能通过切换
+开关绕过；关闭开关仍必须进入 restoring 阶段尽力清理剩余账本。
+
+暂未加载的普通箱子不阻塞已加载部分：不可用事件删除相应跨据点边，可用事件重新建立。跨帧只保存 GUID、对象
+全名、纯值计划和标准库账本，不持有 UObject 或 Unreal 数组地址。首次启用但世界上下文/仓储模块尚未就绪时，
+只进入等待状态；后续结构事件或低频菜单就绪事件触发下一次尝试，不得逐帧重试。
+
+本地权限必须满足 `IsServer && !IsDedicatedServer`。关闭开关、LoadMap 前置和卸载都先按账本恢复持久登记，
+再注销资源 Hook。制作、建造、修理能力独立显示；修理在 Palworld 1.0.1 中保持不可用。Verbose 日志只记录目录
+发现和持久图差量准备/恢复耗时。资源共享与爪钩无冷却都是本次游戏进程内的动态开关，每次 DLL 加载默认关闭，
+不读取、创建或写入 `config.ini`。不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 或等价的仓储登记/
+材料路径 mod 同时启用。热卸载前必须先关闭开关，析构不得访问 Unreal。
+
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的
 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
@@ -221,7 +215,7 @@ ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.9)`；打开 UE4SS GUI 的
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.10)`；打开 UE4SS GUI 的
 `PalworldEditor` 页签后应能看到浮动窗口。至少验证物品扫描与本地化标签、背包读取、数字键高亮队伍帕鲁后点击
 “选择当前帕鲁”、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能目录、点击“刷新技能列表”
 不崩溃、两个技能下拉框都可选择、
@@ -238,10 +232,11 @@ git diff --check
 无需先打开炉子；制作最大数量与真实可制作数量一致且不会把同一箱子计算两次；制作/建造能消费同公会另一
 已加载据点的普通箱子材料；
 材料不足时不扣除；关闭开关与 LoadMap 后恢复原版行为；食物箱、运输、自动生产和箱子 UI 不共享；修理明确
-显示不可用；同一世界内关闭后重新开启时，在下一次材料操作开始后恢复非零计数；移动、瞄准和空闲等待期间目录
-尝试次数不得增长，未加载箱子不得阻塞已加载箱子；活动菜单期间不出现联合反复恢复/重建；每个新材料会话只
-出现一次按需目录发现，每次实时联合都有匹配且无错误的恢复和耗时记录。首次按 B 打开建造菜单应立即可建造，无需先打开
-任意制作设施；同一建造会话日志中只出现一次建造库存资格刷新。不要与
+显示不可用；同一世界内关闭后重新开启时自动重新建立持久登记图；移动、瞄准、打开/关闭菜单和空闲等待期间
+目录尝试次数不得增长，日志不得出现联合反复恢复/重建；首次按 B 打开建造菜单应立即可建造，无需先打开任意
+制作设施；从菜单进入放置预览、连续放置和提交扣料期间登记边数保持稳定。新建/拆除/流送普通箱子后只出现一次
+结构事件驱动的目录校准，新增/删除边按帧预算逐步收敛，不能把已注入边再次识别为原生来源；关闭、LoadMap 和
+重新进入存档后所有本 Mod 登记边都被恢复。不要与
 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时测试。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common 主背包

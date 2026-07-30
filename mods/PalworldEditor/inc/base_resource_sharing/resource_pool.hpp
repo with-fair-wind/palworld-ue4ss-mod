@@ -94,6 +94,7 @@ enum class ResourceConsumerSurface : std::uint8_t {
     none,
     playerHelper,
     currentBaseModule,
+    guildBaseModules,
 };
 
 /** @brief 前台材料操作及其唯一消费面；不会组合多个入口。 */
@@ -442,7 +443,7 @@ struct BaseResourceSharingStatus {
                        std::to_string(status.containerCount) + " 个资源容器。\n";
     if (status.pendingContainerCount > 0) {
         text += std::to_string(status.pendingContainerCount) +
-                " 个容器暂未加载，已排除并安排低频重试。\n";
+                " 个容器暂未加载，已排除并等待结构事件后重试。\n";
     }
     text += status.craftingAvailable ? "制作：可用" : "制作：不可用";
     text += status.buildingAvailable ? "；建造：可用" : "；建造：不可用";

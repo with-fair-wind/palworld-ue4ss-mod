@@ -12,16 +12,8 @@ namespace base_resource_sharing {
 enum class HookEvent : std::uint8_t {
     none,
     structureChanged,
-    acquire,
-    beginBuildingMenu,
-    touch,
-    validate,
-    refreshBuilding,
-    closeBuilding,
-    closeCrafting,
-    updateBuildingMode,
-    enterBase,
-    exitBase,
+    ensurePersistentUnion,
+    validatePersistentUnion,
 };
 
 enum class HookPhase : std::uint8_t { pre, post };
@@ -42,46 +34,29 @@ struct HookResolution {
 };
 
 inline constexpr std::array kPalworld101HookManifest{
-    HookSpec{ResourceOperation::building, HookEvent::beginBuildingMenu, HookEvent::none,
-             HookRequirement::required, "/Script/Pal.PalUIBuildModel:OnOpenMenu"},
-    HookSpec{ResourceOperation::building, HookEvent::touch, HookEvent::none,
+    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::structureChanged,
              HookRequirement::required,
-             "/Script/Pal.PalUIBuildModel:GetBuildObjectDataArrayForUIDisplay"},
-    HookSpec{ResourceOperation::building, HookEvent::touch, HookEvent::none,
+             "/Script/Pal.PalBaseCampModuleItemStorage:"
+             "OnAvailableConcreteModel_ServerInternal"},
+    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::structureChanged,
              HookRequirement::required,
-             "/Script/Pal.PalBuilderComponent:IsExistsMaterialForBuildObject"},
-    HookSpec{ResourceOperation::building, HookEvent::beginBuildingMenu, HookEvent::refreshBuilding,
-             HookRequirement::required, "/Script/Pal.PalUIInGameMainMenuBuildModel:Setup"},
-    HookSpec{ResourceOperation::building, HookEvent::validate, HookEvent::none,
+             "/Script/Pal.PalBaseCampModuleItemStorage:"
+             "OnNotAvailableConcreteModel_ServerInternal"},
+    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::structureChanged,
+             HookRequirement::required, "/Script/Pal.PalBaseCampModel:OnRep_ModuleArray"},
+    HookSpec{ResourceOperation::building, HookEvent::ensurePersistentUnion, HookEvent::none,
+             HookRequirement::optional, "/Script/Pal.PalUIBuildModel:OnOpenMenu"},
+    HookSpec{ResourceOperation::building, HookEvent::validatePersistentUnion, HookEvent::none,
              HookRequirement::required,
              "/Script/Pal.PalNetworkPlayerComponent:RequestBuild_ToServer"},
-    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::updateBuildingMode,
-             HookRequirement::required, "/Script/Pal.PalBuilderComponent:ChangeMode"},
-    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::closeBuilding,
-             HookRequirement::required, "/Script/Pal.PalUIInGameMainMenuBuildModel:Dispose"},
-    HookSpec{ResourceOperation::crafting, HookEvent::acquire, HookEvent::none,
-             HookRequirement::required, "/Script/Pal.PalUIConvertItemModel:Initialize"},
-    HookSpec{ResourceOperation::crafting, HookEvent::validate, HookEvent::none,
+    HookSpec{ResourceOperation::crafting, HookEvent::ensurePersistentUnion, HookEvent::none,
+             HookRequirement::optional, "/Script/Pal.PalUIConvertItemModel:Initialize"},
+    HookSpec{ResourceOperation::crafting, HookEvent::validatePersistentUnion, HookEvent::none,
              HookRequirement::required, "/Script/Pal.PalUIConvertItemModel:StartProduction"},
-    HookSpec{ResourceOperation::crafting, HookEvent::closeCrafting, HookEvent::none,
-             HookRequirement::required, "/Script/Pal.PalUserWidget:OnClosed"},
 };
-
-/** @brief 精确识别制作界面的 HUD dispatch parameter 对象全名。 */
-[[nodiscard]] constexpr auto is_convert_item_dispatch_parameter(
-    const std::wstring_view fullName) noexcept -> bool {
-    constexpr std::wstring_view prefix{L"PalHUDDispatchParameter_ConvertItem "};
-    return fullName.starts_with(prefix);
-}
 
 [[nodiscard]] constexpr auto palworld_1_0_1_hook_manifest() noexcept -> std::span<const HookSpec> {
     return kPalworld101HookManifest;
-}
-
-/** @return 所有必要前台会话 Hook 是否已注册，完成后不再进行逐帧重试检查。 */
-[[nodiscard]] constexpr auto hook_registration_complete(const std::size_t registeredCount) noexcept
-    -> bool {
-    return registeredCount == kPalworld101HookManifest.size();
 }
 
 /**
@@ -134,8 +109,25 @@ inline void mark_resolved(const std::span<HookResolution> resolutions,
     std::array<CapabilityState, 3> result{};
     std::array<std::size_t, 3> requiredCounts{};
     std::array<std::size_t, 3> resolvedRequiredCounts{};
+    std::size_t globalRequiredCount{};
+    std::size_t resolvedGlobalRequiredCount{};
+    std::string globalError;
     for (const auto& resolution : resolutions) {
         if (resolution.spec.requirement != HookRequirement::required) {
+            continue;
+        }
+        const bool global = resolution.spec.preEvent == HookEvent::structureChanged ||
+                            resolution.spec.postEvent == HookEvent::structureChanged;
+        if (global) {
+            ++globalRequiredCount;
+            if (resolution.resolved) {
+                ++resolvedGlobalRequiredCount;
+            } else {
+                if (!globalError.empty()) {
+                    globalError += "\n";
+                }
+                globalError += "缺少必需接口：" + std::string{resolution.spec.path};
+            }
             continue;
         }
         auto& capability = result[operation_index(resolution.spec.operation)];
@@ -153,9 +145,16 @@ inline void mark_resolved(const std::span<HookResolution> resolutions,
     for (const auto operation : {ResourceOperation::crafting, ResourceOperation::building}) {
         const auto index = operation_index(operation);
         const bool ready =
+            globalRequiredCount != 0 && globalRequiredCount == resolvedGlobalRequiredCount &&
             requiredCounts[index] != 0 && requiredCounts[index] == resolvedRequiredCounts[index];
         result[index].previewReady = ready;
         result[index].consumeReady = ready;
+        if (!globalError.empty()) {
+            if (!result[index].error.empty()) {
+                result[index].error += "\n";
+            }
+            result[index].error += globalError;
+        }
     }
 
     auto& repair = result[operation_index(ResourceOperation::repair)];

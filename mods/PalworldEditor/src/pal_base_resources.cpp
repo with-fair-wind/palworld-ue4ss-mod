@@ -10,14 +10,13 @@
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
-#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
-#include <base_resource_sharing/resource_session.hpp>
+#include <base_resource_sharing/persistent_union.hpp>
 
 #include "pal_base_resource_runtime.hpp"
 
@@ -38,59 +37,6 @@ namespace {
     const auto objectPath =
         separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
     return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, objectPath.c_str());
-}
-
-[[nodiscard]] auto call_bool(UObject* target, const CharType* functionName, bool& result) -> bool {
-    result = false;
-    if (target == nullptr) {
-        return false;
-    }
-    auto* function = target->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
-        return false;
-    }
-    struct Params {
-        bool ReturnValue{};
-    } params;
-    target->ProcessEvent(function, &params);
-    result = params.ReturnValue;
-    return true;
-}
-
-[[nodiscard]] auto read_object_parameter(UFunction* function,
-                                         UnrealScriptFunctionCallableContext& context,
-                                         const CharType* parameterName) -> UObject* {
-    auto* property = function == nullptr ? nullptr
-                                         : CastField<FObjectPropertyBase>(function->FindProperty(
-                                               FName(parameterName, FNAME_Find)));
-    auto* locals = context.TheStack.Locals();
-    if (property == nullptr || locals == nullptr || !property->HasAnyPropertyFlags(CPF_Parm)) {
-        return nullptr;
-    }
-    return property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(locals));
-}
-
-[[nodiscard]] auto read_object_property(UObject* object, const CharType* propertyName) -> UObject* {
-    auto* property =
-        object == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(object->GetPropertyByNameInChain(propertyName));
-    return property == nullptr
-               ? nullptr
-               : property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
-}
-
-[[nodiscard]] constexpr auto operation_log_name(const ResourceOperation operation) noexcept
-    -> const CharType* {
-    switch (operation) {
-        case ResourceOperation::crafting:
-            return STR("crafting");
-        case ResourceOperation::building:
-            return STR("building");
-        case ResourceOperation::repair:
-            return STR("repair");
-    }
-    return STR("unknown");
 }
 
 class MutationScope {
@@ -122,47 +68,41 @@ public:
     };
 
     auto set_enabled(const bool enabled) -> void {
-        const auto transition =
-            decide_resource_toggle(runtime_.enabled(), enabled, runtime_.accessible());
-        if (!transition.disableRuntime && !transition.beginAccessibleWorld &&
-            runtime_.enabled() == enabled) {
+        if (runtime_.enabled() == enabled) {
             return;
         }
 
-        if (transition.disableRuntime) {
-            restore_or_disable("关闭资源共享");
-            sessions_.reset();
-            currentBase_.reset();
-            catalogState_.reset();
-            unregister_resource_hooks();
-            catalog_ = {};
-            baseCount_ = 0;
-            containerCount_ = 0;
-            pendingContainerCount_ = 0;
-            worldContextFullName_.clear();
-            runtimeError_.clear();
-        }
-
         runtime_.set_preference(enabled);
-        if (transition.beginAccessibleWorld) {
-            const auto generation = runtime_.generation();
-            sessions_.begin_world(generation);
-            currentBase_.begin_world(generation);
-            catalogState_.begin_world(generation);
+        const auto generation = runtime_.generation();
+        if (enabled && runtime_.accessible() && !safetyDisabled_) {
+            static_cast<void>(unionLifecycle_.request_enable(generation));
             runtimeError_.clear();
+            reconcileRequested_ = false;
+            waitingForStructure_ = false;
+            reset_pending_work();
+        } else if (!enabled && runtime_.accessible()) {
+            if (unionLifecycle_.request_disable(generation)) {
+                prepare_restore_work();
+            } else if (unionLifecycle_.phase(generation) == PersistentUnionPhase::off) {
+                finalize_disabled_state();
+            }
         }
+        publish_capabilities();
         snapshotDirty_.mark();
         publish_snapshot();
     }
 
     auto on_world_begin(const std::uint64_t generation) -> void {
-        restore_or_disable("切换世界");
-        sessions_.reset();
-        currentBase_.reset();
-        catalogState_.reset();
+        restore_all_synchronously("切换世界");
         unregister_resource_hooks();
         worldDisabledErrors_ = {};
         safetyDisabled_ = false;
+        unionLedger_.clear();
+        desiredPlan_ = {};
+        unionLifecycle_.begin_world(generation);
+        reconcileRequested_ = false;
+        waitingForStructure_ = false;
+        reset_pending_work();
         catalog_ = {};
         baseCount_ = 0;
         containerCount_ = 0;
@@ -171,7 +111,6 @@ public:
         lastSuccessfulCatalogMilliseconds_ = 0.0;
         maximumCatalogMilliseconds_ = 0.0;
         catalogAttemptCount_ = 0;
-        lastUnionMilliseconds_ = 0.0;
         worldContextFullName_.clear();
         runtime_.begin_world_transition(generation);
         snapshotDirty_.mark();
@@ -180,9 +119,11 @@ public:
 
     auto on_world_ready(const std::uint64_t generation) -> void {
         runtime_.finish_world_transition(generation);
-        sessions_.begin_world(generation);
-        currentBase_.begin_world(generation);
-        catalogState_.begin_world(generation);
+        unionLifecycle_.begin_world(generation);
+        waitingForStructure_ = false;
+        if (runtime_.enabled() && !safetyDisabled_) {
+            static_cast<void>(unionLifecycle_.request_enable(generation));
+        }
         publish_capabilities();
         snapshotDirty_.mark();
         publish_snapshot();
@@ -190,22 +131,40 @@ public:
 
     auto tick(const float deltaSeconds) -> void {
         static_cast<void>(deltaSeconds);
-        if (!runtime_.enabled() || !runtime_.accessible()) {
+        if (!runtime_.accessible()) {
             publish_snapshot();
             return;
+        }
+
+        const auto phase = unionLifecycle_.phase(runtime_.generation());
+        if (phase == PersistentUnionPhase::restoring) {
+            process_persistent_work();
+        } else if (runtime_.enabled() && !safetyDisabled_ && required_hooks_ready()) {
+            if (phase == PersistentUnionPhase::off) {
+                static_cast<void>(unionLifecycle_.request_enable(runtime_.generation()));
+            }
+            const auto currentPhase = unionLifecycle_.phase(runtime_.generation());
+            if (currentPhase == PersistentUnionPhase::initializing ||
+                currentPhase == PersistentUnionPhase::reconciling) {
+                if (!waitingForStructure_) {
+                    process_persistent_work();
+                }
+            }
         }
         publish_snapshot();
     }
 
     auto ensure_hooks_registered() -> void {
-        if (!resource_hooks_required(runtime_.enabled(), runtime_.accessible())) {
+        const bool restoring =
+            unionLifecycle_.phase(runtime_.generation()) == PersistentUnionPhase::restoring;
+        if (!resource_hooks_required(runtime_.enabled(), runtime_.accessible()) && !restoring) {
             if (!hooks_.empty()) {
                 unregister_resource_hooks();
                 publish_snapshot();
             }
             return;
         }
-        if (hook_registration_complete(hooks_.size())) {
+        if (required_hooks_ready()) {
             return;
         }
 
@@ -246,12 +205,13 @@ public:
     }
 
     auto shutdown_hooks() -> void {
-        restore_or_disable("卸载 mod");
-        sessions_.reset();
-        currentBase_.reset();
-        catalogState_.reset();
+        restore_all_synchronously("卸载 mod");
         unregister_resource_hooks();
         runtime_.begin_world_transition(runtime_.generation() + 1);
+        unionLifecycle_.begin_world(runtime_.generation());
+        unionLedger_.clear();
+        desiredPlan_ = {};
+        reset_pending_work();
         catalog_ = {};
         baseCount_ = 0;
         containerCount_ = 0;
@@ -288,13 +248,253 @@ private:
         return inventory;
     }
 
-    [[nodiscard]] auto catalog_ready() const noexcept -> bool {
-        return catalog_initialized() && !catalog_.plan.ordered.empty();
+    auto reset_pending_work() noexcept -> void {
+        work_ = {};
+        removalIndex_ = 0;
+        additionIndex_ = 0;
+        workPrepared_ = false;
     }
 
-    [[nodiscard]] auto catalog_initialized() const noexcept -> bool {
-        return catalog_.initialized && catalog_.generation == runtime_.generation() &&
-               catalog_.guildId.valid() && catalog_.error.empty();
+    auto prepare_restore_work() -> void {
+        work_ = {};
+        work_.removed.assign(unionLedger_.edges().begin(), unionLedger_.edges().end());
+        removalIndex_ = 0;
+        additionIndex_ = 0;
+        workPrepared_ = true;
+        snapshotDirty_.mark();
+    }
+
+    auto finalize_disabled_state() -> void {
+        desiredPlan_ = {};
+        reset_pending_work();
+        catalog_ = {};
+        baseCount_ = 0;
+        containerCount_ = 0;
+        pendingContainerCount_ = 0;
+        worldContextFullName_.clear();
+        runtimeError_.clear();
+        reconcileRequested_ = false;
+        waitingForStructure_ = false;
+        publish_capabilities();
+        snapshotDirty_.mark();
+    }
+
+    auto fail_persistent_union(std::string error) -> void {
+        runtimeError_ = std::move(error);
+        safetyDisabled_ = true;
+        reconcileRequested_ = false;
+        waitingForStructure_ = false;
+        unionLifecycle_.fail(runtime_.generation());
+        disable_operation(ResourceOperation::crafting, runtimeError_);
+        disable_operation(ResourceOperation::building, runtimeError_);
+        reset_pending_work();
+        snapshotDirty_.mark();
+    }
+
+    [[nodiscard]] auto prepare_reconcile_work() -> bool {
+        auto* worldContext = resolve_world_context(nullptr);
+        if (worldContext == nullptr) {
+            runtimeError_ = "正在等待可用于发现据点目录的游戏上下文。";
+            waitingForStructure_ = true;
+            snapshotDirty_.mark();
+            return false;
+        }
+
+        const auto generation = runtime_.generation();
+        const auto started = std::chrono::steady_clock::now();
+        auto next = detail::discover_catalog(worldContext, generation, unionLedger_.edges());
+        const auto elapsed =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                .count();
+        const bool structuralFailure = !next.error.empty() || next.generation != generation;
+        record_catalog_attempt(elapsed, !structuralFailure);
+        if (structuralFailure) {
+            fail_persistent_union(next.error.empty() ? "持久联合目录的世界代次已过期。"
+                                                     : std::move(next.error));
+            return false;
+        }
+
+        accept_catalog(std::move(next));
+        auto modules =
+            remove_applied_target_edges(detail::persistent_modules(catalog_), unionLedger_.edges());
+        containerCount_ = 0;
+        for (const auto& module : modules) {
+            containerCount_ += module.containers.size();
+        }
+        auto plan = make_persistent_union_plan(modules);
+        if (!plan.error.empty()) {
+            runtimeError_ = "正在等待同公会据点仓储模块完成加载。";
+            waitingForStructure_ = true;
+            snapshotDirty_.mark();
+            return false;
+        }
+
+        auto difference = diff_persistent_union(plan.edges, unionLedger_.edges());
+        desiredPlan_ = std::move(plan);
+        work_ = std::move(difference);
+        removalIndex_ = 0;
+        additionIndex_ = 0;
+        workPrepared_ = true;
+        waitingForStructure_ = false;
+        runtimeError_.clear();
+        snapshotDirty_.mark();
+        Output::send<LogLevel::Verbose>(
+            STR("PalworldEditor: persistent storage graph prepared in {:.3f} ms, bases={}, "
+                "containers={}, add={}, remove={}, pending={}\n"),
+            elapsed, baseCount_, containerCount_, work_.added.size(), work_.removed.size(),
+            pendingContainerCount_);
+        return true;
+    }
+
+    auto complete_persistent_work() -> void {
+        const auto generation = runtime_.generation();
+        const auto phase = unionLifecycle_.phase(generation);
+        if (phase == PersistentUnionPhase::restoring) {
+            if (!unionLedger_.empty()) {
+                fail_persistent_union("持久联合恢复结束后账本仍非空。");
+                return;
+            }
+            static_cast<void>(unionLifecycle_.complete_restore(generation));
+            finalize_disabled_state();
+        } else {
+            static_cast<void>(unionLifecycle_.complete_apply(generation));
+            if (reconcileRequested_) {
+                reconcileRequested_ = false;
+                static_cast<void>(unionLifecycle_.invalidate(generation));
+            }
+            publish_capabilities();
+            snapshotDirty_.mark();
+        }
+        reset_pending_work();
+    }
+
+    auto process_persistent_work() -> void {
+        const auto generation = runtime_.generation();
+        const auto phase = unionLifecycle_.phase(generation);
+        if (!workPrepared_) {
+            if (phase == PersistentUnionPhase::restoring) {
+                prepare_restore_work();
+            } else if (!prepare_reconcile_work()) {
+                return;
+            }
+        }
+
+        auto* worldContext = resolve_world_context(nullptr);
+        if (worldContext == nullptr && phase != PersistentUnionPhase::restoring) {
+            fail_persistent_union("执行持久联合时游戏上下文已经失效。");
+            return;
+        }
+
+        PersistentUnionWorkBudget budget;
+        const auto started = std::chrono::steady_clock::now();
+        const auto within_budget = [&] {
+            return budget.can_process(std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - started));
+        };
+
+        while (removalIndex_ < work_.removed.size() && within_budget()) {
+            const auto edge = work_.removed[removalIndex_++];
+            detail::PersistentEdgeMutationResult result;
+            {
+                MutationScope mutation{selfMutation_};
+                result = detail::remove_persistent_edge(worldContext, catalog_, edge);
+            }
+            budget.record_operation();
+            if (!result) {
+                if (result.mutation == PersistentEdgeMutation::removed) {
+                    static_cast<void>(unionLedger_.erase(edge));
+                }
+                fail_persistent_union(std::move(result.error));
+                return;
+            }
+            static_cast<void>(unionLedger_.erase(edge));
+        }
+
+        while (additionIndex_ < work_.added.size() && within_budget()) {
+            const auto& edge = work_.added[additionIndex_++];
+            detail::PersistentEdgeMutationResult result;
+            {
+                MutationScope mutation{selfMutation_};
+                result = detail::apply_persistent_edge(worldContext, catalog_, edge);
+            }
+            budget.record_operation();
+            if (!result) {
+                if (result.mutation == PersistentEdgeMutation::added) {
+                    static_cast<void>(unionLedger_.record(edge));
+                }
+                fail_persistent_union(std::move(result.error));
+                return;
+            }
+            if (result.mutation == PersistentEdgeMutation::added) {
+                static_cast<void>(unionLedger_.record(edge));
+            }
+        }
+
+        snapshotDirty_.mark();
+        if (removalIndex_ == work_.removed.size() && additionIndex_ == work_.added.size()) {
+            complete_persistent_work();
+        }
+    }
+
+    auto restore_all_synchronously(const std::string_view reason) -> void {
+        if (unionLedger_.empty()) {
+            return;
+        }
+        auto* worldContext = resolve_world_context(nullptr);
+        const auto edges = std::vector<PersistentUnionEdge>{unionLedger_.edges().begin(),
+                                                            unionLedger_.edges().end()};
+        const auto started = std::chrono::steady_clock::now();
+        std::string firstError;
+        for (const auto& edge : edges) {
+            detail::PersistentEdgeMutationResult result;
+            {
+                MutationScope mutation{selfMutation_};
+                result = detail::remove_persistent_edge(worldContext, catalog_, edge);
+            }
+            if (result) {
+                static_cast<void>(unionLedger_.erase(edge));
+            } else {
+                if (result.mutation == PersistentEdgeMutation::removed) {
+                    static_cast<void>(unionLedger_.erase(edge));
+                }
+                if (firstError.empty()) {
+                    firstError = std::move(result.error);
+                }
+            }
+        }
+        const auto elapsed =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+                .count();
+        const std::wstring wideReason{reason.begin(), reason.end()};
+        const bool restored = unionLedger_.empty() && firstError.empty();
+        Output::send<LogLevel::Verbose>(
+            restored
+                ? STR("PalworldEditor: persistent storage graph restored in {:.3f} ms ({})\n")
+                : STR("PalworldEditor: persistent storage graph restore incomplete in {:.3f} ms "
+                      "({})\n"),
+            elapsed, wideReason);
+        if (!restored) {
+            fail_persistent_union(firstError.empty() ? "持久联合未能完整恢复。" : firstError);
+        }
+    }
+
+    auto handle_ensure_persistent_union(UObject* context) -> void {
+        remember_world_context(context);
+        if (waitingForStructure_) {
+            waitingForStructure_ = false;
+            reset_pending_work();
+        }
+        if (runtime_.enabled() && !safetyDisabled_ &&
+            unionLifecycle_.phase(runtime_.generation()) == PersistentUnionPhase::off) {
+            static_cast<void>(unionLifecycle_.request_enable(runtime_.generation()));
+            snapshotDirty_.mark();
+        }
+    }
+
+    [[nodiscard]] auto validate_persistent_union(const ResourceOperation operation) -> bool {
+        const auto generation = runtime_.generation();
+        return runtime_.can_extend(operation, generation) &&
+               unionLifecycle_.phase(generation) == PersistentUnionPhase::ready;
     }
 
     auto accept_catalog(detail::ResourceCatalogSnapshot next) -> void {
@@ -306,401 +506,26 @@ private:
         snapshotDirty_.mark();
     }
 
-    auto record_catalog_attempt(const double elapsed, const CatalogReconcileOutcome outcome)
-        -> void {
+    auto record_catalog_attempt(const double elapsed, const bool successful) -> void {
         lastCatalogMilliseconds_ = elapsed;
         maximumCatalogMilliseconds_ = std::max(maximumCatalogMilliseconds_, elapsed);
         ++catalogAttemptCount_;
-        if (outcome != CatalogReconcileOutcome::structuralFailure) {
+        if (successful) {
             lastSuccessfulCatalogMilliseconds_ = elapsed;
         }
     }
 
-    [[nodiscard]] auto discover_catalog_for_acquire(UObject* worldContext) -> bool {
-        const auto generation = runtime_.generation();
-        const auto started = std::chrono::steady_clock::now();
-        if (liveUnion_.active) {
-            runtimeError_ = "活动材料联合尚未恢复，拒绝发现新目录。";
-            snapshotDirty_.mark();
-            return false;
-        }
-
-        auto next = detail::discover_catalog(worldContext, generation);
-        const bool generationCurrent = next.generation == generation;
-        const auto outcome = classify_catalog_attempt(!next.error.empty() || !generationCurrent,
-                                                      next.pendingContainerCount);
-        catalogState_.complete(outcome, generation);
-        const auto elapsed =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
-                .count();
-        record_catalog_attempt(elapsed, outcome);
-        if (outcome == CatalogReconcileOutcome::structuralFailure) {
-            runtimeError_ =
-                next.error.empty() ? "按需目录发现的世界代次已过期。" : std::move(next.error);
-            snapshotDirty_.mark();
-            return false;
-        }
-
-        accept_catalog(std::move(next));
-        if (!catalog_ready()) {
-            runtimeError_ = pendingContainerCount_ > 0
-                                ? "共享目录正在等待已登记普通箱子加载；本次菜单保持原版行为。"
-                                : "未发现当前公会已加载的普通据点资源容器；本次菜单保持原版行为。";
-            snapshotDirty_.mark();
-            return false;
-        }
-
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: resource catalog discovered on demand in {:.3f} ms, bases={}, "
-                "containers={}, pending={}, partial={}, union={}\n"),
-            elapsed, baseCount_, containerCount_, pendingContainerCount_,
-            outcome == CatalogReconcileOutcome::partial, liveUnion_.active);
-        snapshotDirty_.mark();
-        return true;
-    }
-
-    [[nodiscard]] auto apply_live_union(UObject* worldContext, const ResourceExposurePlan& exposure)
-        -> bool {
-        if (liveUnion_.active) {
-            if (liveUnion_.generation != runtime_.generation() ||
-                liveUnion_.guildId != catalog_.guildId) {
-                return false;
-            }
-            if (liveUnion_.exposure == exposure) {
-                return true;
-            }
-            if (!restore_live_union("切换前台材料操作")) {
-                return false;
-            }
-        }
-        if (worldContext == nullptr || !catalog_ready()) {
-            runtimeError_ = "资源目录尚未安全就绪。";
-            snapshotDirty_.mark();
-            return false;
-        }
-
-        const auto started = std::chrono::steady_clock::now();
-        std::string error;
-        bool applied{};
-        {
-            MutationScope mutation{selfMutation_};
-            applied = detail::apply_union(worldContext, catalog_, exposure, liveUnion_, error);
-        }
-        if (!applied) {
-            runtimeError_ = std::move(error);
-            const bool restoreFailed =
-                runtimeError_.find("未能验证据点资源联合已完整恢复") != std::string::npos;
-            const bool sequenceInvalid =
-                runtimeError_.find("联合序列验证失败") != std::string::npos;
-            if (restoreFailed) {
-                safetyDisabled_ = true;
-                const std::string safetyError =
-                    "资源联合回滚未能验证；本世界已禁用制作和建造共享。";
-                disable_operation(ResourceOperation::crafting, safetyError);
-                disable_operation(ResourceOperation::building, safetyError);
-            } else if (sequenceInvalid) {
-                safetyDisabled_ = true;
-                disable_operation(exposure.operation, runtimeError_);
-            }
-            snapshotDirty_.mark();
-            return false;
-        }
-
-        const auto elapsed =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
-                .count();
-        lastUnionMilliseconds_ = elapsed;
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: resource union opened in {:.3f} ms, operation={}, surface={}, "
-                "injected={}\n"),
-            elapsed, static_cast<int>(exposure.operation), static_cast<int>(exposure.surface),
-            liveUnion_.entry.has_value() ? liveUnion_.entry->injected.size() : 0);
-        runtimeError_.clear();
-        snapshotDirty_.mark();
-        return true;
-    }
-
-    [[nodiscard]] auto ensure_union(UObject* hint, const ResourceExposurePlan& exposure) -> bool {
-        remember_world_context(hint);
-        if (hint == nullptr || exposure.surface == ResourceConsumerSurface::none ||
-            !catalog_ready()) {
-            return false;
-        }
-        return apply_live_union(hint, exposure);
-    }
-
-    [[nodiscard]] auto restore_live_union(const std::string_view reason) -> bool {
-        if (!liveUnion_.active) {
-            return true;
-        }
-        const auto started = std::chrono::steady_clock::now();
-        std::string error;
-        bool restored{};
-        {
-            MutationScope mutation{selfMutation_};
-            restored = detail::restore_union(liveUnion_, error);
-        }
-        const auto elapsed =
-            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
-                .count();
-        const std::wstring wideReason{reason.begin(), reason.end()};
-        Output::send<LogLevel::Verbose>(
-            restored ? STR("PalworldEditor: resource union restored in {:.3f} ms ({})\n")
-                     : STR("PalworldEditor: resource union restore failed in {:.3f} ms ({})\n"),
-            elapsed, wideReason);
-        if (!restored) {
-            runtimeError_ = std::move(error);
-        }
-        snapshotDirty_.mark();
-        return restored;
-    }
-
-    auto restore_or_disable(const std::string_view reason) -> void {
-        if (restore_live_union(reason)) {
-            return;
-        }
-        safetyDisabled_ = true;
-        const std::string error = "资源联合未能完整恢复；本世界已禁用制作和建造共享。";
-        disable_operation(ResourceOperation::crafting, error);
-        disable_operation(ResourceOperation::building, error);
-    }
-
-    auto update_building_mode(UObject* builder) -> void {
-        bool inBuildingMode{};
-        if (!call_bool(builder, STR("IsInBuildingMode"), inBuildingMode)) {
-            runtimeError_ = "无法读取当前建造模式状态。";
-            snapshotDirty_.mark();
-            return;
-        }
-        const auto generation = runtime_.generation();
-        if (inBuildingMode) {
-            return;
-        }
-        const auto transition = sessions_.release(ResourceOperation::building, generation);
-        if (transition.kind == ForegroundTransitionKind::released) {
-            restore_or_disable("退出建造模式");
-        }
-    }
-
-    [[nodiscard]] auto ensure_exposure_before_original(UObject* context,
-                                                       const ResourceOperation operation) -> bool {
-        const auto generation = runtime_.generation();
-        if (!runtime_.can_extend(operation, generation)) {
-            return false;
-        }
-        remember_world_context(context);
-
-        const auto transition = sessions_.acquire(operation, generation);
-        if (transition.kind == ForegroundTransitionKind::none) {
-            return false;
-        }
-        if (!should_discover_catalog(transition.kind)) {
-            return transition.kind == ForegroundTransitionKind::refreshed && liveUnion_.active &&
-                   liveUnion_.generation == generation &&
-                   liveUnion_.exposure.operation == operation &&
-                   liveUnion_.exposure.targetBaseId.has_value();
-        }
-
-        if (liveUnion_.active && !restore_live_union("前台材料操作切换")) {
-            static_cast<void>(sessions_.release(operation, generation));
-            safetyDisabled_ = true;
-            const std::string error = "旧材料联合未能完整恢复；本世界已禁用制作和建造共享。";
-            disable_operation(ResourceOperation::crafting, error);
-            disable_operation(ResourceOperation::building, error);
-            return false;
-        }
-
-        const auto catalogStarted = std::chrono::steady_clock::now();
-        if (!discover_catalog_for_acquire(context)) {
-            static_cast<void>(sessions_.release(operation, generation));
-            return false;
-        }
-        const auto catalogElapsed = std::chrono::duration<double, std::milli>(
-                                        std::chrono::steady_clock::now() - catalogStarted)
-                                        .count();
-        if (generation != runtime_.generation()) {
-            static_cast<void>(sessions_.release(operation, generation));
-            return false;
-        }
-
-        std::string baseError;
-        const auto currentBase = detail::resolve_inside_base_id(context, catalog_, baseError);
-        static_cast<void>(currentBase_.observe(currentBase, generation));
-        const auto exposure = make_exposure_plan(operation, currentBase);
-        if (exposure.surface == ResourceConsumerSurface::none) {
-            static_cast<void>(sessions_.release(operation, generation));
-            runtimeError_ = baseError.empty() ? "无法确认当前据点，材料共享保持原版行为。"
-                                              : std::move(baseError);
-            snapshotDirty_.mark();
-            return false;
-        }
-        const auto unionStarted = std::chrono::steady_clock::now();
-        if (!ensure_union(context, exposure)) {
-            static_cast<void>(sessions_.release(operation, generation));
-            restore_or_disable("材料操作会话获取失败");
-            if (runtimeError_.empty()) {
-                runtimeError_ = "未能建立单一材料消费面；本次菜单保持原版行为。";
-            }
-            snapshotDirty_.mark();
-            return false;
-        }
-        const auto unionElapsed = std::chrono::duration<double, std::milli>(
-                                      std::chrono::steady_clock::now() - unionStarted)
-                                      .count();
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: material acquire operation={} catalog_ms={:.3f} union_ms={:.3f} "
-                "entries={}\n"),
-            operation_log_name(operation), catalogElapsed, unionElapsed,
-            liveUnion_.entry.has_value() ? 1 : 0);
-        return true;
-    }
-
-    [[nodiscard]] auto ensure_building_menu_before_original(UObject* context) -> bool {
-        const auto generation = runtime_.generation();
-        if (!runtime_.can_extend(ResourceOperation::building, generation)) {
-            return false;
-        }
-        remember_world_context(context);
-
-        const auto active = sessions_.active(generation);
-        if (active == ResourceOperation::building && !liveUnion_.active) {
-            static_cast<void>(sessions_.release(ResourceOperation::building, generation));
-        }
-        if (!liveUnion_.active || active != ResourceOperation::building) {
-            return ensure_exposure_before_original(context, ResourceOperation::building);
-        }
-
-        std::string error;
-        const auto observedBase = detail::resolve_inside_base_id(context, catalog_, error);
-        static_cast<void>(currentBase_.observe(observedBase, generation));
-        const auto action =
-            decide_building_menu_boundary(liveUnion_.active, liveUnion_.generation, generation,
-                                          liveUnion_.exposure, observedBase);
-        if (action == BuildingMenuBoundaryAction::reuse) {
-            return true;
-        }
-
-        static_cast<void>(sessions_.release(ResourceOperation::building, generation));
-        restore_or_disable("建筑菜单据点边界变化");
-        if (safetyDisabled_) {
-            return false;
-        }
-        return ensure_exposure_before_original(context, ResourceOperation::building);
-    }
-
-    [[nodiscard]] auto validate_exposure_before_original(UObject* context,
-                                                         const ResourceOperation operation)
-        -> bool {
-        const auto generation = runtime_.generation();
-        if (!runtime_.can_extend(operation, generation)) {
-            return false;
-        }
-        if (!sessions_.touch(operation, generation) || !liveUnion_.active ||
-            liveUnion_.generation != generation || liveUnion_.exposure.operation != operation) {
-            if (!ensure_exposure_before_original(context, operation)) {
-                return false;
-            }
-        }
-
-        std::string error;
-        const auto currentBase = detail::resolve_inside_base_id(context, catalog_, error);
-        static_cast<void>(currentBase_.observe(currentBase, generation));
-        if (!currentBase.has_value() || liveUnion_.exposure.targetBaseId != currentBase) {
-            if (error.empty()) {
-                error = "材料提交时所在据点与活动联合不一致。";
-            }
-        } else if (detail::validate_union(liveUnion_, error)) {
-            return true;
-        }
-
-        static_cast<void>(sessions_.release(operation, generation));
-        restore_or_disable("材料提交前验证失败");
-        if (!safetyDisabled_) {
-            disable_operation(operation, std::move(error));
-        }
-        snapshotDirty_.mark();
-        return false;
-    }
-
-    auto handle_touch(const ResourceOperation operation) -> void {
-        static_cast<void>(sessions_.touch(operation, runtime_.generation()));
-    }
-
-    auto handle_building_menu_open_complete(UObject* buildModel) -> void {
-        const auto generation = runtime_.generation();
-        const bool hasEntry = liveUnion_.entry.has_value();
-        const bool helperArray = hasEntry && liveUnion_.entry->helperArray;
-        if (!should_refresh_building_inventory(
-                sessions_.building_inventory_refresh_needed(generation), liveUnion_.active,
-                liveUnion_.generation, generation, liveUnion_.exposure, hasEntry, helperArray)) {
-            return;
-        }
-
-        std::string error;
-        bool notified{};
-        {
-            MutationScope mutation{selfMutation_};
-            notified = detail::notify_building_inventory_changed(
-                buildModel, resolve_world_context(buildModel), catalog_, liveUnion_, error);
-        }
-        if (!notified || !sessions_.complete_building_inventory_refresh(generation)) {
-            static_cast<void>(sessions_.release(ResourceOperation::building, generation));
-            restore_or_disable("建造库存更新通知失败");
-            if (!safetyDisabled_) {
-                disable_operation(
-                    ResourceOperation::building,
-                    error.empty() ? "建筑菜单 Setup 后无法刷新库存资格。" : std::move(error));
-            }
-            return;
-        }
-
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: building inventory eligibility refreshed once after Setup\n"));
-    }
-
-    auto handle_building_menu_closed() -> void {
-        const auto generation = runtime_.generation();
-        const auto transition = sessions_.release(ResourceOperation::building, generation);
-        if (transition.kind == ForegroundTransitionKind::released) {
-            restore_or_disable("关闭建筑菜单");
-        }
-    }
-
-    auto handle_crafting_widget_closed(UObject* widget) -> void {
-        const auto generation = runtime_.generation();
-        if (sessions_.active(generation) != ResourceOperation::crafting) {
-            return;
-        }
-        auto* parameter = read_object_property(widget, STR("Param"));
-        if (!is_convert_item_dispatch_parameter(object_name(parameter))) {
-            return;
-        }
-        const auto transition = sessions_.release(ResourceOperation::crafting, generation);
-        if (transition.kind == ForegroundTransitionKind::released) {
-            restore_or_disable("制作界面关闭");
-        }
-    }
-
     auto handle_structure_changed() -> void {
-        static_cast<void>(catalogState_.invalidate(runtime_.generation()));
-    }
-
-    auto handle_base_context(UFunction* function, UnrealScriptFunctionCallableContext& context,
-                             const bool entering) -> void {
-        auto* baseModel = read_object_parameter(function, context, STR("BaseCampModel"));
-        const auto baseId = detail::read_base_id(baseModel);
-        if (!baseId.has_value()) {
-            disable_operation(ResourceOperation::building,
-                              "据点进入/离开回调的 BaseCampModel.GetId 未返回有效 GUID。");
+        if (!runtime_.enabled() || safetyDisabled_) {
             return;
         }
-        const auto generation = runtime_.generation();
-        const bool changed = entering ? currentBase_.enter(*baseId, generation)
-                                      : currentBase_.exit(*baseId, generation);
-        if (!changed && entering) {
-            disable_operation(ResourceOperation::building,
-                              "当前据点回调与世界代次不一致，已停用建造共享。");
+        if (!unionLifecycle_.invalidate(runtime_.generation())) {
+            reconcileRequested_ = true;
         }
+        waitingForStructure_ = false;
+        reset_pending_work();
+        publish_capabilities();
+        snapshotDirty_.mark();
     }
 
     auto dispatch_hook(UFunction* function, const HookPhase phase, const HookSpec& spec,
@@ -719,39 +544,14 @@ private:
             case HookEvent::structureChanged:
                 handle_structure_changed();
                 break;
-            case HookEvent::acquire:
-                static_cast<void>(ensure_exposure_before_original(context.Context, spec.operation));
+            case HookEvent::ensurePersistentUnion:
+                handle_ensure_persistent_union(context.Context);
                 break;
-            case HookEvent::beginBuildingMenu:
-                static_cast<void>(ensure_building_menu_before_original(context.Context));
-                break;
-            case HookEvent::touch:
-                handle_touch(spec.operation);
-                break;
-            case HookEvent::validate:
-                static_cast<void>(
-                    validate_exposure_before_original(context.Context, spec.operation));
-                break;
-            case HookEvent::refreshBuilding:
-                handle_building_menu_open_complete(context.Context);
-                break;
-            case HookEvent::closeBuilding:
-                handle_building_menu_closed();
-                break;
-            case HookEvent::closeCrafting:
-                handle_crafting_widget_closed(context.Context);
-                break;
-            case HookEvent::updateBuildingMode:
-                update_building_mode(context.Context);
-                break;
-            case HookEvent::enterBase:
-                handle_base_context(function, context, true);
-                break;
-            case HookEvent::exitBase:
-                handle_base_context(function, context, false);
+            case HookEvent::validatePersistentUnion:
+                static_cast<void>(validate_persistent_union(spec.operation));
                 break;
         }
-        if (event != HookEvent::touch && event != HookEvent::structureChanged) {
+        if (event != HookEvent::structureChanged) {
             snapshotDirty_.mark();
         }
     }
@@ -905,6 +705,30 @@ private:
 
     auto publish_capabilities() -> void {
         auto capabilities = evaluate_capabilities(resolutions_);
+        const auto phase = unionLifecycle_.phase(runtime_.generation());
+        if (runtime_.enabled() && runtime_.accessible() && required_hooks_ready() &&
+            phase != PersistentUnionPhase::ready) {
+            std::string stageError;
+            switch (phase) {
+                case PersistentUnionPhase::off:
+                case PersistentUnionPhase::initializing:
+                    stageError = "持久资源联合正在初始化。";
+                    break;
+                case PersistentUnionPhase::reconciling:
+                    stageError = "持久资源联合正在校准。";
+                    break;
+                case PersistentUnionPhase::restoring:
+                    stageError = "持久资源联合正在恢复原版登记。";
+                    break;
+                case PersistentUnionPhase::failed:
+                    stageError = runtimeError_.empty() ? "持久资源联合已安全停用。" : runtimeError_;
+                    break;
+                case PersistentUnionPhase::ready:
+                    break;
+            }
+            capabilities[operation_index(ResourceOperation::crafting)] = {.error = stageError};
+            capabilities[operation_index(ResourceOperation::building)] = {.error = stageError};
+        }
         for (std::size_t index{}; index < capabilities.size(); ++index) {
             if (!worldDisabledErrors_[index].empty()) {
                 capabilities[index] = {.error = worldDisabledErrors_[index]};
@@ -934,15 +758,18 @@ private:
         next.baseCount = baseCount_;
         next.containerCount = containerCount_;
         next.pendingContainerCount = pendingContainerCount_;
-        next.foregroundOperation = sessions_.active(next.worldGeneration);
-        next.consumerSurface =
-            liveUnion_.active ? liveUnion_.exposure.surface : ResourceConsumerSurface::none;
-        next.currentBaseId = currentBase_.current(next.worldGeneration);
+        next.persistentPhase = unionLifecycle_.phase(next.worldGeneration);
+        next.appliedEdgeCount = unionLedger_.edges().size();
+        next.pendingEdgeCount = workPrepared_ ? (work_.removed.size() - removalIndex_) +
+                                                    (work_.added.size() - additionIndex_)
+                                              : 0;
+        next.consumerSurface = next.persistentPhase == PersistentUnionPhase::ready
+                                   ? ResourceConsumerSurface::guildBaseModules
+                                   : ResourceConsumerSurface::none;
         next.lastCatalogMilliseconds = lastCatalogMilliseconds_;
         next.lastSuccessfulCatalogMilliseconds = lastSuccessfulCatalogMilliseconds_;
         next.maximumCatalogMilliseconds = maximumCatalogMilliseconds_;
         next.catalogAttemptCount = catalogAttemptCount_;
-        next.lastUnionMilliseconds = lastUnionMilliseconds_;
         next.safetyDisabled = safetyDisabled_;
         for (std::size_t index{}; index < next.capabilities.size(); ++index) {
             next.capabilities[index] = runtime_.capability(static_cast<ResourceOperation>(index));
@@ -970,11 +797,16 @@ private:
     }
 
     RuntimeState runtime_;
-    OnDemandCatalogState catalogState_;
-    ForegroundMaterialSession sessions_;
-    CurrentBaseState currentBase_;
     detail::ResourceCatalogSnapshot catalog_;
-    detail::LiveUnion liveUnion_;
+    PersistentUnionLifecycle unionLifecycle_;
+    PersistentUnionLedger unionLedger_;
+    PersistentUnionPlan desiredPlan_;
+    PersistentUnionDiff work_;
+    std::size_t removalIndex_{};
+    std::size_t additionIndex_{};
+    bool workPrepared_{};
+    bool reconcileRequested_{};
+    bool waitingForStructure_{};
     std::vector<HookResolution> resolutions_{all_hook_resolutions(false)};
     std::vector<HookBinding> hooks_;
     Hook::GlobalCallbackId scriptPreCallbackId_{Hook::ERROR_ID};
@@ -991,7 +823,6 @@ private:
     double lastSuccessfulCatalogMilliseconds_{};
     double maximumCatalogMilliseconds_{};
     std::size_t catalogAttemptCount_{};
-    double lastUnionMilliseconds_{};
     bool selfMutation_{};
     bool safetyDisabled_{};
     SnapshotDirtyFlag snapshotDirty_;

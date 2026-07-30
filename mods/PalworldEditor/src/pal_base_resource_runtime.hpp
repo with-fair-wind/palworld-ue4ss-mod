@@ -3,9 +3,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
+#include <base_resource_sharing/persistent_union.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 
 namespace RC::Unreal {
@@ -51,10 +53,33 @@ struct LiveUnion {
     bool active{};
 };
 
+/** @brief 一次原生持久登记边操作的可验证结果。 */
+struct PersistentEdgeMutationResult {
+    /** @brief 原生调用可验证出的边变化。 */
+    PersistentEdgeMutation mutation{PersistentEdgeMutation::invalid};
+    /** @brief 失败或无法完整验证时的中文错误。 */
+    std::string error;
+
+    [[nodiscard]] explicit operator bool() const noexcept {
+        return mutation != PersistentEdgeMutation::invalid && error.empty();
+    }
+};
+
 [[nodiscard]] auto local_authority_ready(RC::Unreal::UObject* worldContext, std::string& error)
     -> bool;
-[[nodiscard]] auto discover_catalog(RC::Unreal::UObject* worldContext, std::uint64_t generation)
+[[nodiscard]] auto discover_catalog(RC::Unreal::UObject* worldContext, std::uint64_t generation,
+                                    std::span<const PersistentUnionEdge> appliedEdges = {})
     -> ResourceCatalogSnapshot;
+[[nodiscard]] auto persistent_modules(const ResourceCatalogSnapshot& catalog)
+    -> std::vector<PersistentStorageModule>;
+[[nodiscard]] auto apply_persistent_edge(RC::Unreal::UObject* worldContext,
+                                         const ResourceCatalogSnapshot& catalog,
+                                         const PersistentUnionEdge& edge)
+    -> PersistentEdgeMutationResult;
+[[nodiscard]] auto remove_persistent_edge(RC::Unreal::UObject* worldContext,
+                                          const ResourceCatalogSnapshot& catalog,
+                                          const PersistentUnionEdge& edge)
+    -> PersistentEdgeMutationResult;
 [[nodiscard]] auto read_base_id(RC::Unreal::UObject* baseModel) -> std::optional<GuidKey>;
 [[nodiscard]] auto resolve_inside_base_id(RC::Unreal::UObject* worldContext,
                                           const ResourceCatalogSnapshot& catalog,

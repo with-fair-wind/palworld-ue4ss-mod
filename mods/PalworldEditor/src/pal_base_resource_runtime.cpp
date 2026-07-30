@@ -580,7 +580,8 @@ auto resolve_inside_base_id(UObject* worldContext, const ResourceCatalogSnapshot
     return accepted;
 }
 
-auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
+auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
+                      const std::span<const PersistentUnionEdge> appliedEdges)
     -> ResourceCatalogSnapshot {
     ResourceCatalogSnapshot result{.generation = generation};
     std::string authorityError;
@@ -652,6 +653,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
 
         CatalogModule catalogModule{.baseId = to_key(baseId),
                                     .objectFullName = object_name(storageModule)};
+        std::set<GuidKey> moduleIds;
         FScriptArrayHelper_InContainer infos(containerInfos, storageModule);
         for (int32 index{}; index < infos.Num(); ++index) {
             FGuid containerId{};
@@ -667,17 +669,32 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation)
             }
             const CatalogContainer entry{.containerId = to_key(containerId),
                                          .ownerMapObjectId = to_key(ownerMapObjectId)};
-            if (catalogIds.insert(entry.containerId).second) {
-                ++result.registeredContainerCount;
+            const bool injectedByThisMod = std::ranges::any_of(appliedEdges, [&](const auto& edge) {
+                return edge.targetBaseId == catalogModule.baseId &&
+                       edge.targetModuleFullName == catalogModule.objectFullName &&
+                       edge.containerId == entry.containerId;
+            });
+            if (injectedByThisMod) {
+                continue;
+            }
+            if (moduleIds.insert(entry.containerId).second) {
+                const bool firstGlobalOccurrence = catalogIds.insert(entry.containerId).second;
+                if (firstGlobalOccurrence) {
+                    ++result.registeredContainerCount;
+                }
                 if (resolve_live_container(mapObjectManager, entry) == nullptr) {
-                    ++result.pendingContainerCount;
+                    if (firstGlobalOccurrence) {
+                        ++result.pendingContainerCount;
+                    }
                     continue;
                 }
                 catalogModule.containers.push_back(entry);
-                descriptors.push_back({.baseId = catalogModule.baseId,
-                                       .groupId = result.guildId,
-                                       .containerId = entry.containerId,
-                                       .kind = ContainerKind::normal});
+                if (firstGlobalOccurrence) {
+                    descriptors.push_back({.baseId = catalogModule.baseId,
+                                           .groupId = result.guildId,
+                                           .containerId = entry.containerId,
+                                           .kind = ContainerKind::normal});
+                }
             }
         }
         result.modules.push_back(std::move(catalogModule));
@@ -831,6 +848,216 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
                         std::string{sequence_status_text(validation.status)});
     }
     return true;
+}
+
+auto persistent_modules(const ResourceCatalogSnapshot& catalog)
+    -> std::vector<PersistentStorageModule> {
+    std::vector<PersistentStorageModule> result;
+    result.reserve(catalog.modules.size());
+    for (const auto& module : catalog.modules) {
+        PersistentStorageModule persistent{
+            .baseId = module.baseId,
+            .objectFullName = module.objectFullName,
+        };
+        persistent.containers.reserve(module.containers.size());
+        for (const auto& container : module.containers) {
+            persistent.containers.push_back({
+                .containerId = container.containerId,
+                .ownerMapObjectId = container.ownerMapObjectId,
+            });
+        }
+        result.push_back(std::move(persistent));
+    }
+    return result;
+}
+
+namespace {
+[[nodiscard]] auto persistent_edge_target(const ResourceCatalogSnapshot& catalog,
+                                          const PersistentUnionEdge& edge) -> const CatalogModule* {
+    const auto target = std::ranges::find_if(catalog.modules, [&](const auto& module) {
+        return module.baseId == edge.targetBaseId &&
+               module.objectFullName == edge.targetModuleFullName;
+    });
+    return target == catalog.modules.end() ? nullptr : &*target;
+}
+
+[[nodiscard]] auto persistent_edge_source(const ResourceCatalogSnapshot& catalog,
+                                          const PersistentUnionEdge& edge)
+    -> const CatalogContainer* {
+    const auto module =
+        std::ranges::find(catalog.modules, edge.sourceBaseId, &CatalogModule::baseId);
+    if (module == catalog.modules.end()) {
+        return nullptr;
+    }
+    const auto container = std::ranges::find_if(module->containers, [&](const auto& candidate) {
+        return candidate.containerId == edge.containerId &&
+               candidate.ownerMapObjectId == edge.ownerMapObjectId;
+    });
+    return container == module->containers.end() ? nullptr : &*container;
+}
+
+[[nodiscard]] auto module_property(UObject* module) -> FArrayProperty* {
+    return module == nullptr
+               ? nullptr
+               : CastField<FArrayProperty>(module->GetPropertyByNameInChain(STR("ContainerInfos")));
+}
+
+[[nodiscard]] auto count_container(const std::span<const GuidKey> sequence,
+                                   const GuidKey& containerId) -> std::size_t {
+    return static_cast<std::size_t>(std::ranges::count(sequence, containerId));
+}
+
+[[nodiscard]] auto call_concrete_model_event(UObject* module, const CharType* functionName,
+                                             UObject* concreteModel) -> bool {
+    auto* function = module == nullptr ? nullptr : module->GetFunctionByNameInChain(functionName);
+    auto* concreteProperty =
+        function == nullptr ? nullptr
+                            : CastField<FObjectPropertyBase>(
+                                  function->FindProperty(FName(STR("ConcreteModel"), FNAME_Find)));
+    if (function == nullptr || concreteProperty == nullptr || concreteModel == nullptr ||
+        !concreteProperty->HasAnyPropertyFlags(CPF_Parm)) {
+        return false;
+    }
+    FunctionParams params{function};
+    concreteProperty->SetObjectPropertyValue(
+        concreteProperty->ContainerPtrToValuePtr<void>(params.data()), concreteModel);
+    module->ProcessEvent(function, params.data());
+    return true;
+}
+
+[[nodiscard]] auto remove_container_id_fallback(UObject* module, FArrayProperty* property,
+                                                const GuidKey& containerId,
+                                                const std::span<const GuidKey> before) -> bool {
+    const auto position = std::ranges::find(before, containerId);
+    if (position == before.end()) {
+        return true;
+    }
+    const auto index = static_cast<int32>(std::distance(before.begin(), position));
+    if (!remove_array_indices(property, module, {index})) {
+        return false;
+    }
+    notify_array_changed(module, STR("OnRep_ContainerInfos"));
+    std::vector<GuidKey> after;
+    if (!read_module_sequence(module, property, after)) {
+        return false;
+    }
+    std::vector<GuidKey> expected{before.begin(), before.end()};
+    expected.erase(expected.begin() + index);
+    return after == expected;
+}
+}  // namespace
+
+auto apply_persistent_edge(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
+                           const PersistentUnionEdge& edge) -> PersistentEdgeMutationResult {
+    if (worldContext == nullptr || catalog.generation == 0 ||
+        persistent_edge_target(catalog, edge) == nullptr ||
+        persistent_edge_source(catalog, edge) == nullptr) {
+        return {.error = "持久联合登记边不属于当前安全目录。"};
+    }
+    auto* module = find_object_by_full_name(edge.targetModuleFullName);
+    auto* property = module_property(module);
+    std::vector<GuidKey> before;
+    if (!read_module_sequence(module, property, before)) {
+        return {.error = "持久联合登记前无法读取目标据点仓储序列。"};
+    }
+    const auto beforeCount = count_container(before, edge.containerId);
+    if (beforeCount == 1) {
+        return {.mutation = PersistentEdgeMutation::unchanged};
+    }
+    if (beforeCount != 0) {
+        return {.error = "持久联合登记前目标容器已重复。"};
+    }
+
+    UObject* mapObjectManager{};
+    if (!call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager)) {
+        return {.error = "持久联合登记时无法解析地图物体管理器。"};
+    }
+    auto* concreteModel = find_concrete_model(mapObjectManager, edge.ownerMapObjectId);
+    if (!call_concrete_model_event(module, STR("OnAvailableConcreteModel_ServerInternal"),
+                                   concreteModel)) {
+        return {.error = "无法调用原生仓储 ConcreteModel 登记接口。"};
+    }
+
+    std::vector<GuidKey> after;
+    if (!read_module_sequence(module, property, after)) {
+        static_cast<void>(call_concrete_model_event(
+            module, STR("OnNotAvailableConcreteModel_ServerInternal"), concreteModel));
+        return {.mutation = PersistentEdgeMutation::added,
+                .error = "持久联合登记后无法重读目标据点仓储序列，已请求原生回滚但无法验证。"};
+    }
+    const auto mutation =
+        classify_persistent_edge_add(beforeCount, count_container(after, edge.containerId));
+    auto expected = before;
+    expected.push_back(edge.containerId);
+    if (mutation != PersistentEdgeMutation::added || after != expected) {
+        static_cast<void>(call_concrete_model_event(
+            module, STR("OnNotAvailableConcreteModel_ServerInternal"), concreteModel));
+        std::vector<GuidKey> restored;
+        if (!read_module_sequence(module, property, restored) || restored != before) {
+            return {.mutation = PersistentEdgeMutation::added,
+                    .error = "原生仓储登记序列异常，且回滚验证失败。"};
+        }
+        return {.error = "原生仓储登记未产生精确的追加变化，已完整回滚。"};
+    }
+    return {.mutation = mutation};
+}
+
+auto remove_persistent_edge(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
+                            const PersistentUnionEdge& edge) -> PersistentEdgeMutationResult {
+    static_cast<void>(catalog);
+    if (edge.targetModuleFullName.empty() || !edge.containerId.valid()) {
+        return {.error = "持久联合注销边无效。"};
+    }
+    auto* module = find_object_by_full_name(edge.targetModuleFullName);
+    if (module == nullptr) {
+        return {.mutation = PersistentEdgeMutation::removed};
+    }
+    auto* property = module_property(module);
+    std::vector<GuidKey> before;
+    if (!read_module_sequence(module, property, before)) {
+        return {.error = "持久联合注销前无法读取目标据点仓储序列。"};
+    }
+    const auto beforeCount = count_container(before, edge.containerId);
+    if (beforeCount == 0) {
+        return {.mutation = PersistentEdgeMutation::unchanged};
+    }
+    if (beforeCount != 1) {
+        return {.error = "持久联合注销前目标容器出现次数异常。"};
+    }
+
+    UObject* mapObjectManager{};
+    UObject* concreteModel{};
+    if (worldContext != nullptr &&
+        call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager)) {
+        concreteModel = find_concrete_model(mapObjectManager, edge.ownerMapObjectId);
+    }
+    if (concreteModel == nullptr) {
+        if (!remove_container_id_fallback(module, property, edge.containerId, before)) {
+            return {.error = "ConcreteModel 已卸载，精确数组恢复也失败。"};
+        }
+        return {.mutation = PersistentEdgeMutation::removed};
+    }
+    if (!call_concrete_model_event(module, STR("OnNotAvailableConcreteModel_ServerInternal"),
+                                   concreteModel)) {
+        return {.error = "无法调用原生仓储 ConcreteModel 注销接口。"};
+    }
+
+    std::vector<GuidKey> after;
+    if (!read_module_sequence(module, property, after)) {
+        return {.error = "持久联合注销后无法重读目标据点仓储序列。"};
+    }
+    const auto mutation =
+        classify_persistent_edge_remove(beforeCount, count_container(after, edge.containerId));
+    if (mutation != PersistentEdgeMutation::removed) {
+        return {.error = "原生仓储注销未产生精确的 1→0 容器变化。"};
+    }
+    std::vector<GuidKey> expected = before;
+    std::erase(expected, edge.containerId);
+    if (after != expected) {
+        return {.mutation = PersistentEdgeMutation::removed,
+                .error = "原生仓储注销改变了非注入容器序列。"};
+    }
+    return {.mutation = mutation};
 }
 
 auto validate_union(const LiveUnion& liveUnion, std::string& error) -> bool {
