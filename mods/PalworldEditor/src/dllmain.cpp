@@ -68,7 +68,7 @@ public:
         register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
             UE4SS_ENABLE_IMGUI()
             auto* self = static_cast<PalworldEditorMod*>(mod);
-            ImGui::TextUnformatted("A floating 'PalworldEditor' window should be visible ->");
+            ImGui::TextUnformatted("应可见一个浮动的「PalworldEditor」窗口 ->");
             if (ImGui::Begin("PalworldEditor v1.6.10", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
                 render_give_items(self);
@@ -83,7 +83,7 @@ public:
                 ImGui::Separator();
                 render_pal_editor(self);
                 ImGui::Separator();
-                if (ImGui::Button("Discover")) {
+                if (ImGui::Button("发现对象")) {
                     self->want_discover_.store(true);
                 }
             }
@@ -895,11 +895,11 @@ private:
      * @warning 只在 GUI 线程调用。
      */
     static void render_give_items(PalworldEditorMod* self) {
-        ImGui::TextUnformatted("Give items");
-        ImGui::InputText("Item ID", self->item_buf_, sizeof(self->item_buf_));
-        ImGui::InputInt("Count", &self->count_input_);
+        ImGui::TextUnformatted("给予物品");
+        ImGui::InputText("物品 ID", self->item_buf_, sizeof(self->item_buf_));
+        ImGui::InputInt("数量", &self->count_input_);
         self->count_input_ = clamp(self->count_input_, 1, 9999);
-        if (ImGui::Button("Give")) {
+        if (ImGui::Button("给予")) {
             const std::lock_guard lock(self->req_mutex_);
             self->give_item_ = self->item_buf_;
             self->give_count_ = self->count_input_;
@@ -915,14 +915,15 @@ private:
      * @warning 只在 GUI 线程调用。
      */
     static void render_item_browser(PalworldEditorMod* self) {
-        if (ImGui::Button("Scan game items")) {
+        if (ImGui::Button("扫描游戏物品")) {
             self->want_scan_items_.store(true);
         }
         ImGui::SameLine();
         ImGui::InputText("##search", self->search_buf_, sizeof(self->search_buf_));
         {
             const std::lock_guard lock(self->inv_mutex_);
-            ImGui::TextDisabled("(%d items)", static_cast<int>(self->item_db_cache_.items.size()));
+            ImGui::TextDisabled("（%d 件物品）",
+                                static_cast<int>(self->item_db_cache_.items.size()));
         }
         ImGui::BeginChild("browser", ImVec2(380, 160), true);
         {
@@ -952,11 +953,11 @@ private:
      * @warning 只在 GUI 线程调用，不直接写 Unreal 属性。
      */
     static void render_inventory(PalworldEditorMod* self) {
-        if (ImGui::Button("Refresh inventory")) {
+        if (ImGui::Button("刷新背包")) {
             self->want_read_.store(true);
         }
         ImGui::SameLine();
-        ImGui::TextUnformatted("(click an item to select, then set count)");
+        ImGui::TextUnformatted("（点击物品选中，再设置数量）");
         {
             const std::lock_guard lock(self->inv_mutex_);
             ImGui::BeginChild("invlist", ImVec2(380, 220), true);
@@ -976,11 +977,11 @@ private:
                 self->selected_ < static_cast<int>(self->inv_cache_.size())) {
                 const auto& e = self->inv_cache_[self->selected_];
                 const auto itemLabel = item_catalog::item_label(self->item_db_cache_, e.item_id);
-                ImGui::Text("Selected: %s (slot %d, x%d)", itemLabel.c_str(),
+                ImGui::Text("已选中：%s（槽位 %d，×%d）", itemLabel.c_str(),
                             static_cast<int>(e.slot_index), e.count);
-                ImGui::InputInt("New count", &self->set_count_input_);
+                ImGui::InputInt("新数量", &self->set_count_input_);
                 self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
-                if (ImGui::Button("Set count")) {
+                if (ImGui::Button("设置数量")) {
                     const std::lock_guard lock2(self->req_mutex_);
                     self->modify_slot_ = e.slot_index;
                     self->modify_count_ = self->set_count_input_;

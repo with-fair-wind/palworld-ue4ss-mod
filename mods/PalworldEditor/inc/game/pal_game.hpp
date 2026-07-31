@@ -571,6 +571,9 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
     auto* function = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalUIUtility:GetItemName"));
     auto* worldContext = UObjectGlobals::FindFirstOf(kInventoryClassName);
+    int32 matchedClass{};
+    int32 passedFilter{};
+    int32 withId{};
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
         UClass* cls = obj->GetClassPrivate();
         if (cls == nullptr) {
@@ -580,6 +583,7 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
         if (name.find(L"PalStaticItemData") != 0) {
             return LoopAction::Continue;
         }
+        ++matchedClass;
         if (name.find(L"Table") != std::wstring::npos ||
             name.find(L"Asset") != std::wstring::npos ||
             name.find(L"Manager") != std::wstring::npos ||
@@ -588,6 +592,7 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
             name.find(L"RowName") != std::wstring::npos) {
             return LoopAction::Continue;
         }
+        ++passedFilter;
         FProperty* idProp = obj->GetPropertyByNameInChain(STR("ID"));
         if (idProp == nullptr) {
             return LoopAction::Continue;
@@ -595,6 +600,7 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
         if (FName* id = idProp->ContainerPtrToValuePtr<FName>(obj)) {
             const std::wstring w = id->ToString();
             if (!w.empty()) {
+                ++withId;
                 items.push_back(
                     {.id = text_encoding::to_utf8(w),
                      .localizedName = localized_item_name(utility, function, worldContext, *id)});
@@ -603,8 +609,9 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
         return LoopAction::Continue;
     });
     auto catalog = item_catalog::make_item_catalog(std::move(items));
-    Output::send<LogLevel::Warning>(STR("scan_all_items: found {} item definitions\n"),
-                                    static_cast<int32>(catalog.items.size()));
+    Output::send<LogLevel::Warning>(
+        STR("scan_all_items: classMatch={}, passedFilter={}, withId={}, catalog={}\n"),
+        matchedClass, passedFilter, withId, static_cast<int32>(catalog.items.size()));
     return catalog;
 }
 
