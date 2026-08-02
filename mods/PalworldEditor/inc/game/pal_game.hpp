@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
+#include <Unreal/Core/Containers/Map.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FString.hpp>
@@ -557,20 +558,127 @@ inline auto localized_item_name(UObject* utility, UFunction* function, UObject* 
 }
 
 /**
- * @brief 扫描当前已加载的物品定义并建立可搜索的本地化目录。
- * @return 已去重、排序并建立 Raw ID 标签索引的物品目录快照。
- * @details 扫描名称以 `PalStaticItemData` 开头的 UObject，过滤 Table、Asset、Manager、
- *          Struct、AndNum 和 RowName 辅助类型，从 `ID` 属性读取 Raw ID，并通过
- *          `PalUIUtility:GetItemName` 查询当前游戏语言名称。
- * @note 扫描范围只包含调用时已经加载的 UObject；名称解析失败时目录标签回退到 Raw ID。
+ * @brief 从当前世界的 PalItemIDManager 解析权威静态物品数据资产。
+ * @param[in] worldContext 非拥有世界上下文对象。
+ * @return PalStaticItemDataAsset 非拥有观察指针；任一反射入口尚未就绪时为空。
  * @warning 只能在游戏线程调用。
  */
-inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
+[[nodiscard]] inline auto get_static_item_data_asset(UObject* worldContext) -> UObject* {
+    if (worldContext == nullptr) {
+        return nullptr;
+    }
+    auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* function = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalUtility:GetItemIDManager"));
+    if (utility == nullptr || function == nullptr) {
+        return nullptr;
+    }
+
+    struct Params {
+        UObject* WorldContextObject{};
+        UObject* ReturnValue{};
+    } params{.WorldContextObject = worldContext};
+    utility->ProcessEvent(function, &params);
+    auto* manager = params.ReturnValue;
+    if (!is_valid(manager)) {
+        return nullptr;
+    }
+
+    auto* assetProperty = CastField<FObjectPropertyBase>(
+        manager->GetPropertyByNameInChain(STR("StaticItemDataAsset")));
+    auto** asset = assetProperty == nullptr
+                       ? nullptr
+                       : assetProperty->ContainerPtrToValuePtr<UObject*>(manager);
+    return asset != nullptr && is_valid(*asset) ? *asset : nullptr;
+}
+
+/**
+ * @brief 从 PalStaticItemDataAsset.StaticItemDataMap 枚举全部物品 Raw ID。
+ * @param[in] dataAsset 非拥有静态物品数据资产。
+ * @param[out] ids 收集到的 Raw ID；仅在成功解析权威 Map 时写入。
+ * @return 成功识别 TMap<FName, PalStaticItemDataBase*> 布局时为 true。
+ * @warning 只能在游戏线程调用，且不得跨帧保存 Map 地址。
+ */
+[[nodiscard]] inline auto collect_static_item_ids(UObject* dataAsset, std::vector<FName>& ids)
+    -> bool {
+    auto* mapProperty = dataAsset == nullptr
+                            ? nullptr
+                            : CastField<FMapProperty>(
+                                  dataAsset->GetPropertyByNameInChain(STR("StaticItemDataMap")));
+    auto* keyProperty =
+        mapProperty == nullptr ? nullptr : CastField<FNameProperty>(mapProperty->GetKeyProp());
+    auto* valueProperty = mapProperty == nullptr
+                              ? nullptr
+                              : CastField<FObjectPropertyBase>(mapProperty->GetValueProp());
+    auto* map = mapProperty == nullptr ? nullptr
+                                       : mapProperty->ContainerPtrToValuePtr<FScriptMap>(dataAsset);
+    if (mapProperty == nullptr || keyProperty == nullptr || valueProperty == nullptr ||
+        map == nullptr) {
+        return false;
+    }
+
+    const auto layout =
+        FScriptMap::GetScriptLayout(keyProperty->GetSize(), keyProperty->GetMinAlignment(),
+                                    valueProperty->GetSize(), valueProperty->GetMinAlignment());
+    std::vector<FName> discovered;
+    discovered.reserve(static_cast<std::size_t>(map->Num()));
+    for (int32 index{}; index < map->GetMaxIndex(); ++index) {
+        if (!map->IsValidIndex(index)) {
+            continue;
+        }
+        auto* entry = map->GetData(index, layout);
+        auto* id = keyProperty->ContainerPtrToValuePtr<FName>(entry);
+        if (id != nullptr && !id->ToString().empty()) {
+            discovered.push_back(*id);
+        }
+    }
+    if (discovered.empty()) {
+        return false;
+    }
+    ids = std::move(discovered);
+    return true;
+}
+
+/** @brief 一次物品目录扫描的纯值结果和数据来源状态。 */
+struct ItemCatalogScanResult {
+    item_catalog::ItemCatalogSnapshot catalog;
+    bool usedStaticItemDataMap{};
+};
+
+/**
+ * @brief 扫描物品主数据并建立可搜索的本地化目录。
+ * @return 已去重、排序并建立 Raw ID 标签索引的物品目录快照。
+ * @details 优先从 PalItemIDManager 到 StaticItemDataAsset 再到 StaticItemDataMap
+ *          枚举权威 Raw ID。仅当世界主数据尚未就绪时，才回退扫描当前已加载的
+ *          PalStaticItemData UObject。
+ * @note 名称解析失败时目录标签回退到 Raw ID；回退目录仍可能不完整。
+ * @warning 只能在游戏线程调用。
+ */
+inline auto scan_all_items() -> ItemCatalogScanResult {
     std::vector<item_catalog::ItemOption> items;
     auto* utility = get_ui_utility();
     auto* function = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalUIUtility:GetItemName"));
     auto* worldContext = UObjectGlobals::FindFirstOf(kInventoryClassName);
+
+    std::vector<FName> ids;
+    const bool usedMasterData =
+        collect_static_item_ids(get_static_item_data_asset(worldContext), ids);
+    if (usedMasterData) {
+        items.reserve(ids.size());
+        for (const auto& id : ids) {
+            items.push_back(
+                {.id = text_encoding::to_utf8(id.ToString()),
+                 .localizedName = localized_item_name(utility, function, worldContext, id)});
+        }
+        auto catalog = item_catalog::make_item_catalog(std::move(items));
+        Output::send<LogLevel::Warning>(
+            STR("scan_all_items: source=StaticItemDataMap, mapEntries={}, catalog={}\n"),
+            static_cast<int32>(ids.size()), static_cast<int32>(catalog.items.size()));
+        return {.catalog = std::move(catalog), .usedStaticItemDataMap = true};
+    }
+
     int32 matchedClass{};
     int32 passedFilter{};
     int32 withId{};
@@ -593,16 +701,16 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
             return LoopAction::Continue;
         }
         ++passedFilter;
-        FProperty* idProp = obj->GetPropertyByNameInChain(STR("ID"));
-        if (idProp == nullptr) {
+        FProperty* idProperty = obj->GetPropertyByNameInChain(STR("ID"));
+        if (idProperty == nullptr) {
             return LoopAction::Continue;
         }
-        if (FName* id = idProp->ContainerPtrToValuePtr<FName>(obj)) {
-            const std::wstring w = id->ToString();
-            if (!w.empty()) {
+        if (FName* id = idProperty->ContainerPtrToValuePtr<FName>(obj)) {
+            const std::wstring rawId = id->ToString();
+            if (!rawId.empty()) {
                 ++withId;
                 items.push_back(
-                    {.id = text_encoding::to_utf8(w),
+                    {.id = text_encoding::to_utf8(rawId),
                      .localizedName = localized_item_name(utility, function, worldContext, *id)});
             }
         }
@@ -610,9 +718,10 @@ inline auto scan_all_items() -> item_catalog::ItemCatalogSnapshot {
     });
     auto catalog = item_catalog::make_item_catalog(std::move(items));
     Output::send<LogLevel::Warning>(
-        STR("scan_all_items: classMatch={}, passedFilter={}, withId={}, catalog={}\n"),
+        STR("scan_all_items: source=loaded UObject fallback, classMatch={}, passedFilter={}, "
+            "withId={}, catalog={}\n"),
         matchedClass, passedFilter, withId, static_cast<int32>(catalog.items.size()));
-    return catalog;
+    return {.catalog = std::move(catalog), .usedStaticItemDataMap = false};
 }
 
 /**

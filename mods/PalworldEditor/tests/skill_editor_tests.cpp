@@ -566,6 +566,33 @@ void test_item_catalog_labels_and_search() {
     CHECK(!item_catalog::matches_item(localized, "木材"));
 }
 
+void test_item_catalog_scan_scheduler_is_bounded_and_world_scoped() {
+    item_catalog::ItemCatalogScanScheduler scheduler;
+    scheduler.begin_world(7);
+    CHECK(scheduler.advance(0.0F, 7, true));
+    CHECK(scheduler.complete(7, false));
+    CHECK(!scheduler.advance(1.0F, 7, true));
+    CHECK(scheduler.advance(1.0F, 7, true));
+    CHECK(scheduler.complete(7, true));
+    CHECK(scheduler.authoritative_catalog_ready());
+    CHECK(!scheduler.advance(10.0F, 7, true));
+
+    scheduler.begin_world(8);
+    CHECK(!scheduler.advance(10.0F, 7, true));
+    CHECK(scheduler.advance(0.0F, 8, true));
+    CHECK(scheduler.complete(8, false));
+    for (std::uint8_t attempt{1}; attempt < scheduler.maximumAttempts; ++attempt) {
+        CHECK(scheduler.advance(scheduler.retryDelaySeconds, 8, true));
+        CHECK(scheduler.complete(8, false));
+    }
+    CHECK(!scheduler.advance(60.0F, 8, true));
+
+    scheduler.request(8);
+    CHECK(scheduler.advance(0.0F, 8, true));
+    scheduler.cancel();
+    CHECK(!scheduler.advance(60.0F, 8, true));
+}
+
 void test_item_catalog_deduplicates_indexes_and_sorts() {
     auto catalog = item_catalog::make_item_catalog({
         {.id = "Wood", .localizedName = "Zulu"},
@@ -1354,6 +1381,7 @@ auto main() -> int {
     test_catalog_refresh_scheduler_defers_unsafe_runtime_queries();
     test_catalog_refresh_scheduler_never_bypasses_runtime_gate();
     test_item_catalog_labels_and_search();
+    test_item_catalog_scan_scheduler_is_bounded_and_world_scoped();
     test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();
     test_passive_add_remove_and_replace_reread_state();

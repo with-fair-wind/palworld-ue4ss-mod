@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include <base_resource_sharing/resource_pool.hpp>
+#include <base_resource_sharing/persistent_union.hpp>
 
 namespace base_resource_sharing {
 enum class HookEvent : std::uint8_t {
@@ -20,13 +20,50 @@ enum class HookPhase : std::uint8_t { pre, post };
 enum class HookRequirement : std::uint8_t { optional, required };
 enum class ResourceHookBackend : std::uint8_t { nativeFunction, scriptFunction, unsupported };
 
+/** @brief 标识结构 Hook 的语义来源，避免把无变化复制通知当成容器变更。 */
+enum class StructureChangeSource : std::uint8_t {
+    none,
+    concreteModelAvailable,
+    concreteModelUnavailable,
+    replicatedModuleArray,
+};
+
 struct HookSpec {
     ResourceOperation operation;
     HookEvent preEvent{HookEvent::none};
     HookEvent postEvent{HookEvent::none};
     HookRequirement requirement;
     std::string_view path;
+    StructureChangeSource structureSource{StructureChangeSource::none};
 };
+
+/**
+ * @brief 判断结构 Hook 是否应唤醒持久联合目录。
+ * @details 具体容器事件只在已知登记状态将发生变化时有效。稳定状态无法安全解析参数时
+ *          fail-closed；仅初始化明确等待结构时允许该真实结构通知唤醒一次发现。
+ *          ModuleArray 的复制回调同样只用于唤醒初始化期间明确等待结构的协调器。
+ */
+[[nodiscard]] constexpr auto should_forward_structure_change(
+    const StructureChangeSource source, const bool waitingForStructure,
+    const ConcreteModelRegistrationMembership membership =
+        ConcreteModelRegistrationMembership::unknown) noexcept -> bool {
+    switch (source) {
+        case StructureChangeSource::concreteModelAvailable:
+            return membership == ConcreteModelRegistrationMembership::absent ||
+                   membership == ConcreteModelRegistrationMembership::untrackedModule ||
+                   (waitingForStructure &&
+                    membership == ConcreteModelRegistrationMembership::unknown);
+        case StructureChangeSource::concreteModelUnavailable:
+            return membership == ConcreteModelRegistrationMembership::present ||
+                   (waitingForStructure &&
+                    membership == ConcreteModelRegistrationMembership::unknown);
+        case StructureChangeSource::replicatedModuleArray:
+            return waitingForStructure;
+        case StructureChangeSource::none:
+            return false;
+    }
+    return false;
+}
 
 struct HookResolution {
     HookSpec spec;
@@ -34,16 +71,19 @@ struct HookResolution {
 };
 
 inline constexpr std::array kPalworld101HookManifest{
-    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::structureChanged,
+    HookSpec{ResourceOperation::building, HookEvent::structureChanged, HookEvent::none,
              HookRequirement::required,
              "/Script/Pal.PalBaseCampModuleItemStorage:"
-             "OnAvailableConcreteModel_ServerInternal"},
-    HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::structureChanged,
+             "OnAvailableConcreteModel_ServerInternal",
+             StructureChangeSource::concreteModelAvailable},
+    HookSpec{ResourceOperation::building, HookEvent::structureChanged, HookEvent::none,
              HookRequirement::required,
              "/Script/Pal.PalBaseCampModuleItemStorage:"
-             "OnNotAvailableConcreteModel_ServerInternal"},
+             "OnNotAvailableConcreteModel_ServerInternal",
+             StructureChangeSource::concreteModelUnavailable},
     HookSpec{ResourceOperation::building, HookEvent::none, HookEvent::structureChanged,
-             HookRequirement::required, "/Script/Pal.PalBaseCampModel:OnRep_ModuleArray"},
+             HookRequirement::required, "/Script/Pal.PalBaseCampModel:OnRep_ModuleArray",
+             StructureChangeSource::replicatedModuleArray},
     HookSpec{ResourceOperation::building, HookEvent::ensurePersistentUnion, HookEvent::none,
              HookRequirement::optional, "/Script/Pal.PalUIBuildModel:OnOpenMenu"},
     HookSpec{ResourceOperation::building, HookEvent::validatePersistentUnion, HookEvent::none,

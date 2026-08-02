@@ -250,11 +250,20 @@ public:
             inv_cache_ = std::move(fresh);
         }
 
-        // Scan items
+        // Scan items. StaticItemDataMap may become ready after LoadMap, so fallback scans retry
+        // with a bounded pure-value scheduler instead of probing UObject state every frame.
+        const auto worldGeneration = worldSession_.generation();
         if (want_scan_items_.exchange(false)) {
-            auto fresh = pal_game::scan_all_items();
+            itemCatalogScanScheduler_.request(worldGeneration);
+        }
+        if (itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
+            auto result = pal_game::scan_all_items();
+            static_cast<void>(
+                itemCatalogScanScheduler_.complete(worldGeneration, result.usedStaticItemDataMap));
             const std::lock_guard lock(inv_mutex_);
-            item_db_cache_ = std::move(fresh);
+            if (result.usedStaticItemDataMap || item_db_cache_.items.empty()) {
+                item_db_cache_ = std::move(result.catalog);
+            }
         }
 
         std::optional<skill_editor::WorldBoundRequest> selectionRequest;
@@ -697,6 +706,7 @@ private:
         want_read_.store(false);
         want_discover_.store(false);
         want_scan_items_.store(false);
+        itemCatalogScanScheduler_.cancel();
         wantRefreshSkillCatalog_.store(false);
         wantProbeObject_.store(false);
         grappleRetryRequested_.store(false, std::memory_order_release);
@@ -748,6 +758,7 @@ private:
         }
         worldSession_.finish_transition();
         baseResourceBridge_.on_world_ready(worldSession_.generation());
+        itemCatalogScanScheduler_.begin_world(worldSession_.generation());
         want_read_.store(true);
         want_scan_items_.store(true);
         wantRefreshSkillCatalog_.store(true);
@@ -1697,6 +1708,8 @@ private:
     std::atomic<bool> want_discover_{false};
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
     std::atomic<bool> want_scan_items_{false};
+    /** @brief 主数据未就绪时按世界进行有界低频补全，不访问 Unreal。 */
+    item_catalog::ItemCatalogScanScheduler itemCatalogScanScheduler_;
     /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
     std::atomic<bool> wantProbeObject_{false};
 

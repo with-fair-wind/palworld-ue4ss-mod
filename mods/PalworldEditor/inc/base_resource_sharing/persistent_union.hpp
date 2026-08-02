@@ -23,6 +23,130 @@ struct PersistentStorageContainer {
     auto operator<=>(const PersistentStorageContainer&) const = default;
 };
 
+/** @brief 可跨帧保存的仓储模块 ConcreteModel 登记键，不持有 Unreal 对象。 */
+struct ConcreteModelRegistrationKey {
+    std::wstring moduleFullName;
+    GuidKey ownerMapObjectId;
+
+    auto operator<=>(const ConcreteModelRegistrationKey&) const = default;
+};
+
+/** @brief Hook 参数对应的 ConcreteModel 当前是否已登记到该仓储模块。 */
+enum class ConcreteModelRegistrationMembership : std::uint8_t {
+    unknown,
+    untrackedModule,
+    ignoredModule,
+    absent,
+    present,
+};
+
+/**
+ * @brief 供高频结构 Hook 进行无分配二分查询的纯值登记索引。
+ * @details 目录发现时整体重建；持久边完成验证后增量更新。Hook 查询不遍历模块或容器。
+ */
+class ConcreteModelRegistrationIndex {
+public:
+    auto reset(const std::span<const std::wstring> moduleNames,
+               const std::span<const std::wstring> ignoredModuleNames,
+               const std::span<const ConcreteModelRegistrationKey> registrations,
+               const std::span<const ConcreteModelRegistrationKey> ignoredRegistrations = {})
+        -> void {
+        moduleNames_.assign(moduleNames.begin(), moduleNames.end());
+        std::ranges::sort(moduleNames_);
+        const auto duplicateModule = std::ranges::unique(moduleNames_);
+        moduleNames_.erase(duplicateModule.begin(), duplicateModule.end());
+
+        ignoredModuleNames_.assign(ignoredModuleNames.begin(), ignoredModuleNames.end());
+        std::ranges::sort(ignoredModuleNames_);
+        const auto duplicateIgnoredModule = std::ranges::unique(ignoredModuleNames_);
+        ignoredModuleNames_.erase(duplicateIgnoredModule.begin(), duplicateIgnoredModule.end());
+
+        registrations_.assign(registrations.begin(), registrations.end());
+        std::erase_if(registrations_, [&](const auto& registration) {
+            return registration.moduleFullName.empty() || !registration.ownerMapObjectId.valid() ||
+                   !std::ranges::binary_search(moduleNames_, registration.moduleFullName);
+        });
+        std::ranges::sort(registrations_);
+        const auto duplicateRegistration = std::ranges::unique(registrations_);
+        registrations_.erase(duplicateRegistration.begin(), duplicateRegistration.end());
+
+        ignoredRegistrations_.assign(ignoredRegistrations.begin(), ignoredRegistrations.end());
+        std::erase_if(ignoredRegistrations_, [&](const auto& registration) {
+            return registration.moduleFullName.empty() || !registration.ownerMapObjectId.valid() ||
+                   !std::ranges::binary_search(moduleNames_, registration.moduleFullName);
+        });
+        std::ranges::sort(ignoredRegistrations_);
+        const auto duplicateIgnoredRegistration = std::ranges::unique(ignoredRegistrations_);
+        ignoredRegistrations_.erase(duplicateIgnoredRegistration.begin(),
+                                    duplicateIgnoredRegistration.end());
+    }
+
+    [[nodiscard]] auto membership(const ConcreteModelRegistrationKey& key) const noexcept
+        -> ConcreteModelRegistrationMembership {
+        if (key.moduleFullName.empty() || !key.ownerMapObjectId.valid() ||
+            (std::ranges::binary_search(moduleNames_, key.moduleFullName) &&
+             std::ranges::binary_search(ignoredModuleNames_, key.moduleFullName))) {
+            return ConcreteModelRegistrationMembership::unknown;
+        }
+        if (std::ranges::binary_search(ignoredModuleNames_, key.moduleFullName)) {
+            return ConcreteModelRegistrationMembership::ignoredModule;
+        }
+        if (!std::ranges::binary_search(moduleNames_, key.moduleFullName)) {
+            return ConcreteModelRegistrationMembership::untrackedModule;
+        }
+        const bool registered = std::ranges::binary_search(registrations_, key);
+        const bool ignored = std::ranges::binary_search(ignoredRegistrations_, key);
+        if (registered && ignored) {
+            return ConcreteModelRegistrationMembership::unknown;
+        }
+        if (ignored) {
+            return ConcreteModelRegistrationMembership::ignoredModule;
+        }
+        return registered ? ConcreteModelRegistrationMembership::present
+                          : ConcreteModelRegistrationMembership::absent;
+    }
+
+    [[nodiscard]] auto record(const ConcreteModelRegistrationKey& key) -> bool {
+        const auto current = membership(key);
+        if (current != ConcreteModelRegistrationMembership::absent &&
+            current != ConcreteModelRegistrationMembership::present) {
+            return false;
+        }
+        const auto position = std::ranges::lower_bound(registrations_, key);
+        if (position != registrations_.end() && *position == key) {
+            return false;
+        }
+        registrations_.insert(position, key);
+        return true;
+    }
+
+    [[nodiscard]] auto erase(const ConcreteModelRegistrationKey& key) -> bool {
+        const auto position = std::ranges::lower_bound(registrations_, key);
+        if (position == registrations_.end() || *position != key) {
+            return false;
+        }
+        registrations_.erase(position);
+        return true;
+    }
+
+    auto clear() noexcept -> void {
+        moduleNames_.clear();
+        ignoredModuleNames_.clear();
+        registrations_.clear();
+        ignoredRegistrations_.clear();
+    }
+
+    [[nodiscard]] auto size() const noexcept -> std::size_t {
+        return registrations_.size();
+    }
+
+private:
+    std::vector<std::wstring> moduleNames_;
+    std::vector<std::wstring> ignoredModuleNames_;
+    std::vector<ConcreteModelRegistrationKey> registrations_;
+    std::vector<ConcreteModelRegistrationKey> ignoredRegistrations_;
+};
+
 /** @brief 一个据点的仓储模块及其原生普通箱子。 */
 struct PersistentStorageModule {
     /** @brief 仓储模块所属据点 GUID。 */
@@ -202,6 +326,31 @@ namespace detail {
     return result;
 }
 
+/**
+ * @brief 找出账本声称存在、但在已安全读取的目标模块中已经不存在的持久边。
+ * @details 未加载或未发现目标模块的边保持在账本中，避免丢失后续恢复责任。
+ */
+[[nodiscard]] inline auto missing_observed_persistent_edges(
+    const std::span<const PersistentUnionEdge> applied,
+    const std::span<const PersistentUnionEdge> observed,
+    const std::span<const PersistentStorageModule> discoveredModules)
+    -> std::vector<PersistentUnionEdge> {
+    const auto normalizedApplied = detail::normalized_edges(applied);
+    const auto normalizedObserved = detail::normalized_edges(observed);
+    std::vector<PersistentUnionEdge> result;
+    for (const auto& edge : normalizedApplied) {
+        const bool targetDiscovered =
+            std::ranges::any_of(discoveredModules, [&](const auto& module) {
+                return module.baseId == edge.targetBaseId &&
+                       module.objectFullName == edge.targetModuleFullName;
+            });
+        if (targetDiscovered && !std::ranges::binary_search(normalizedObserved, edge)) {
+            result.push_back(edge);
+        }
+    }
+    return result;
+}
+
 /** @brief 一个世界代次内持久联合的生命周期阶段。 */
 enum class PersistentUnionPhase : std::uint8_t {
     off,
@@ -211,6 +360,31 @@ enum class PersistentUnionPhase : std::uint8_t {
     restoring,
     failed,
 };
+
+/** @brief 收到仓储结构通知后，持久联合协调器应采取的合并动作。 */
+enum class PersistentStructureChangeAction : std::uint8_t {
+    ignore,
+    startReconcile,
+    queueFollowUp,
+};
+
+/**
+ * @brief 将高频或重入的仓储结构通知合并为至多一次后续校准。
+ * @details 就绪状态开始一次新校准；初始化或校准中的通知不得清空当前差量，只排队一次
+ *          后续校准；关闭、恢复和失败状态不接受新的校准工作。
+ */
+[[nodiscard]] constexpr auto structure_change_action(const PersistentUnionPhase phase) noexcept
+    -> PersistentStructureChangeAction {
+    switch (phase) {
+        case PersistentUnionPhase::ready:
+            return PersistentStructureChangeAction::startReconcile;
+        case PersistentUnionPhase::initializing:
+        case PersistentUnionPhase::reconciling:
+            return PersistentStructureChangeAction::queueFollowUp;
+        default:
+            return PersistentStructureChangeAction::ignore;
+    }
+}
 
 /** @brief 不保存 Unreal 对象的持久联合生命周期状态机。 */
 class PersistentUnionLifecycle {

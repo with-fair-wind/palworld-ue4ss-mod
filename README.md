@@ -90,9 +90,9 @@ cmake --build --preset ninja-msvc-x64 --target tidy-check
 
 ### 物品编辑
 - **Give items**：输入物品 ID（如 `PalSphere_Tera`）+ 数量 → Give。
-- **Item browser**：进入游戏后会自动扫描一次当前已加载的物品定义与当前语言名称；也可点
+- **Item browser**：进入游戏后会从 `StaticItemDataMap` 自动扫描完整 Raw ID 与当前语言名称；也可点
   "Scan game items" 重新扫描。列表显示 `名称 [RawId]`，支持按名称或 ID 搜索；点击后只把 Raw ID
-  填入 Give 输入框。
+  填入 Give 输入框。主数据尚未就绪时会暂时回退到已加载物品定义，并以 2 秒间隔有界重试；完整目录成功后立即停止。
 - **Refresh inventory** → 以 `名称 [RawId] ×数量` 列出当前背包 → 选中 → Set count 修改数量。
 
 ### 帕鲁主动/被动技能
@@ -160,8 +160,11 @@ mod 卸载，手动刷新只重试新增和先前失败的技能。中文名与 
 `OnAvailableConcreteModel_ServerInternal`，登记其他据点已加载的普通箱子，从而建立世界代次内持续存在的
 公会仓储图。制作、建筑菜单、放置预览、连续建造和真实扣除共享同一组原生关系；菜单关闭不再拆装联合。
 
-目录只在启用、世界就绪或以下结构事件发生后校准：仓储 ConcreteModel 可用/不可用，以及据点
-`OnRep_ModuleArray`。结构回调只合并一个失效标记，下一次 EngineTick 才重新发现目录和计算差量。新增/删除
+目录只在启用、世界就绪或仓储 ConcreteModel 的有效可用性变化后校准；据点 `OnRep_ModuleArray`
+仅在初始化明确等待仓储结构时用于唤醒，稳定状态下的周期性无变化复制会被忽略。ConcreteModel 的 pre-hook
+只读取当帧参数身份并查询排序后的纯值登记索引，不遍历仓储数组；已登记边的重复可用通知、已缺失边的重复不可用
+通知、非普通仓储和其他公会模块均被忽略，稳定状态无法安全解析参数时按不触发校准处理。结构回调只合并一个
+失效标记，下一次 EngineTick 才重新发现目录和计算差量。新增/删除
 登记按每帧最多 4 条、500 微秒软预算执行，并在每次 `ProcessEvent` 后检查时间；“就绪”状态只做常量时间阶段
 判断，不存在 8 秒校准、定时扫描、后台线程或逐帧容器遍历。可选的 `OnOpenMenu` / `Initialize` Hook 只在
 初始化尚未取得安全上下文时触发一次重试；`RequestBuild_ToServer` / `StartProduction` 只检查世界代次和
@@ -170,7 +173,9 @@ mod 卸载，手动刷新只重试新增和先前失败的技能。中文名与 
 每条由本 Mod 新增的登记边都保存目标据点、来源据点、容器 ID、ConcreteModel 所有者 ID 和目标模块对象全名。
 写入前后必须验证容器出现次数为精确的 0→1；异常会立即调用原生注销接口回滚，回滚不能验证时把可能新增的边
 纳入账本并在本世界安全停用。注销必须验证 1→0 且不得改变其他容器顺序；ConcreteModel 已卸载时只删除账本中
-对应的精确数组项。重新校准目录前会先剔除账本中的目标边，避免把本 Mod 的注入结果误判为原生来源并递归扩张。
+对应的精确数组项。重新校准时会同时读取账本边在已发现目标模块中的实际存在状态：实物边丢失时先移除陈旧账本
+再按期望图补回，目标模块尚未加载时则保留恢复责任；随后才剔除本 Mod 的注入结果，避免误判为原生来源并递归
+扩张。没有新增或删除差量的校准不会打印 `persistent storage graph prepared` 日志。
 
 暂未加载的普通箱子不会阻塞已加载部分；不可用事件会删除对应跨据点边，可用事件会重新加入。跨帧只持有 GUID、
 对象全名、纯值计划和账本，不持有 `UObject*` 或 Unreal 数组地址。此功能只处理制作与建造材料，不共享食物箱、
@@ -180,10 +185,10 @@ BlueprintResearch 或其他修改相同仓储登记/材料路径的 mod 同时�
 
 ## 物品 ID
 
-浏览器通过 UE4SS 运行时读取已经加载的 `PalStaticItemData*` UObject 的 `ID`，并调用
-`PalUIUtility:GetItemName` 获取游戏当前语言的名称，不再维护静态物品表，也不需要解包游戏资源。
-游戏语言为中文时，物品浏览器和背包显示 `中文名 [RawId]`；若名称或目录尚不可用则回退为 Raw ID。
-扫描范围取决于游戏当时已经加载的物品定义；仍可在 Give 输入框中手动输入 Bare ID（无前缀）。
+浏览器通过 `PalUtility:GetItemIDManager` 获取当前世界的物品管理器，并枚举
+`PalStaticItemDataAsset.StaticItemDataMap` 的全部键作为 Raw ID；主数据尚未就绪时才回退读取已经加载的
+`PalStaticItemData*` UObject。名称继续由 `PalUIUtility:GetItemName` 按游戏当前语言解析，不维护静态物品表，
+也不需要解包游戏资源。若名称或目录尚不可用则回退为 Raw ID；Give 输入框仍支持手动输入 Bare ID（无前缀）。
 
 ## 目录结构
 

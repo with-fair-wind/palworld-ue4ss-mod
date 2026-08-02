@@ -35,6 +35,14 @@ struct ResourceCatalogSnapshot {
     std::size_t pendingContainerCount{};
     ResourceUnionPlan plan;
     std::vector<CatalogModule> modules;
+    /** @brief 已发现但不属于本地公会、结构 Hook 必须忽略的仓储模块。 */
+    std::vector<std::wstring> ignoredModuleNames;
+    /** @brief 本次目录读取时目标模块中实际存在的全部原生与注入登记。 */
+    std::vector<ConcreteModelRegistrationKey> registrations;
+    /** @brief 同公会模块中存在、但类型不是普通仓储且结构 Hook 必须忽略的登记。 */
+    std::vector<ConcreteModelRegistrationKey> ignoredRegistrations;
+    /** @brief 账本边中本次目录读取仍确认实际存在的子集。 */
+    std::vector<PersistentUnionEdge> observedAppliedEdges;
     std::string error;
 };
 

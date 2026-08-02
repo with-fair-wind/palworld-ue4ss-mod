@@ -129,8 +129,10 @@ ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的�
 `scripts/generate-active-skill-definitions.ps1` 从 Palworld 1.0 UHT dump 生成的数值/Raw ID 表。
 主动和被动名称由 `PalUIUtility` 按游戏当前语言查询，`PalPlayerInventoryData` 只作为当帧本地化世界上下文；
 上下文暂不可用时目录回退为 Raw ID。两个目录区段分别维护可用状态、错误和旧目录回退，一类失败不禁用另一类。
-启动时物品扫描属于初始化工作；技能目录及本地化反射必须等待玩家 Common 主背包容器有效，并且只在现有
-2 秒刷新到期或手动请求时检查该安全门。手动刷新不能绕过安全门，检查得到的容器指针不得离开当次 EngineTick。
+启动时物品扫描属于初始化工作：进入世界后通过 `PalUtility:GetItemIDManager` 解析
+`PalStaticItemDataAsset.StaticItemDataMap` 的完整 Raw ID，主数据尚未就绪时才回退已加载 UObject 扫描；
+所有 Map 地址和 UObject 指针只在当次 EngineTick 使用；回退目录按世界每 2 秒重试且最多 15 次，成功后立即停止。技能目录及本地化反射必须等待玩家 Common 主背包容器
+有效，并且只在现有 2 秒刷新到期或手动请求时检查该安全门。手动刷新不能绕过安全门。
 这些初始化工作不是常驻逐帧解析。更新 Palworld/UHT dump 后必须重新运行生成脚本。
 
 被动技能分类选择器在新增/替换流程中以“类别 + 技能”两级下拉框呈现，分类来源是
@@ -153,12 +155,18 @@ EngineTick 最多读取 8 个 ID 且受 500 微秒软预算约束，并在每次
 制作和建造都只依赖 Palworld 原生仓储关系，不再修改本地主背包 `InventoryMultiHelper`，也不再把联合绑定到
 建筑或制作菜单生命周期。菜单关闭、进入放置预览、连续建造和提交扣除期间不得恢复或重建联合。
 
-`OnAvailableConcreteModel_ServerInternal`、`OnNotAvailableConcreteModel_ServerInternal` 和
-`PalBaseCampModel:OnRep_ModuleArray` 的 post-hook 只合并结构失效；不得在 Hook 回调内发现目录、遍历容器或
-修改数组。下一次 EngineTick 重新发现一次安全目录、剔除边账本中已注入到目标模块的容器，再计算期望边与已应用
+`OnAvailableConcreteModel_ServerInternal` 与 `OnNotAvailableConcreteModel_ServerInternal` 的 pre-hook
+在参数仍由引擎持有时读取 ConcreteModel 身份，并只查询由上一次安全目录建立、完成登记/注销后增量维护的排序
+纯值索引；不得在 Hook 内遍历模块或 `ContainerInfos`。索引必须区分同公会普通仓储、同模块非普通仓储和其他
+公会模块；重复可用/不可用通知与被忽略容器不得触发校准，稳定状态无法安全解析参数时必须 fail-closed。
+post-hook 不解引用参数对象。
+`PalBaseCampModel:OnRep_ModuleArray` 只在初始化明确等待仓储结构时唤醒，稳定状态下
+周期性的无变化复制必须忽略。所有 Hook 回调内都不得发现目录、遍历容器或修改数组。下一次 EngineTick 重新发现
+一次安全目录、剔除边账本中已注入到目标模块的容器，再计算期望边与已应用
 边的最小差量，避免把本 Mod 的注入结果当成原生来源并递归扩张。新增/删除每帧最多执行 4 条，并受 500 微秒
-软预算限制；每次 `ProcessEvent` 后检查时间。持久联合进入 `ready` 后，空闲 EngineTick 只做常量时间阶段判断，
-不存在 8 秒或其他周期性校准、定时扫描、后台线程和逐帧容器遍历。
+软预算限制；每次 `ProcessEvent` 后检查时间。初始化或校准期间到达的任意数量结构通知只合并成一次后续校准，
+不得清空正在收敛的差量；当前差量完成后最多再发现一次目录。持久联合进入 `ready` 后，空闲 EngineTick 只做
+常量时间阶段判断，不存在 8 秒或其他周期性校准、定时扫描、后台线程和逐帧容器遍历。
 
 Hook 清单不得包含 `GetBuildObjectDataArrayForUIDisplay`、`IsExistsMaterialForBuildObject`、
 `PalUIInGameMainMenuBuildModel:Setup` / `Dispose`、`PalBuilderComponent:ChangeMode` 或
@@ -171,7 +179,9 @@ Hook 清单不得包含 `GetBuildObjectDataArrayForUIDisplay`、`IsExistsMateria
 登记前后必须验证目标容器为精确 0→1 且只在原序列尾部追加；异常立即调用原生注销接口回滚。若回滚无法验证，
 必须把可能已新增的边纳入账本并安全停用本世界制作和建造共享。注销必须验证精确 1→0 且其他序列不变；
 ConcreteModel 已卸载时只能删除账本对应的精确数组项并调用 OnRep。恢复失败造成的本世界安全禁用不能通过切换
-开关绕过；关闭开关仍必须进入 restoring 阶段尽力清理剩余账本。
+开关绕过；关闭开关仍必须进入 restoring 阶段尽力清理剩余账本。每次安全目录发现还必须把已发现目标模块中的
+实物登记与边账本交叉验证：实物边缺失时删除陈旧账本并按期望差量补回；目标模块未发现时保留账本恢复责任。
+空差量校准不得打印 `persistent storage graph prepared`，避免把无操作事件表现成持续扫描。
 
 暂未加载的普通箱子不阻塞已加载部分：不可用事件删除相应跨据点边，可用事件重新建立。跨帧只保存 GUID、对象
 全名、纯值计划和标准库账本，不持有 UObject 或 Unreal 数组地址。首次启用但世界上下文/仓储模块尚未就绪时，

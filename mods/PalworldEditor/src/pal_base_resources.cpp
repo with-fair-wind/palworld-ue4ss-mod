@@ -10,6 +10,7 @@
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Hooks.hpp>
 #include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/UObject.hpp>
@@ -27,6 +28,11 @@ using namespace RC::Unreal;
 namespace {
 [[nodiscard]] auto object_name(UObject* object) -> std::wstring {
     return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
+}
+
+[[nodiscard]] auto registration_key(const PersistentUnionEdge& edge)
+    -> ConcreteModelRegistrationKey {
+    return {.moduleFullName = edge.targetModuleFullName, .ownerMapObjectId = edge.ownerMapObjectId};
 }
 
 [[nodiscard]] auto find_object_by_full_name(const std::wstring& fullName) -> UObject* {
@@ -104,6 +110,7 @@ public:
         waitingForStructure_ = false;
         reset_pending_work();
         catalog_ = {};
+        registrationIndex_.clear();
         baseCount_ = 0;
         containerCount_ = 0;
         pendingContainerCount_ = 0;
@@ -213,6 +220,7 @@ public:
         desiredPlan_ = {};
         reset_pending_work();
         catalog_ = {};
+        registrationIndex_.clear();
         baseCount_ = 0;
         containerCount_ = 0;
         pendingContainerCount_ = 0;
@@ -268,6 +276,7 @@ private:
         desiredPlan_ = {};
         reset_pending_work();
         catalog_ = {};
+        registrationIndex_.clear();
         baseCount_ = 0;
         containerCount_ = 0;
         pendingContainerCount_ = 0;
@@ -315,8 +324,13 @@ private:
         }
 
         accept_catalog(std::move(next));
-        auto modules =
-            remove_applied_target_edges(detail::persistent_modules(catalog_), unionLedger_.edges());
+        auto modules = detail::persistent_modules(catalog_);
+        const auto missingEdges = missing_observed_persistent_edges(
+            unionLedger_.edges(), catalog_.observedAppliedEdges, modules);
+        for (const auto& edge : missingEdges) {
+            static_cast<void>(unionLedger_.erase(edge));
+        }
+        modules = remove_applied_target_edges(std::move(modules), unionLedger_.edges());
         containerCount_ = 0;
         for (const auto& module : modules) {
             containerCount_ += module.containers.size();
@@ -338,11 +352,13 @@ private:
         waitingForStructure_ = false;
         runtimeError_.clear();
         snapshotDirty_.mark();
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: persistent storage graph prepared in {:.3f} ms, bases={}, "
-                "containers={}, add={}, remove={}, pending={}\n"),
-            elapsed, baseCount_, containerCount_, work_.added.size(), work_.removed.size(),
-            pendingContainerCount_);
+        if (!work_.added.empty() || !work_.removed.empty()) {
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: persistent storage graph prepared in {:.3f} ms, bases={}, "
+                    "containers={}, add={}, remove={}, pending={}\n"),
+                elapsed, baseCount_, containerCount_, work_.added.size(), work_.removed.size(),
+                pendingContainerCount_);
+        }
         return true;
     }
 
@@ -403,11 +419,13 @@ private:
             if (!result) {
                 if (result.mutation == PersistentEdgeMutation::removed) {
                     static_cast<void>(unionLedger_.erase(edge));
+                    static_cast<void>(registrationIndex_.erase(registration_key(edge)));
                 }
                 fail_persistent_union(std::move(result.error));
                 return;
             }
             static_cast<void>(unionLedger_.erase(edge));
+            static_cast<void>(registrationIndex_.erase(registration_key(edge)));
         }
 
         while (additionIndex_ < work_.added.size() && within_budget()) {
@@ -421,6 +439,7 @@ private:
             if (!result) {
                 if (result.mutation == PersistentEdgeMutation::added) {
                     static_cast<void>(unionLedger_.record(edge));
+                    static_cast<void>(registrationIndex_.record(registration_key(edge)));
                 }
                 fail_persistent_union(std::move(result.error));
                 return;
@@ -428,6 +447,7 @@ private:
             if (result.mutation == PersistentEdgeMutation::added) {
                 static_cast<void>(unionLedger_.record(edge));
             }
+            static_cast<void>(registrationIndex_.record(registration_key(edge)));
         }
 
         snapshotDirty_.mark();
@@ -499,6 +519,13 @@ private:
 
     auto accept_catalog(detail::ResourceCatalogSnapshot next) -> void {
         catalog_ = std::move(next);
+        std::vector<std::wstring> moduleNames;
+        moduleNames.reserve(catalog_.modules.size());
+        for (const auto& module : catalog_.modules) {
+            moduleNames.push_back(module.objectFullName);
+        }
+        registrationIndex_.reset(moduleNames, catalog_.ignoredModuleNames, catalog_.registrations,
+                                 catalog_.ignoredRegistrations);
         baseCount_ = catalog_.sameGuildBaseCount;
         containerCount_ = catalog_.plan.ordered.size();
         pendingContainerCount_ = catalog_.pendingContainerCount;
@@ -515,15 +542,70 @@ private:
         }
     }
 
-    auto handle_structure_changed() -> void {
-        if (!runtime_.enabled() || safetyDisabled_) {
+    [[nodiscard]] auto concrete_model_membership(UFunction* function,
+                                                 UnrealScriptFunctionCallableContext& context) const
+        -> ConcreteModelRegistrationMembership {
+        if (!catalog_.initialized || function == nullptr || context.Context == nullptr ||
+            context.TheStack.Locals() == nullptr) {
+            return ConcreteModelRegistrationMembership::unknown;
+        }
+
+        auto* modelProperty = CastField<FObjectPropertyBase>(
+            function->FindProperty(FName(STR("ConcreteModel"), FNAME_Find)));
+        auto* concreteModel =
+            modelProperty == nullptr
+                ? nullptr
+                : modelProperty->GetObjectPropertyValue(
+                      modelProperty->ContainerPtrToValuePtr<void>(context.TheStack.Locals()));
+        auto* instanceIdProperty =
+            concreteModel == nullptr
+                ? nullptr
+                : CastField<FStructProperty>(
+                      concreteModel->GetPropertyByNameInChain(STR("InstanceId")));
+        if (instanceIdProperty == nullptr ||
+            instanceIdProperty->GetElementSize() != sizeof(FGuid)) {
+            return ConcreteModelRegistrationMembership::unknown;
+        }
+
+        FGuid instanceId{};
+        instanceIdProperty->CopyCompleteValue(
+            &instanceId, instanceIdProperty->ContainerPtrToValuePtr<void>(concreteModel));
+        const GuidKey ownerId{{instanceId.A, instanceId.B, instanceId.C, instanceId.D}};
+        if (!ownerId.valid()) {
+            return ConcreteModelRegistrationMembership::unknown;
+        }
+
+        return registrationIndex_.membership(
+            {.moduleFullName = object_name(context.Context), .ownerMapObjectId = ownerId});
+    }
+
+    auto handle_structure_changed(const StructureChangeSource source,
+                                  const ConcreteModelRegistrationMembership membership) -> void {
+        if (!runtime_.enabled() || safetyDisabled_ ||
+            !should_forward_structure_change(source, waitingForStructure_, membership)) {
             return;
         }
-        if (!unionLifecycle_.invalidate(runtime_.generation())) {
-            reconcileRequested_ = true;
+
+        const auto generation = runtime_.generation();
+        switch (structure_change_action(unionLifecycle_.phase(generation))) {
+            case PersistentStructureChangeAction::ignore:
+                return;
+            case PersistentStructureChangeAction::startReconcile:
+                if (unionLifecycle_.invalidate(generation)) {
+                    reset_pending_work();
+                }
+                break;
+            case PersistentStructureChangeAction::queueFollowUp:
+                // A notification that only unblocks initial discovery does not require another
+                // pass. Once work is prepared, any number of further notifications collapse into
+                // one follow-up reconcile after the current diff reaches a stable ledger.
+                if (workPrepared_) {
+                    reconcileRequested_ = true;
+                }
+                break;
         }
+
         waitingForStructure_ = false;
-        reset_pending_work();
         publish_capabilities();
         snapshotDirty_.mark();
     }
@@ -542,7 +624,15 @@ private:
             case HookEvent::none:
                 break;
             case HookEvent::structureChanged:
-                handle_structure_changed();
+                if (!runtime_.enabled() || safetyDisabled_) {
+                    break;
+                }
+                handle_structure_changed(
+                    spec.structureSource,
+                    spec.structureSource == StructureChangeSource::concreteModelAvailable ||
+                            spec.structureSource == StructureChangeSource::concreteModelUnavailable
+                        ? concrete_model_membership(function, context)
+                        : ConcreteModelRegistrationMembership::unknown);
                 break;
             case HookEvent::ensurePersistentUnion:
                 handle_ensure_persistent_union(context.Context);
@@ -798,6 +888,7 @@ private:
 
     RuntimeState runtime_;
     detail::ResourceCatalogSnapshot catalog_;
+    ConcreteModelRegistrationIndex registrationIndex_;
     PersistentUnionLifecycle unionLifecycle_;
     PersistentUnionLedger unionLedger_;
     PersistentUnionPlan desiredPlan_;

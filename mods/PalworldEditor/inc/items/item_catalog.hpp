@@ -6,6 +6,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdint>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -143,4 +144,84 @@ struct ItemCatalogSnapshot {
     }
     return catalog;
 }
+
+/**
+ * @brief 按世界限制完整物品主数据扫描的重试频率和次数。
+ * @details 每帧只推进纯值倒计时；主数据尚未就绪时每 2 秒授权一次扫描，最多 15 次，
+ *          成功后立即停止。显式请求会重置当前世界的次数并立即授权一次扫描。
+ */
+class ItemCatalogScanScheduler {
+public:
+    static constexpr std::uint8_t maximumAttempts{15};
+    static constexpr float retryDelaySeconds{2.0F};
+
+    auto begin_world(const std::uint64_t worldGeneration) noexcept -> void {
+        worldGeneration_ = worldGeneration;
+        pending_ = true;
+        scanInFlight_ = false;
+        authoritativeCatalogReady_ = false;
+        attempts_ = 0;
+        remainingSeconds_ = 0.0F;
+    }
+
+    auto cancel() noexcept -> void {
+        pending_ = false;
+        scanInFlight_ = false;
+        remainingSeconds_ = 0.0F;
+    }
+
+    auto request(const std::uint64_t worldGeneration) noexcept -> void {
+        if (worldGeneration != worldGeneration_ || scanInFlight_) {
+            return;
+        }
+        pending_ = true;
+        authoritativeCatalogReady_ = false;
+        attempts_ = 0;
+        remainingSeconds_ = 0.0F;
+    }
+
+    [[nodiscard]] auto advance(const float deltaSeconds, const std::uint64_t worldGeneration,
+                               const bool mayScan) noexcept -> bool {
+        if (worldGeneration != worldGeneration_ || !pending_ || scanInFlight_ || !mayScan) {
+            return false;
+        }
+        if (deltaSeconds > 0.0F) {
+            remainingSeconds_ =
+                deltaSeconds >= remainingSeconds_ ? 0.0F : remainingSeconds_ - deltaSeconds;
+        }
+        if (remainingSeconds_ > 0.0F) {
+            return false;
+        }
+        pending_ = false;
+        scanInFlight_ = true;
+        return true;
+    }
+
+    [[nodiscard]] auto complete(const std::uint64_t worldGeneration,
+                                const bool authoritativeCatalogReady) noexcept -> bool {
+        if (worldGeneration != worldGeneration_ || !scanInFlight_) {
+            return false;
+        }
+        scanInFlight_ = false;
+        authoritativeCatalogReady_ = authoritativeCatalogReady;
+        ++attempts_;
+        if (!authoritativeCatalogReady_ && attempts_ < maximumAttempts) {
+            pending_ = true;
+            remainingSeconds_ = retryDelaySeconds;
+        }
+        return true;
+    }
+
+    [[nodiscard]] auto authoritative_catalog_ready() const noexcept -> bool {
+        return authoritativeCatalogReady_;
+    }
+
+private:
+    std::uint64_t worldGeneration_{};
+    std::uint8_t attempts_{};
+    float remainingSeconds_{};
+    bool pending_{};
+    bool scanInFlight_{};
+    bool authoritativeCatalogReady_{};
+};
 }  // namespace item_catalog

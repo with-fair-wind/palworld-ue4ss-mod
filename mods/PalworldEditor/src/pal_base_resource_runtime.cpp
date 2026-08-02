@@ -615,11 +615,13 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
         UObject* baseModel{};
         FGuid ownerGuild{};
         if (!try_get_base_model(baseCampManager, baseId, baseModel) ||
-            !try_get_guid(baseModel, STR("GetGroupIdBelongTo"), ownerGuild) ||
-            to_key(ownerGuild) != result.guildId) {
+            !try_get_guid(baseModel, STR("GetGroupIdBelongTo"), ownerGuild)) {
             continue;
         }
-        ++result.sameGuildBaseCount;
+        const bool sameGuild = to_key(ownerGuild) == result.guildId;
+        if (sameGuild) {
+            ++result.sameGuildBaseCount;
+        }
 
         auto* moduleArray =
             CastField<FArrayProperty>(baseModel->GetPropertyByNameInChain(STR("ModuleArray")));
@@ -627,8 +629,11 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
                                    ? nullptr
                                    : CastField<FObjectPropertyBase>(moduleArray->GetInner());
         if (moduleArray == nullptr || moduleProperty == nullptr) {
-            result.error = "据点模型缺少 ModuleArray 对象数组。";
-            return result;
+            if (sameGuild) {
+                result.error = "据点模型缺少 ModuleArray 对象数组。";
+                return result;
+            }
+            continue;
         }
 
         UObject* storageModule{};
@@ -644,6 +649,12 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
             continue;
         }
 
+        const auto storageModuleName = object_name(storageModule);
+        if (!sameGuild) {
+            result.ignoredModuleNames.push_back(storageModuleName);
+            continue;
+        }
+
         auto* containerInfos = CastField<FArrayProperty>(
             storageModule->GetPropertyByNameInChain(STR("ContainerInfos")));
         if (containerInfos == nullptr) {
@@ -652,7 +663,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
         }
 
         CatalogModule catalogModule{.baseId = to_key(baseId),
-                                    .objectFullName = object_name(storageModule)};
+                                    .objectFullName = std::move(storageModuleName)};
         std::set<GuidKey> moduleIds;
         FScriptArrayHelper_InContainer infos(containerInfos, storageModule);
         for (int32 index{}; index < infos.Num(); ++index) {
@@ -664,17 +675,25 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
                 result.error = "普通箱子登记项缺少有效容器或地图物体标识。";
                 return result;
             }
-            if (containerType != 0) {
-                continue;
-            }
             const CatalogContainer entry{.containerId = to_key(containerId),
                                          .ownerMapObjectId = to_key(ownerMapObjectId)};
-            const bool injectedByThisMod = std::ranges::any_of(appliedEdges, [&](const auto& edge) {
+            const ConcreteModelRegistrationKey registration{
+                .moduleFullName = catalogModule.objectFullName,
+                .ownerMapObjectId = entry.ownerMapObjectId,
+            };
+            if (containerType != 0) {
+                result.ignoredRegistrations.push_back(registration);
+                continue;
+            }
+            result.registrations.push_back(registration);
+            const auto appliedEdge = std::ranges::find_if(appliedEdges, [&](const auto& edge) {
                 return edge.targetBaseId == catalogModule.baseId &&
                        edge.targetModuleFullName == catalogModule.objectFullName &&
-                       edge.containerId == entry.containerId;
+                       edge.containerId == entry.containerId &&
+                       edge.ownerMapObjectId == entry.ownerMapObjectId;
             });
-            if (injectedByThisMod) {
+            if (appliedEdge != appliedEdges.end()) {
+                result.observedAppliedEdges.push_back(*appliedEdge);
                 continue;
             }
             if (moduleIds.insert(entry.containerId).second) {
@@ -699,6 +718,8 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
         }
         result.modules.push_back(std::move(catalogModule));
     }
+
+    result.observedAppliedEdges = normalized_edges(result.observedAppliedEdges);
 
     if (!descriptors.empty()) {
         result.plan = make_resource_union_plan(descriptors, result.guildId);

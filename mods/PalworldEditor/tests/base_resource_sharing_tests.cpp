@@ -242,9 +242,37 @@ void test_persistent_union_hook_manifest_has_no_menu_lifetime_or_high_frequency_
     CHECK(available != hooks.end());
     CHECK(unavailable != hooks.end());
     CHECK(modulesChanged != hooks.end());
-    CHECK(event_for_phase(*available, HookPhase::post) == HookEvent::structureChanged);
-    CHECK(event_for_phase(*unavailable, HookPhase::post) == HookEvent::structureChanged);
+    CHECK(event_for_phase(*available, HookPhase::pre) == HookEvent::structureChanged);
+    CHECK(event_for_phase(*available, HookPhase::post) == HookEvent::none);
+    CHECK(event_for_phase(*unavailable, HookPhase::pre) == HookEvent::structureChanged);
+    CHECK(event_for_phase(*unavailable, HookPhase::post) == HookEvent::none);
     CHECK(event_for_phase(*modulesChanged, HookPhase::post) == HookEvent::structureChanged);
+    CHECK(available->structureSource == StructureChangeSource::concreteModelAvailable);
+    CHECK(unavailable->structureSource == StructureChangeSource::concreteModelUnavailable);
+    CHECK(modulesChanged->structureSource == StructureChangeSource::replicatedModuleArray);
+    CHECK(!should_forward_structure_change(available->structureSource, false));
+    CHECK(!should_forward_structure_change(unavailable->structureSource, false));
+    CHECK(should_forward_structure_change(available->structureSource, true));
+    CHECK(should_forward_structure_change(unavailable->structureSource, true));
+    CHECK(!should_forward_structure_change(available->structureSource, false,
+                                           ConcreteModelRegistrationMembership::present));
+    CHECK(should_forward_structure_change(available->structureSource, false,
+                                          ConcreteModelRegistrationMembership::absent));
+    CHECK(should_forward_structure_change(available->structureSource, false,
+                                          ConcreteModelRegistrationMembership::untrackedModule));
+    CHECK(!should_forward_structure_change(available->structureSource, false,
+                                           ConcreteModelRegistrationMembership::ignoredModule));
+    CHECK(should_forward_structure_change(unavailable->structureSource, false,
+                                          ConcreteModelRegistrationMembership::present));
+    CHECK(!should_forward_structure_change(unavailable->structureSource, false,
+                                           ConcreteModelRegistrationMembership::absent));
+    CHECK(!should_forward_structure_change(unavailable->structureSource, false,
+                                           ConcreteModelRegistrationMembership::untrackedModule));
+    CHECK(!should_forward_structure_change(unavailable->structureSource, false,
+                                           ConcreteModelRegistrationMembership::ignoredModule));
+    CHECK(!should_forward_structure_change(modulesChanged->structureSource, false));
+    CHECK(should_forward_structure_change(modulesChanged->structureSource, true));
+    CHECK(!should_forward_structure_change(StructureChangeSource::none, true));
 
     const auto buildOpen = findHook("/Script/Pal.PalUIBuildModel:OnOpenMenu");
     const auto buildSubmit =
@@ -266,7 +294,8 @@ void test_hook_manifest_contains_only_exact_foreground_hooks() {
 
     const auto hooks = palworld_1_0_1_hook_manifest();
     CHECK(hooks.size() == 7);
-    CHECK(std::ranges::count(hooks, HookEvent::structureChanged, &HookSpec::postEvent) == 3);
+    CHECK(std::ranges::count(hooks, HookEvent::structureChanged, &HookSpec::preEvent) == 2);
+    CHECK(std::ranges::count(hooks, HookEvent::structureChanged, &HookSpec::postEvent) == 1);
 }
 
 void test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete() {
@@ -855,6 +884,83 @@ void test_persistent_union_removes_its_applied_edges_before_replanning() {
     CHECK(replanned.edges == expected);
 }
 
+void test_concrete_model_registration_index_is_bounded_and_fail_closed() {
+    using namespace base_resource_sharing;
+
+    const GuidKey ownerA{{1001, 0, 0, 0}};
+    const GuidKey ownerB{{2001, 0, 0, 0}};
+    const GuidKey ownerC{{3001, 0, 0, 0}};
+    const GuidKey foodOwner{{4001, 0, 0, 0}};
+    const std::vector<std::wstring> modules{L"StorageModule B", L"StorageModule A",
+                                            L"StorageModule A"};
+    const std::vector<std::wstring> ignoredModules{L"Other Guild Module"};
+    const std::vector<ConcreteModelRegistrationKey> registrations{
+        {.moduleFullName = L"StorageModule A", .ownerMapObjectId = ownerA},
+        {.moduleFullName = L"StorageModule A", .ownerMapObjectId = ownerA},
+        {.moduleFullName = L"StorageModule B", .ownerMapObjectId = ownerB},
+        {.moduleFullName = L"Unknown Module", .ownerMapObjectId = ownerC},
+    };
+    const std::vector<ConcreteModelRegistrationKey> ignoredRegistrations{
+        {.moduleFullName = L"StorageModule A", .ownerMapObjectId = foodOwner},
+    };
+
+    ConcreteModelRegistrationIndex index;
+    index.reset(modules, ignoredModules, registrations, ignoredRegistrations);
+    CHECK(index.size() == 2);
+    CHECK(index.membership({L"StorageModule A", ownerA}) ==
+          ConcreteModelRegistrationMembership::present);
+    CHECK(index.membership({L"StorageModule A", ownerC}) ==
+          ConcreteModelRegistrationMembership::absent);
+    CHECK(index.membership({L"Unknown Module", ownerC}) ==
+          ConcreteModelRegistrationMembership::untrackedModule);
+    CHECK(index.membership({L"Other Guild Module", ownerC}) ==
+          ConcreteModelRegistrationMembership::ignoredModule);
+    CHECK(index.membership({L"StorageModule A", foodOwner}) ==
+          ConcreteModelRegistrationMembership::ignoredModule);
+    CHECK(!index.record({L"StorageModule A", foodOwner}));
+    CHECK(index.membership({L"", ownerC}) == ConcreteModelRegistrationMembership::unknown);
+    CHECK(index.record({L"StorageModule A", ownerC}));
+    CHECK(!index.record({L"StorageModule A", ownerC}));
+    CHECK(!index.record({L"Unknown Module", ownerC}));
+    CHECK(index.size() == 3);
+    CHECK(index.erase({L"StorageModule A", ownerC}));
+    CHECK(!index.erase({L"StorageModule A", ownerC}));
+    CHECK(index.membership({L"StorageModule A", ownerC}) ==
+          ConcreteModelRegistrationMembership::absent);
+    index.clear();
+    CHECK(index.membership({L"StorageModule A", ownerA}) ==
+          ConcreteModelRegistrationMembership::untrackedModule);
+}
+
+void test_missing_applied_edges_only_for_discovered_target_modules() {
+    using namespace base_resource_sharing;
+
+    const PersistentUnionEdge observedTarget{
+        .targetBaseId = {{10, 0, 0, 0}},
+        .targetModuleFullName = L"StorageModule A",
+        .sourceBaseId = {{20, 0, 0, 0}},
+        .containerId = {{201, 0, 0, 0}},
+        .ownerMapObjectId = {{2001, 0, 0, 0}},
+    };
+    const PersistentUnionEdge unloadedTarget{
+        .targetBaseId = {{30, 0, 0, 0}},
+        .targetModuleFullName = L"StorageModule C",
+        .sourceBaseId = {{20, 0, 0, 0}},
+        .containerId = {{202, 0, 0, 0}},
+        .ownerMapObjectId = {{2002, 0, 0, 0}},
+    };
+    const std::vector<PersistentStorageModule> discoveredModules{
+        {.baseId = {{10, 0, 0, 0}}, .objectFullName = L"StorageModule A"},
+        {.baseId = {{20, 0, 0, 0}}, .objectFullName = L"StorageModule B"},
+    };
+
+    const std::array applied{observedTarget, unloadedTarget};
+    CHECK(missing_observed_persistent_edges(applied, {}, discoveredModules) ==
+          std::vector{observedTarget});
+    CHECK(missing_observed_persistent_edges(applied, std::array{observedTarget}, discoveredModules)
+              .empty());
+}
+
 void test_persistent_union_lifecycle_is_world_scoped_and_fails_closed() {
     using namespace base_resource_sharing;
 
@@ -882,6 +988,23 @@ void test_persistent_union_lifecycle_is_world_scoped_and_fails_closed() {
     CHECK(lifecycle.complete_restore(7));
     lifecycle.begin_world(8);
     CHECK(lifecycle.phase(8) == PersistentUnionPhase::off);
+}
+
+void test_persistent_structure_changes_coalesce_while_work_is_in_progress() {
+    using namespace base_resource_sharing;
+
+    CHECK(structure_change_action(PersistentUnionPhase::off) ==
+          PersistentStructureChangeAction::ignore);
+    CHECK(structure_change_action(PersistentUnionPhase::ready) ==
+          PersistentStructureChangeAction::startReconcile);
+    CHECK(structure_change_action(PersistentUnionPhase::initializing) ==
+          PersistentStructureChangeAction::queueFollowUp);
+    CHECK(structure_change_action(PersistentUnionPhase::reconciling) ==
+          PersistentStructureChangeAction::queueFollowUp);
+    CHECK(structure_change_action(PersistentUnionPhase::restoring) ==
+          PersistentStructureChangeAction::ignore);
+    CHECK(structure_change_action(PersistentUnionPhase::failed) ==
+          PersistentStructureChangeAction::ignore);
 }
 
 void test_persistent_union_ledger_and_budget_are_bounded_and_idempotent() {
@@ -975,7 +1098,10 @@ auto main() -> int {
     test_persistent_union_plan_connects_each_base_to_only_remote_normal_containers();
     test_persistent_union_diff_is_idempotent_and_removes_stale_edges();
     test_persistent_union_removes_its_applied_edges_before_replanning();
+    test_concrete_model_registration_index_is_bounded_and_fail_closed();
+    test_missing_applied_edges_only_for_discovered_target_modules();
     test_persistent_union_lifecycle_is_world_scoped_and_fails_closed();
+    test_persistent_structure_changes_coalesce_while_work_is_in_progress();
     test_persistent_union_ledger_and_budget_are_bounded_and_idempotent();
     test_persistent_edge_mutation_requires_an_exact_native_transition();
     return failures == 0 ? 0 : 1;
