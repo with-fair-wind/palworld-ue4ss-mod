@@ -7,6 +7,7 @@
  *          `cmake --build --preset ninja-msvc-x64 --target deploy`。
  */
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -32,6 +33,8 @@
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
+#include <pal_identity/pal_identity.hpp>
+#include <pal_identity/pal_identity_editor.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <pal_stats/pal_stats.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
@@ -278,16 +281,20 @@ public:
 
         std::optional<skill_editor::SkillEditRequest> editRequest;
         std::optional<pal_stats::PalStatEditRequest> statRequest;
+        std::optional<pal_identity::PalIdentityEditRequest> identityRequest;
         if (selectionRequested) {
             skillQueue_.clear();
             statRequestSlot_.clear();
+            identityRequestSlot_.clear();
         } else {
             editRequest = skillQueue_.try_pop();
             statRequest = statRequestSlot_.consume();
+            identityRequest = identityRequestSlot_.consume();
         }
 
         const auto trigger = skill_editor::decide_pal_resolution(
-            selectionRequested, editRequest.has_value() || statRequest.has_value());
+            selectionRequested,
+            editRequest.has_value() || statRequest.has_value() || identityRequest.has_value());
         std::optional<pal_game::SelectedPalTarget> resolvedPal;
         if (trigger != skill_editor::PalResolutionTrigger::none) {
             resolvedPal = pal_game::resolve_selected_otomo();
@@ -327,9 +334,13 @@ public:
                     reinterpret_cast<skill_editor::SkillTarget>(resolvedPal->parameter));
                 skillRuntimeSnapshot_.palStat = statGateway_.read_stats(
                     reinterpret_cast<pal_stats::PalStatTarget>(resolvedPal->parameter));
+                skillRuntimeSnapshot_.palIdentity = identityGateway_.read_identity(
+                    reinterpret_cast<pal_identity::PalIdentityTarget>(resolvedPal->parameter),
+                    resolvedPal->spawnStateKnown, resolvedPal->selectedIsSpawned);
                 skillRuntimeSnapshot_.lastResult.clear();
             } else {
                 skillRuntimeSnapshot_.palStat = {};
+                skillRuntimeSnapshot_.palIdentity = {};
                 const auto reason = skill_editor::resolution_status_message(resolution.status);
                 skillRuntimeSnapshot_.lastResult = "选择失败：";
                 skillRuntimeSnapshot_.lastResult.append(reason.data(), reason.size());
@@ -368,21 +379,56 @@ public:
                     : pal_stats::PalStatTarget{};
             const bool targetCurrent = skill_editor::bound_target_request_is_current(
                 *statRequest, selectedTarget_, resolution.observation, target, worldSession_);
-            if (targetCurrent && !statWritesDisabledForWorld_ &&
+            const bool hasCoreChange = pal_stats::has_core_stat_change(statRequest->values);
+            const bool hasWorkChange = pal_stats::has_work_suitability_change(statRequest->values);
+            const bool safetyDisabled = (hasCoreChange && statWritesDisabledForWorld_) ||
+                                        (hasWorkChange && workSuitabilityWritesDisabledForWorld_);
+            if (targetCurrent && !safetyDisabled &&
                 pal_stats::has_any_change(statRequest->values) && statGateway_.is_valid(target)) {
                 const auto result = statGateway_.apply_stat_edit(target, *statRequest);
                 skillRuntimeSnapshot_.palStat = result.snapshot;
                 skillRuntimeSnapshot_.lastResult = result.message;
                 if (result.status == pal_stats::PalStatEditStatus::rollbackFailed) {
-                    statWritesDisabledForWorld_ = true;
+                    statWritesDisabledForWorld_ = hasCoreChange || statWritesDisabledForWorld_;
+                    workSuitabilityWritesDisabledForWorld_ =
+                        hasWorkChange || workSuitabilityWritesDisabledForWorld_;
                 }
             } else {
                 statRequestSlot_.clear();
                 skillRuntimeSnapshot_.lastResult =
-                    statWritesDisabledForWorld_
-                        ? "本世界曾发生属性恢复验证失败；后续属性写入已安全停用。"
+                    safetyDisabled ? "本世界对应属性域曾发生恢复验证失败；该类写入已安全停用。"
+                                   : "当前高亮帕鲁与已选择目标不一致或暂时无法确认；"
+                                     "属性修改未执行。";
+            }
+            skillSnapshotDirty_ = true;
+        }
+
+        if (identityRequest.has_value()) {
+            const auto target =
+                resolvedPal.has_value() && resolution.resolved
+                    ? reinterpret_cast<pal_identity::PalIdentityTarget>(resolvedPal->parameter)
+                    : pal_identity::PalIdentityTarget{};
+            const bool spawnStateKnown =
+                resolvedPal.has_value() && resolution.resolved && resolvedPal->spawnStateKnown;
+            const bool selectedIsSpawned = spawnStateKnown && resolvedPal->selectedIsSpawned;
+            const bool targetCurrent = skill_editor::bound_target_request_is_current(
+                *identityRequest, selectedTarget_, resolution.observation, target, worldSession_);
+            if (targetCurrent && spawnStateKnown && !identityWritesDisabledForWorld_ &&
+                pal_identity::has_any_change(identityRequest->values)) {
+                const auto result = identityGateway_.apply_identity_edit(
+                    target, spawnStateKnown, selectedIsSpawned, *identityRequest);
+                skillRuntimeSnapshot_.palIdentity = result.snapshot;
+                skillRuntimeSnapshot_.lastResult = result.message;
+                if (result.status == pal_identity::PalIdentityEditStatus::rollbackFailed) {
+                    identityWritesDisabledForWorld_ = true;
+                }
+            } else {
+                identityRequestSlot_.clear();
+                skillRuntimeSnapshot_.lastResult =
+                    identityWritesDisabledForWorld_
+                        ? "本世界曾发生形态恢复验证失败；后续 Alpha、Lucky 与觉醒写入已安全停用。"
                         : "当前高亮帕鲁与已选择目标不一致或暂时无法确认；"
-                          "属性修改未执行。";
+                          "形态修改未执行。";
             }
             skillSnapshotDirty_ = true;
         }
@@ -423,6 +469,10 @@ public:
         update_runtime_value(skillRuntimeSnapshot_.resolutionStatus, resolution.status);
         update_runtime_value(skillRuntimeSnapshot_.pending, skillQueue_.size() != 0);
         update_runtime_value(skillRuntimeSnapshot_.statWritesDisabled, statWritesDisabledForWorld_);
+        update_runtime_value(skillRuntimeSnapshot_.workSuitabilityWritesDisabled,
+                             workSuitabilityWritesDisabledForWorld_);
+        update_runtime_value(skillRuntimeSnapshot_.identityWritesDisabled,
+                             identityWritesDisabledForWorld_);
         if (!selectedTarget_.is_selected() && (!skillRuntimeSnapshot_.state.passiveIds.empty() ||
                                                !skillRuntimeSnapshot_.state.activeSkills.empty())) {
             skillRuntimeSnapshot_.state = {};
@@ -690,12 +740,15 @@ private:
         baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
         worldSession_.begin_transition();
         statWritesDisabledForWorld_ = false;
+        workSuitabilityWritesDisabledForWorld_ = false;
+        identityWritesDisabledForWorld_ = false;
         passiveClassificationJob_.cancel();
         passiveClassificationCompleted_.store(0, std::memory_order_relaxed);
         passiveClassificationTotal_.store(0, std::memory_order_relaxed);
         hadUsablePassiveClassificationBeforeRefresh_ = false;
         skillQueue_.clear();
         statRequestSlot_.clear();
+        identityRequestSlot_.clear();
         {
             const std::lock_guard lock(selectionRequestMutex_);
             selectCurrentPalRequest_.reset();
@@ -726,6 +779,7 @@ private:
             selectedTarget_.is_selected() ? selectedTarget_.current().name : std::string{};
         skillRuntimeSnapshot_.state = {};
         skillRuntimeSnapshot_.palStat = {};
+        skillRuntimeSnapshot_.palIdentity = {};
         skillRuntimeSnapshot_.catalog = {};
         skillRuntimeSnapshot_.lastResult =
             "世界切换已取消所有待处理操作；进入存档后请重新选择当前帕鲁。";
@@ -738,6 +792,8 @@ private:
         skillRuntimeSnapshot_.worldLifecycleCallbacksReady = worldLifecycleCallbacksReady_.load();
         skillRuntimeSnapshot_.targetConfirmedForWorld = false;
         skillRuntimeSnapshot_.statWritesDisabled = false;
+        skillRuntimeSnapshot_.workSuitabilityWritesDisabled = false;
+        skillRuntimeSnapshot_.identityWritesDisabled = false;
         skillSnapshotDirty_ = true;
         publish_skill_snapshot_if_dirty();
     }
@@ -745,6 +801,8 @@ private:
     /** @brief Re-enables reads after LoadMap without restoring Pal write authorization. */
     auto finish_world_transition() -> void {
         skillQueue_.clear();
+        statRequestSlot_.clear();
+        identityRequestSlot_.clear();
         {
             const std::lock_guard lock(selectionRequestMutex_);
             selectCurrentPalRequest_.reset();
@@ -798,7 +856,10 @@ private:
         bool worldLifecycleCallbacksReady{};  /**< LoadMap 前后回调是否均已注册。 */
         bool targetConfirmedForWorld{};       /**< 当前世界是否已由用户重新确认目标。 */
         bool statWritesDisabled{};            /**< 本世界是否因恢复验证失败而停用属性写入。 */
+        bool workSuitabilityWritesDisabled{}; /**< 本世界是否停用工作适应性写入。 */
+        bool identityWritesDisabled{};        /**< 本世界是否因恢复失败而停用形态写入。 */
         pal_stats::PalStatSnapshot palStat;   /**< 最近一次从游戏重读的实际属性值。 */
+        pal_identity::PalIdentitySnapshot palIdentity; /**< 最近一次形态字段重读快照。 */
     };
 
     /** @brief 仅在可观察技能状态变化时把游戏线程快照发布给 GUI。 */
@@ -860,6 +921,7 @@ private:
         self->passiveSearch_[0] = '\0';
         self->activeSearch_[0] = '\0';
         self->statDraft_.reset();
+        self->identityDraft_.reset();
     }
 
     /**
@@ -1487,14 +1549,62 @@ private:
     }
 
     /**
-     * @brief 渲染等级、个体值与亲密度的编辑区，点击应用后入队一次属性请求。
+     * @brief 渲染 Alpha、Lucky 与觉醒三个彼此独立的显式应用开关。
+     * @warning 只在 GUI 线程调用；控件不直接访问 Unreal 对象。
+     */
+    static void render_pal_identity(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
+                                    const bool mutationsDisabled) {
+        ImGui::TextUnformatted("形态修改");
+        const auto& identity = snapshot.palIdentity;
+        if (!identity.readable) {
+            ImGui::TextDisabled("形态字段读取中或当前游戏版本不支持安全修改");
+            return;
+        }
+
+        self->identityDraft_.reconcile(identity, snapshot.targetGeneration);
+        auto& values = self->identityDraft_.values();
+        ImGui::Text("当前 CharacterID：%s", identity.characterId.c_str());
+
+        ImGui::BeginDisabled(mutationsDisabled || identity.summoned || !identity.alphaAvailable);
+        ImGui::Checkbox("头目 / Alpha##pal-alpha", &values.alpha);
+        ImGui::EndDisabled();
+        if (!identity.alphaAvailable) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("（未找到经原生数据库验证的普通/BOSS 配对）");
+        }
+
+        ImGui::BeginDisabled(mutationsDisabled || identity.summoned);
+        ImGui::Checkbox("闪光 / Lucky##pal-lucky", &values.lucky);
+        ImGui::SameLine();
+        ImGui::Checkbox("觉醒##pal-awakening", &values.awakening);
+        ImGui::EndDisabled();
+
+        if (identity.summoned) {
+            ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F),
+                               "当前帕鲁正在场上；请先按 E 收回，再应用形态修改。");
+        }
+        ImGui::TextDisabled("三个维度相互独立；不消耗材料。Alpha 会切换普通/BOSS CharacterID。");
+
+        const auto request = self->identityDraft_.make_request(snapshot.worldGeneration);
+        ImGui::BeginDisabled(mutationsDisabled || identity.summoned || !request.has_value());
+        if (ImGui::Button("应用形态修改")) {
+            self->identityRequestSlot_.submit(*request);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("（写入、原生刷新、重读；失败自动回滚）");
+    }
+
+    /**
+     * @brief 渲染持久化个体属性编辑区，点击应用后只提交相对快照发生变化的字段。
      * @param[in,out] self 非空、非拥有的当前 mod 实例指针。
      * @param[in] snapshot 当前技能/属性编辑快照。
      * @param[in] mutationsDisabled 是否应禁用全部属性修改入口。
      * @warning 只在 GUI 线程调用。
      */
     static void render_pal_stats(PalworldEditorMod* self, const SkillEditorSnapshot& snapshot,
-                                 const bool mutationsDisabled) {
+                                 const bool mutationsDisabled,
+                                 const bool workSuitabilityMutationsDisabled) {
         ImGui::TextUnformatted("属性修改");
         const auto& stats = snapshot.palStat;
         if (!stats.readable) {
@@ -1505,6 +1615,13 @@ private:
         auto& values = self->statDraft_.values();
         ImGui::Text("当前：等级 %d / HP %d / 攻击 %d / 防御 %d / 亲密度 %d", stats.level,
                     stats.talentHp, stats.talentShot, stats.talentDefense, stats.friendshipRank);
+        ImGui::Text("强化：最大HP %d / 攻击 %d / 防御 %d / 工作速度 %d", stats.soulHpRank,
+                    stats.soulAttackRank, stats.soulDefenseRank, stats.soulWorkSpeedRank);
+        const char* const currentGender = stats.gender == pal_stats::PalGender::male     ? "雄性"
+                                          : stats.gender == pal_stats::PalGender::female ? "雌性"
+                                                                                         : "未设置";
+        ImGui::Text("浓缩：%d 星 / 伙伴技能 Lv.%d / 性别：%s", stats.condensationStars,
+                    stats.partnerSkillLevel, currentGender);
 
         ImGui::SetNextItemWidth(120.0F);
         ImGui::DragInt("等级##stat-level", &values.level, 1.0F, pal_stats::kLevelMin,
@@ -1518,14 +1635,89 @@ private:
         ImGui::SetNextItemWidth(120.0F);
         ImGui::DragInt("个体值·防御##stat-def", &values.talentDefense, 1.0F, pal_stats::kTalentMin,
                        pal_stats::kTalentMax);
+
+        ImGui::TextUnformatted("帕鲁之魂强化（直接编辑，不消耗材料）");
+        ImGui::SetNextItemWidth(120.0F);
+        ImGui::DragInt("强化·最大HP##stat-soul-hp", &values.soulHpRank, 1.0F,
+                       pal_stats::kSoulRankMin, pal_stats::kSoulRankMax);
+        ImGui::SetNextItemWidth(120.0F);
+        ImGui::DragInt("强化·攻击##stat-soul-atk", &values.soulAttackRank, 1.0F,
+                       pal_stats::kSoulRankMin, pal_stats::kSoulRankMax);
+        ImGui::SetNextItemWidth(120.0F);
+        ImGui::DragInt("强化·防御##stat-soul-def", &values.soulDefenseRank, 1.0F,
+                       pal_stats::kSoulRankMin, pal_stats::kSoulRankMax);
+        ImGui::SetNextItemWidth(120.0F);
+        ImGui::DragInt("强化·工作速度##stat-soul-work", &values.soulWorkSpeedRank, 1.0F,
+                       pal_stats::kSoulRankMin, pal_stats::kSoulRankMax);
+
+        ImGui::TextUnformatted("浓缩与性别（直接编辑，不消耗材料）");
+        ImGui::SetNextItemWidth(120.0F);
+        ImGui::DragInt("浓缩星级##stat-condensation", &values.condensationStars, 1.0F,
+                       pal_stats::kCondensationStarsMin, stats.condensationMaxStars);
+        const char* const genderPreview = values.gender == pal_stats::PalGender::male ? "雄性"
+                                          : values.gender == pal_stats::PalGender::female
+                                              ? "雌性"
+                                              : "未设置";
+        ImGui::SetNextItemWidth(120.0F);
+        if (ImGui::BeginCombo("性别##stat-gender", genderPreview)) {
+            if (ImGui::Selectable("雄性", values.gender == pal_stats::PalGender::male)) {
+                values.gender = pal_stats::PalGender::male;
+            }
+            if (ImGui::Selectable("雌性", values.gender == pal_stats::PalGender::female)) {
+                values.gender = pal_stats::PalGender::female;
+            }
+            ImGui::EndCombo();
+        }
+
+        static constexpr std::array<const char*, pal_stats::kWorkSuitabilityCount>
+            workSuitabilityLabels{
+                "生火", "浇水", "播种", "发电", "手工作业", "采集", "伐木",
+                "采矿", "采油", "制药", "冷却", "搬运",     "牧场",
+            };
+        if (ImGui::TreeNode("工作适应性永久附加值##stat-work-suitability")) {
+            ImGui::TextDisabled(
+                "直接编辑存档永久附加值；原生接口按当前值差量提交，不会创建物种没有的适应性。");
+            for (std::size_t index{}; index < workSuitabilityLabels.size(); ++index) {
+                const int maxBonus = pal_stats::max_editable_work_suitability_bonus(
+                    stats.workSuitabilityBaseRanks[index], stats.workSuitabilityBonusRanks[index],
+                    stats.workSuitabilityMaxRank);
+                const bool supported = stats.workSuitabilityBaseRanks[index] > 0 ||
+                                       stats.workSuitabilityBonusRanks[index] > 0;
+                ImGui::BeginDisabled(workSuitabilityMutationsDisabled || !supported);
+                ImGui::SetNextItemWidth(120.0F);
+                const std::string label = std::string{workSuitabilityLabels[index]} +
+                                          "##stat-work-" + std::to_string(index);
+                ImGui::DragInt(label.c_str(), &values.workSuitabilityBonusRanks[index], 1.0F, 0,
+                               maxBonus);
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+                if (supported) {
+                    ImGui::TextDisabled("(基础 Lv.%d，永久附加 +%d，合计 Lv.%d)",
+                                        stats.workSuitabilityBaseRanks[index],
+                                        stats.workSuitabilityBonusRanks[index],
+                                        stats.workSuitabilityTotalRanks[index]);
+                } else {
+                    ImGui::TextDisabled("(该物种不具备此适应性)");
+                }
+            }
+            const auto workRequest =
+                self->statDraft_.make_work_suitability_request(snapshot.worldGeneration);
+            ImGui::BeginDisabled(workSuitabilityMutationsDisabled || !workRequest.has_value());
+            if (ImGui::Button("应用工作适应性修改")) {
+                self->statRequestSlot_.submit(*workRequest);
+            }
+            ImGui::EndDisabled();
+            ImGui::TreePop();
+        }
+
         ImGui::SetNextItemWidth(120.0F);
         ImGui::DragInt("亲密度##stat-friend", &values.friendshipRank, 1.0F,
                        pal_stats::kFriendshipRankMin, pal_stats::kFriendshipRankMax);
 
-        const auto request = self->statDraft_.make_request(snapshot.worldGeneration);
-        ImGui::BeginDisabled(mutationsDisabled || !request.has_value());
-        if (ImGui::Button("应用属性修改")) {
-            self->statRequestSlot_.submit(*request);
+        const auto coreRequest = self->statDraft_.make_core_request(snapshot.worldGeneration);
+        ImGui::BeginDisabled(mutationsDisabled || !coreRequest.has_value());
+        if (ImGui::Button("应用基础属性修改")) {
+            self->statRequestSlot_.submit(*coreRequest);
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
@@ -1576,7 +1768,8 @@ private:
             selectionPending = self->selectCurrentPalRequest_.has_value();
         }
         const bool pending = snapshot.pending || self->skillQueue_.size() != 0 ||
-                             self->statRequestSlot_.has_pending() || selectionPending;
+                             self->statRequestSlot_.has_pending() ||
+                             self->identityRequestSlot_.has_pending() || selectionPending;
         const bool catalogReady = skill_editor::catalog_is_ready_for_editing(snapshot.catalog);
         const bool lifecycleReady =
             snapshot.worldAccessible && snapshot.worldLifecycleCallbacksReady;
@@ -1635,6 +1828,14 @@ private:
             ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
                                "属性写入已在本世界安全停用；请退出并重新进入世界。");
         }
+        if (snapshot.workSuitabilityWritesDisabled) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                               "工作适应性写入已在本世界单独安全停用；其他属性仍可修改。");
+        }
+        if (snapshot.identityWritesDisabled) {
+            ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                               "形态写入已在本世界安全停用；请退出并重新进入世界。");
+        }
         if (pending) {
             ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.2F, 1.0F), "技能修改处理中...");
         }
@@ -1660,7 +1861,13 @@ private:
         ImGui::Separator();
         render_active_skills(self, snapshot, pending || !editingReady);
         ImGui::Separator();
-        render_pal_stats(self, snapshot, pending || !editingReady || snapshot.statWritesDisabled);
+        const bool targetEditingReady = lifecycleReady && snapshot.targetMatchesCurrent;
+        render_pal_identity(self, snapshot,
+                            pending || !targetEditingReady || snapshot.identityWritesDisabled);
+        ImGui::Separator();
+        render_pal_stats(self, snapshot,
+                         pending || !targetEditingReady || snapshot.statWritesDisabled,
+                         pending || !targetEditingReady || snapshot.workSuitabilityWritesDisabled);
     }
 
     /** @brief 给予物品输入框中的 ASCII Raw ID；只由 GUI 线程访问。 */
@@ -1745,10 +1952,18 @@ private:
     pal_skills::PalSkillGateway skillGateway_;
     /** @brief 在游戏线程执行帕鲁属性反射读写的无 UObject 所有权网关。 */
     pal_stats::PalStatGateway statGateway_;
+    /** @brief 在游戏线程执行 Alpha、Lucky 与觉醒反射事务的无所有权网关。 */
+    pal_identity::PalIdentityGateway identityGateway_;
     /** @brief 属性恢复验证失败后阻止本世界继续写入；仅由游戏线程访问。 */
     bool statWritesDisabledForWorld_{};
+    /** @brief 工作适应性恢复验证失败后只停用该属性域。 */
+    bool workSuitabilityWritesDisabledForWorld_{};
     /** @brief GUI 生产、游戏线程消费且只保留最新状态的线程安全属性请求槽。 */
     pal_stats::PalStatEditRequestSlot statRequestSlot_;
+    /** @brief 形态恢复验证失败后阻止本世界继续写入；仅由游戏线程访问。 */
+    bool identityWritesDisabledForWorld_{};
+    /** @brief GUI 生产、游戏线程消费且只保留最新状态的线程安全形态请求槽。 */
+    pal_identity::PalIdentityEditRequestSlot identityRequestSlot_;
     /** @brief 仅由 EngineTick/LoadMap 游戏线程回调访问的世界代次与确认状态。 */
     skill_editor::WorldSessionState worldSession_;
     /** @brief 游戏线程保存的、由用户显式确认的下一次按 E 召唤帕鲁纯值目标状态。 */
@@ -1796,6 +2011,8 @@ private:
     char activeSearch_[96]{};
     /** @brief 从已确认目标真实快照初始化、只生成差量请求的属性编辑草稿。 */
     pal_stats::PalStatEditDraft statDraft_;
+    /** @brief 以形态快照为基线、只生成三维差量请求的 GUI 草稿。 */
+    pal_identity::PalIdentityEditDraft identityDraft_;
     /**
      * @brief 被动技能编辑模式与索引；只由 GUI 线程访问。
      * @details `-1` 表示未编辑，`-2` 表示新增，非负值表示要替换的被动技能索引。

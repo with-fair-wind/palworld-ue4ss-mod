@@ -98,8 +98,16 @@ Ninja 是单配置（single-config）生成器，所以 preset **显式设置** 
 - `inc/skills/selected_target_state.hpp`：显式锁定目标的一致性检测和过期编辑请求保护；
 - `inc/skills/world_session_state.hpp`：LoadMap 世界代次、访问状态和逐世界目标确认；
 - `inc/skills/pal_skills.hpp` + `src/pal_skills.cpp`：领域服务到 Palworld UFunction 的适配；
-- `inc/pal_stats/pal_stat_editor.hpp`：帕鲁属性编辑纯值领域（值/请求/快照/队列/clamp）；
-- `inc/pal_stats/pal_stats.hpp` + `src/pal_stats.cpp`：属性领域到 `SaveParameter` 反射的适配；
+- `inc/pal_stats/pal_stat_editor.hpp`：帕鲁属性编辑纯值领域（值/请求/快照/队列/clamp），包括四项 0–20
+  帕鲁之魂强化、浓缩星级、性别与 13 类工作适应性永久加成；
+- `inc/pal_stats/pal_stats.hpp` + `src/pal_stats.cpp`：属性领域到 `SaveParameter`/原生 setter 的事务适配；四项强化
+  直接写入 Rank 字段并调用 `OnRep_SaveParameter` 刷新，浓缩同步 `Rank`/`RankUpExp`；工作适应性 UI 直接编辑
+  绝对永久附加值，合计等级由原生基础读数与附加值相加显示，提交时以相对当前值的有符号差值调用增量接口
+  `SetWorkSuitabilityAddRank`，且使用独立的失败
+  安全停用域；
+- `inc/pal_identity/pal_identity_editor.hpp`：Alpha、Lucky、觉醒三个独立维度的纯值快照、差量草稿与请求槽；
+- `inc/pal_identity/pal_identity.hpp` + `src/pal_identity.cpp`：普通/`BOSS_` CharacterID 配对、`IsRarePal` 与
+  `bIsAwakening` 的显式游戏线程事务；只允许收回状态，调用原生数据库刷新和 OnRep，重读失败时整笔回滚；
 - `inc/grappling_hook/cooldown_service.hpp`：爪钩 ID 白名单、按世界的一次性工作状态和原值恢复账本；
 - `inc/grappling_hook/cooldown_gateway.hpp` + `src/grapple_cooldown_gateway.cpp`：游戏线程内按
   `ownItemID.StaticId` 精确识别、覆盖、重读和恢复爪钩冷却；
@@ -232,7 +240,12 @@ git diff --check
 主动/被动名称跟随游戏语言、已装备主动技能数值可映射为标签、被动技能新增/替换/删除且可按类别筛选并着色、
 分类完成前仅“全部”可选而分类后五个类别可切换、两个四词条预设
 只在点击“应用预设”后执行且可差量写入/失败回滚，以及主动技能
-装备/替换/清空。场景中保留一只野生帕鲁时，编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
+装备/替换/清空。属性编辑还应验证四项帕鲁之魂强化均可在 0–20（包括两个边界）内独立修改；浓缩 0 星和运行时
+最大星级、雄性/雌性均可独立写入并在重读后保持，伙伴技能等级随浓缩 Rank 更新；工作适应性只强化物种原有方向，
+以绝对永久附加值编辑并由独立按钮和安全域提交，合计等级只读显示。点击应用前不写入、不消耗帕鲁之魂，重新召唤或
+重开详情页后值仍保持；任一字段不可访问或写后重读不一致时必须整笔拒绝或回滚。形态的“正在场上”判断必须比较
+本地 Holder `TryGetSpawnedOtomoHandle` 与选中 Handle，不得使用可能残留的 Actor。场景中保留一只野生帕鲁时，
+编辑目标仍必须是下一次按 E 会召唤的队伍帕鲁。若 mod 未加载，
 检查安装路径、`dlls/main.dll` 命名，以及 `enabled.txt`/`mods.txt`。还应重复退出世界/重进存档，确认
 加载期间请求被清空、原目标仅保留显示、重新选择前无法写入，并且 LoadMap 不再崩溃。还应确认无论是否已确认
 目标，空闲等待至少 10 秒都不再解析队伍 Holder；数字键切换不会静默改变锁定目标，提交修改时会立即重查并拒绝

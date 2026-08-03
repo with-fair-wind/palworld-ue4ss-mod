@@ -18,6 +18,7 @@ add_library(${TARGET} SHARED
     src/dllmain.cpp
     src/pal_skills.cpp
     src/pal_stats.cpp
+    src/pal_identity.cpp
     src/grapple_cooldown_gateway.cpp
     src/pal_base_resource_runtime.cpp
     src/pal_base_resources.cpp

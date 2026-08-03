@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <items/item_catalog.hpp>
+#include <pal_identity/pal_identity_editor.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <skills/active_skill_definitions.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
@@ -1284,6 +1285,39 @@ void test_pal_stat_clamp_respects_policy_bounds() {
     CHECK(clamp_friendship_rank(0) == 0);
     CHECK(clamp_friendship_rank(10) == 10);
     CHECK(clamp_friendship_rank(11) == 10);
+    // 帕鲁之魂四向强化 rank 0–20。
+    CHECK(clamp_soul_rank(-1) == 0);
+    CHECK(clamp_soul_rank(0) == 0);
+    CHECK(clamp_soul_rank(20) == 20);
+    CHECK(clamp_soul_rank(21) == 20);
+    // 浓缩机 UI 为 0–4 星，存档 Rank 为 1–5。
+    CHECK(clamp_condensation_stars(-1, 4) == 0);
+    CHECK(clamp_condensation_stars(4, 4) == 4);
+    CHECK(clamp_condensation_stars(5, 4) == 4);
+    CHECK(condensation_stars_to_internal_rank(0, 4) == 1);
+    CHECK(condensation_stars_to_internal_rank(4, 4) == 5);
+    CHECK(internal_rank_to_condensation_stars(1, 4) == 0);
+    CHECK(internal_rank_to_condensation_stars(5, 4) == 4);
+    // 永久附加工作适应性由原生 setter 维护，但请求值仍需先限制范围。
+    CHECK(clamp_work_suitability_bonus(-1, 6) == 0);
+    CHECK(clamp_work_suitability_bonus(6, 6) == 6);
+    CHECK(clamp_work_suitability_bonus(7, 6) == 6);
+    // SetWorkSuitabilityAddRank 的 addRank 是有符号增量，而不是目标绝对值。
+    CHECK(work_suitability_bonus_delta(5, 10, 10) == 5);
+    CHECK(work_suitability_bonus_delta(7, 0, 10) == -7);
+    CHECK(work_suitability_bonus_delta(5, 5, 10) == 0);
+    CHECK(work_suitability_bonus_delta(5, 11, 10) == 5);
+    // 原生 getter 返回基础 Lv.1，存档永久附加 +3 时，游戏面板显示 Lv.4。
+    CHECK(work_suitability_total_rank(1, 3, 10) == 4);
+    CHECK(work_suitability_total_rank(1, 6, 10) == 7);
+    CHECK(work_suitability_total_rank(1, 7, 10) == 8);
+    CHECK(work_suitability_total_rank(8, 7, 10) == 10);
+    CHECK(max_editable_work_suitability_bonus(1, 3, 10) == 9);
+    CHECK(max_editable_work_suitability_bonus(0, 0, 10) == 0);
+    CHECK(max_editable_work_suitability_bonus(0, 3, 10) == 3);
+    CHECK(is_editable_gender(PalGender::male));
+    CHECK(is_editable_gender(PalGender::female));
+    CHECK(!is_editable_gender(PalGender::none));
 }
 
 void test_pal_stat_values_detects_any_change() {
@@ -1291,21 +1325,57 @@ void test_pal_stat_values_detects_any_change() {
     CHECK(!has_any_change(PalStatValues{}));
     CHECK(has_any_change(PalStatValues{.level = 1}));
     CHECK(has_any_change(PalStatValues{.talentHp = 0}));
+    CHECK(has_any_change(PalStatValues{.soulWorkSpeedRank = 20}));
+    CHECK(has_any_change(PalStatValues{.condensationStars = 4}));
+    CHECK(has_any_change(PalStatValues{.gender = PalGender::female}));
+    WorkSuitabilityRanks workRanks{};
+    workRanks[work_suitability_index(WorkSuitability::transport)] = 2;
+    CHECK(has_any_change(PalStatValues{.workSuitabilityBonusRanks = workRanks}));
+    CHECK(has_work_suitability_change(PalStatValues{.workSuitabilityBonusRanks = workRanks}));
+    CHECK(!has_core_stat_change(PalStatValues{.workSuitabilityBonusRanks = workRanks}));
     CHECK(has_any_change(PalStatValues{.friendshipRank = 10}));
+    CHECK(has_core_stat_change(PalStatValues{.soulHpRank = 20}));
 }
 
 void test_pal_stat_verification_checks_only_requested_fields() {
+    pal_stats::WorkSuitabilityRanks workBonusRanks{};
+    workBonusRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 2;
+    pal_stats::WorkSuitabilityRanks workTotalRanks{};
+    workTotalRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 6;
+    pal_stats::WorkSuitabilityRanks workBaseRanks{};
+    workBaseRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 4;
     const pal_stats::PalStatSnapshot actual{
         .level = 45,
         .talentHp = 90,
         .talentShot = 82,
         .talentDefense = 63,
+        .soulHpRank = 20,
+        .soulAttackRank = 19,
+        .soulDefenseRank = 18,
+        .soulWorkSpeedRank = 17,
+        .condensationStars = 4,
+        .condensationMaxStars = 4,
+        .partnerSkillLevel = 5,
+        .rankUpExp = 0,
+        .gender = pal_stats::PalGender::male,
+        .workSuitabilityMaxRank = 6,
+        .workSuitabilityBaseRanks = workBaseRanks,
+        .workSuitabilityBonusRanks = workBonusRanks,
+        .workSuitabilityTotalRanks = workTotalRanks,
         .friendshipRank = 4,
         .friendshipPoint = 1200,
         .readable = true,
     };
 
     CHECK(pal_stats::verify_stat_edit({.talentHp = 90}, actual));
+    CHECK(pal_stats::verify_stat_edit({.soulHpRank = 20, .soulDefenseRank = 18}, actual));
+    CHECK(!pal_stats::verify_stat_edit({.soulWorkSpeedRank = 16}, actual));
+    CHECK(pal_stats::verify_stat_edit({.condensationStars = 4,
+                                       .gender = pal_stats::PalGender::male,
+                                       .workSuitabilityBonusRanks = workBonusRanks},
+                                      actual));
+    CHECK(!pal_stats::verify_stat_edit({.condensationStars = 3}, actual));
+    CHECK(!pal_stats::verify_stat_edit({.gender = pal_stats::PalGender::female}, actual));
     CHECK(pal_stats::verify_stat_edit({.level = 45, .friendshipRank = 4}, actual));
     CHECK(!pal_stats::verify_stat_edit({.talentHp = 89}, actual));
 
@@ -1315,11 +1385,30 @@ void test_pal_stat_verification_checks_only_requested_fields() {
 }
 
 void test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes() {
+    pal_stats::WorkSuitabilityRanks workBonusRanks{};
+    workBonusRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 1;
+    pal_stats::WorkSuitabilityRanks workTotalRanks{};
+    workTotalRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 5;
+    pal_stats::WorkSuitabilityRanks workBaseRanks{};
+    workBaseRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 4;
     pal_stats::PalStatEditDraft draft;
     draft.synchronize({.level = 45,
                        .talentHp = 71,
                        .talentShot = 82,
                        .talentDefense = 63,
+                       .soulHpRank = 1,
+                       .soulAttackRank = 2,
+                       .soulDefenseRank = 3,
+                       .soulWorkSpeedRank = 4,
+                       .condensationStars = 1,
+                       .condensationMaxStars = 4,
+                       .partnerSkillLevel = 2,
+                       .rankUpExp = 0,
+                       .gender = pal_stats::PalGender::male,
+                       .workSuitabilityMaxRank = 6,
+                       .workSuitabilityBaseRanks = workBaseRanks,
+                       .workSuitabilityBonusRanks = workBonusRanks,
+                       .workSuitabilityTotalRanks = workTotalRanks,
                        .friendshipRank = 4,
                        .friendshipPoint = 1200,
                        .readable = true},
@@ -1327,18 +1416,76 @@ void test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes() {
 
     CHECK(draft.values().level == 45);
     CHECK(draft.values().talentHp == 71);
+    CHECK(draft.values().soulWorkSpeedRank == 4);
+    CHECK(draft.values().condensationStars == 1);
+    CHECK(draft.values().gender == pal_stats::PalGender::male);
     CHECK(!draft.make_request(11).has_value());
 
     draft.values().talentHp = 90;
+    draft.values().soulWorkSpeedRank = 20;
+    draft.values().condensationStars = 4;
+    draft.values().gender = pal_stats::PalGender::female;
+    draft.values().workSuitabilityBonusRanks[pal_stats::work_suitability_index(
+        pal_stats::WorkSuitability::transport)] = 6;
     const auto request = draft.make_request(11);
     CHECK(request.has_value());
     CHECK(!request->values.level.has_value());
     CHECK(request->values.talentHp == 90);
     CHECK(!request->values.talentShot.has_value());
     CHECK(!request->values.talentDefense.has_value());
+    CHECK(!request->values.soulHpRank.has_value());
+    CHECK(!request->values.soulAttackRank.has_value());
+    CHECK(!request->values.soulDefenseRank.has_value());
+    CHECK(request->values.soulWorkSpeedRank == 20);
+    CHECK(request->values.condensationStars == 4);
+    CHECK(request->values.gender == pal_stats::PalGender::female);
+    CHECK(request->values.workSuitabilityBonusRanks.has_value());
+    CHECK((*request->values.workSuitabilityBonusRanks)[pal_stats::work_suitability_index(
+              pal_stats::WorkSuitability::transport)] == 2);
     CHECK(!request->values.friendshipRank.has_value());
     CHECK(request->targetGeneration == 7);
     CHECK(request->worldGeneration == 11);
+
+    const auto coreRequest = draft.make_core_request(11);
+    CHECK(coreRequest.has_value());
+    CHECK(!coreRequest->values.workSuitabilityBonusRanks.has_value());
+    CHECK(coreRequest->values.soulWorkSpeedRank == 20);
+    const auto workRequest = draft.make_work_suitability_request(11);
+    CHECK(workRequest.has_value());
+    CHECK(!workRequest->values.soulWorkSpeedRank.has_value());
+    CHECK((*workRequest->values.workSuitabilityBonusRanks)[pal_stats::work_suitability_index(
+              pal_stats::WorkSuitability::transport)] == 2);
+}
+
+void test_pal_stat_work_suitability_draft_preserves_absolute_bonus_on_reselection() {
+    using namespace pal_stats;
+    constexpr auto miningIndex = work_suitability_index(WorkSuitability::mining);
+    WorkSuitabilityRanks baseRanks{};
+    WorkSuitabilityRanks bonusRanks{};
+    WorkSuitabilityRanks totalRanks{};
+    baseRanks[miningIndex] = 1;
+    bonusRanks[miningIndex] = 3;
+    totalRanks[miningIndex] = 4;
+    const PalStatSnapshot snapshot{
+        .workSuitabilityMaxRank = 10,
+        .workSuitabilityBaseRanks = baseRanks,
+        .workSuitabilityBonusRanks = bonusRanks,
+        .workSuitabilityTotalRanks = totalRanks,
+        .readable = true,
+    };
+
+    PalStatEditDraft draft;
+    draft.synchronize(snapshot, 7);
+    CHECK(draft.values().workSuitabilityBonusRanks[miningIndex] == 3);
+    CHECK(!draft.make_work_suitability_request(11).has_value());
+
+    draft.reconcile(snapshot, 7);
+    CHECK(draft.values().workSuitabilityBonusRanks[miningIndex] == 3);
+
+    draft.values().workSuitabilityBonusRanks[miningIndex] = 2;
+    const auto request = draft.make_work_suitability_request(11);
+    CHECK(request.has_value());
+    CHECK((*request->values.workSuitabilityBonusRanks)[miningIndex] == 2);
 }
 
 void test_pal_stat_request_slot_keeps_only_latest_request() {
@@ -1350,6 +1497,95 @@ void test_pal_stat_request_slot_keeps_only_latest_request() {
     const auto request = slot.consume();
     CHECK(request.has_value());
     CHECK(request->values.level == 20);
+    CHECK(!slot.has_pending());
+}
+
+void test_pal_identity_dimensions_are_independent() {
+    using namespace pal_identity;
+    CHECK(!has_any_change(PalIdentityValues{}));
+    CHECK(has_any_change(PalIdentityValues{.alpha = true}));
+    CHECK(has_any_change(PalIdentityValues{.lucky = true}));
+    CHECK(has_any_change(PalIdentityValues{.awakening = true}));
+
+    const PalIdentitySnapshot allEnabled{
+        .characterId = "BOSS_SheepBall",
+        .baseCharacterId = "SheepBall",
+        .alphaCharacterId = "BOSS_SheepBall",
+        .alpha = true,
+        .lucky = true,
+        .awakening = true,
+        .alphaAvailable = true,
+        .readable = true,
+    };
+    CHECK(verify_identity_edit({.alpha = true, .lucky = true, .awakening = true}, allEnabled));
+    CHECK(verify_identity_edit({.lucky = true}, allEnabled));
+    CHECK(!verify_identity_edit({.alpha = false}, allEnabled));
+
+    auto ordinaryLuckyAwakened = allEnabled;
+    ordinaryLuckyAwakened.alpha = false;
+    ordinaryLuckyAwakened.characterId = "SheepBall";
+    CHECK(verify_identity_edit({.alpha = false, .lucky = true, .awakening = true},
+                               ordinaryLuckyAwakened));
+
+    for (const bool alpha : {false, true}) {
+        for (const bool lucky : {false, true}) {
+            for (const bool awakening : {false, true}) {
+                auto combination = allEnabled;
+                combination.alpha = alpha;
+                combination.lucky = lucky;
+                combination.awakening = awakening;
+                CHECK(verify_identity_edit({.alpha = alpha, .lucky = lucky, .awakening = awakening},
+                                           combination));
+            }
+        }
+    }
+}
+
+void test_pal_identity_draft_emits_only_changed_dimensions() {
+    pal_identity::PalIdentityEditDraft draft;
+    draft.synchronize({.characterId = "SheepBall",
+                       .baseCharacterId = "SheepBall",
+                       .alphaCharacterId = "BOSS_SheepBall",
+                       .alpha = false,
+                       .lucky = false,
+                       .awakening = false,
+                       .alphaAvailable = true,
+                       .readable = true},
+                      7);
+    CHECK(!draft.make_request(11).has_value());
+
+    draft.values().lucky = true;
+    draft.values().awakening = true;
+    const auto request = draft.make_request(11);
+    CHECK(request.has_value());
+    CHECK(!request->values.alpha.has_value());
+    CHECK(request->values.lucky == true);
+    CHECK(request->values.awakening == true);
+    CHECK(request->targetGeneration == 7);
+    CHECK(request->worldGeneration == 11);
+
+    draft.reconcile({.characterId = "SheepBall",
+                     .baseCharacterId = "SheepBall",
+                     .alphaCharacterId = "BOSS_SheepBall",
+                     .alpha = false,
+                     .lucky = false,
+                     .awakening = false,
+                     .alphaAvailable = true,
+                     .readable = true},
+                    7);
+    CHECK(draft.values().lucky);
+    CHECK(draft.values().awakening);
+}
+
+void test_pal_identity_request_slot_keeps_only_latest_request() {
+    pal_identity::PalIdentityEditRequestSlot slot;
+    slot.submit({.values = {.alpha = true}, .targetGeneration = 1, .worldGeneration = 2});
+    slot.submit({.values = {.awakening = true}, .targetGeneration = 1, .worldGeneration = 2});
+    CHECK(slot.has_pending());
+    const auto request = slot.consume();
+    CHECK(request.has_value());
+    CHECK(!request->values.alpha.has_value());
+    CHECK(request->values.awakening == true);
     CHECK(!slot.has_pending());
 }
 
@@ -1417,6 +1653,10 @@ auto main() -> int {
     test_pal_stat_values_detects_any_change();
     test_pal_stat_verification_checks_only_requested_fields();
     test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes();
+    test_pal_stat_work_suitability_draft_preserves_absolute_bonus_on_reselection();
     test_pal_stat_request_slot_keeps_only_latest_request();
+    test_pal_identity_dimensions_are_independent();
+    test_pal_identity_draft_emits_only_changed_dimensions();
+    test_pal_identity_request_slot_keeps_only_latest_request();
     return failures == 0 ? 0 : 1;
 }

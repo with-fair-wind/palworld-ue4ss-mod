@@ -1,6 +1,6 @@
 /**
  * @file pal_stats.cpp
- * @brief 实现帕鲁属性编辑网关：导航 `SaveParameter` 结构体并读写等级/个体值/亲密度。
+ * @brief 实现帕鲁属性编辑网关：导航 `SaveParameter` 并读写等级、个体值、强化与亲密度。
  * @details 所有接口在游戏线程执行，所有 Unreal 裸指针均为非拥有观察指针，
  *          不跨调用缓存任何句柄或属性指针。
  */
@@ -12,6 +12,7 @@
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <game/pal_game.hpp>
@@ -63,6 +64,47 @@ namespace {
                : CastField<FByteProperty>(rowStruct->FindProperty(FName(name, FNAME_Find)));
 }
 
+/** @brief 查找 `uint16` 属性；字段布局不匹配时返回空。 */
+[[nodiscard]] auto find_uint16(UStruct* rowStruct, const TCHAR* name) -> FUInt16Property* {
+    return rowStruct == nullptr
+               ? nullptr
+               : CastField<FUInt16Property>(rowStruct->FindProperty(FName(name, FNAME_Find)));
+}
+
+/** @brief 查找底层为整数的枚举属性；不接受未知的非整数布局。 */
+[[nodiscard]] auto find_enum(UStruct* ownerStruct, const TCHAR* name) -> FEnumProperty* {
+    auto* const property =
+        ownerStruct == nullptr
+            ? nullptr
+            : CastField<FEnumProperty>(ownerStruct->FindProperty(FName(name, FNAME_Find)));
+    auto* const underlying = property == nullptr ? nullptr : property->GetUnderlyingProperty();
+    return underlying != nullptr && underlying->IsInteger() ? property : nullptr;
+}
+
+/** @brief 从已预检的枚举属性读取底层整数。 */
+[[nodiscard]] auto read_enum(FEnumProperty* property, const void* container) -> std::optional<int> {
+    auto* const underlying = property == nullptr ? nullptr : property->GetUnderlyingProperty();
+    auto* const data = property == nullptr
+                           ? nullptr
+                           : property->ContainerPtrToValuePtr<void>(const_cast<void*>(container));
+    if (underlying == nullptr || data == nullptr || !underlying->IsInteger()) {
+        return std::nullopt;
+    }
+    return static_cast<int>(underlying->GetSignedIntPropertyValue(data));
+}
+
+/** @brief 向已预检的枚举属性写入底层整数。 */
+[[nodiscard]] auto write_enum(FEnumProperty* property, void* container, const int value) -> bool {
+    auto* const underlying = property == nullptr ? nullptr : property->GetUnderlyingProperty();
+    auto* const data =
+        property == nullptr ? nullptr : property->ContainerPtrToValuePtr<void>(container);
+    if (underlying == nullptr || data == nullptr || !underlying->IsInteger()) {
+        return false;
+    }
+    underlying->SetIntPropertyValue(data, static_cast<int64_t>(value));
+    return true;
+}
+
 /** @brief 读取已预检的 `uint8` 属性。 */
 [[nodiscard]] auto read_byte(FByteProperty* property, const void* saveParam) -> int {
     return property->GetPropertyValueInContainer(saveParam);
@@ -71,6 +113,194 @@ namespace {
 /** @brief 把已裁剪的值写入预检通过的 `uint8` 属性。 */
 auto write_byte(FByteProperty* property, void* saveParam, const int value) -> void {
     property->SetPropertyValueInContainer(saveParam, static_cast<std::uint8_t>(value));
+}
+
+/** @brief 一次动态 UFunction 参数缓冲区，负责初始化和析构非平凡属性。 */
+class FunctionParams final {
+public:
+    explicit FunctionParams(UFunction* function)
+        : function_{function}, storage_(static_cast<std::size_t>(function->GetParmsSize())) {
+        function_->InitializeStruct(storage_.data());
+    }
+
+    FunctionParams(const FunctionParams&) = delete;
+    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
+    FunctionParams(FunctionParams&&) = delete;
+    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
+
+    ~FunctionParams() {
+        function_->DestroyStruct(storage_.data());
+    }
+
+    [[nodiscard]] auto data() noexcept -> void* {
+        return storage_.data();
+    }
+
+private:
+    UFunction* function_{};
+    std::vector<std::byte> storage_;
+};
+
+struct RuntimeLimits {
+    int condensationMaxStars{};
+    int workSuitabilityMaxRank{};
+};
+
+/** @brief 从当前世界的 PalGameSetting 读取版本相关上限，不把数值硬编码进 Mod。 */
+[[nodiscard]] auto runtime_limits(UObject* worldContext) -> std::optional<RuntimeLimits> {
+    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const function = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalUtility:GetGameSetting"));
+    if (utility == nullptr || function == nullptr) {
+        return std::nullopt;
+    }
+    struct Params {
+        UObject* WorldContextObject{};
+        UObject* ReturnValue{};
+    } params{.WorldContextObject = worldContext};
+    utility->ProcessEvent(function, &params);
+    auto* const setting = params.ReturnValue;
+    if (!pal_game::is_valid(setting)) {
+        return std::nullopt;
+    }
+    auto* const characterMaxRank =
+        CastField<FIntProperty>(setting->GetPropertyByNameInChain(STR("CharacterMaxRank")));
+    auto* const workSuitabilityMaxRank =
+        CastField<FIntProperty>(setting->GetPropertyByNameInChain(STR("WorkSuitabilityMaxRank")));
+    if (characterMaxRank == nullptr || workSuitabilityMaxRank == nullptr) {
+        return std::nullopt;
+    }
+    const int internalMaxRank = characterMaxRank->GetPropertyValueInContainer(setting);
+    const int workMaxRank = workSuitabilityMaxRank->GetPropertyValueInContainer(setting);
+    if (internalMaxRank < 1 || internalMaxRank > 100 || workMaxRank < 1 || workMaxRank > 100) {
+        return std::nullopt;
+    }
+    return RuntimeLimits{
+        .condensationMaxStars = internalMaxRank - 1,
+        .workSuitabilityMaxRank = workMaxRank,
+    };
+}
+
+/** @brief 读取持久化的个体工作适应性加成数组，并拒绝重复/越界条目。 */
+[[nodiscard]] auto read_work_suitability_bonuses(UStruct* saveStruct, const void* saveParam,
+                                                 const int maxRank)
+    -> std::optional<WorkSuitabilityRanks> {
+    auto* const arrayProperty = saveStruct == nullptr
+                                    ? nullptr
+                                    : CastField<FArrayProperty>(saveStruct->FindProperty(
+                                          FName(STR("GotWorkSuitabilityAddRankList"), FNAME_Find)));
+    auto* const itemProperty =
+        arrayProperty == nullptr ? nullptr : CastField<FStructProperty>(arrayProperty->GetInner());
+    auto* const itemStruct = itemProperty == nullptr ? nullptr : itemProperty->GetStruct().Get();
+    auto* const suitability = find_enum(itemStruct, STR("WorkSuitability"));
+    auto* const rank =
+        itemStruct == nullptr
+            ? nullptr
+            : CastField<FIntProperty>(itemStruct->FindProperty(FName(STR("Rank"), FNAME_Find)));
+    if (arrayProperty == nullptr || itemProperty == nullptr || suitability == nullptr ||
+        rank == nullptr) {
+        return std::nullopt;
+    }
+
+    WorkSuitabilityRanks values{};
+    std::array<bool, kWorkSuitabilityCount> visited{};
+    FScriptArrayHelper_InContainer entries(arrayProperty, saveParam);
+    if (entries.Num() < 0 || entries.Num() > 128) {
+        return std::nullopt;
+    }
+    for (int32 index{}; index < entries.Num(); ++index) {
+        void* const item = entries.GetRawPtr(index);
+        const auto rawSuitability = read_enum(suitability, item);
+        if (!rawSuitability.has_value() || *rawSuitability < 1 ||
+            *rawSuitability > static_cast<int>(kWorkSuitabilityCount)) {
+            return std::nullopt;
+        }
+        const auto valueIndex = static_cast<std::size_t>(*rawSuitability - 1);
+        const int value = rank->GetPropertyValueInContainer(item);
+        if (visited[valueIndex] || value < 0 || value > maxRank) {
+            return std::nullopt;
+        }
+        visited[valueIndex] = true;
+        values[valueIndex] = value;
+    }
+    return values;
+}
+
+/**
+ * @brief 调用原生工作适应性 getter。
+ * @details Palworld 1.0.2 中该 getter 不包含 `GotWorkSuitabilityAddRankList` 的永久附加值，
+ *          因此这里只把返回值作为基础等级，合计等级由纯值层显式计算。
+ */
+[[nodiscard]] auto work_suitability_base(UObject* pal, const WorkSuitability suitability)
+    -> std::optional<int> {
+    auto* const function =
+        pal == nullptr ? nullptr : pal->GetFunctionByNameInChain(STR("GetWorkSuitabilityRank"));
+    auto* const input =
+        function == nullptr ? nullptr : find_enum(function, STR("InWorkSuitability"));
+    auto* const output = function == nullptr ? nullptr
+                                             : CastField<FIntProperty>(function->FindProperty(
+                                                   FName(STR("ReturnValue"), FNAME_Find)));
+    if (function == nullptr || input == nullptr || output == nullptr) {
+        return std::nullopt;
+    }
+    FunctionParams params{function};
+    if (!write_enum(input, params.data(), static_cast<int>(suitability))) {
+        return std::nullopt;
+    }
+    pal->ProcessEvent(function, params.data());
+    const int value = output->GetPropertyValueInContainer(params.data());
+    return value >= 0 && value <= 100 ? std::optional<int>{value} : std::nullopt;
+}
+
+/** @brief 已完整预检的原生工作适应性永久加成增量接口。 */
+class WorkSuitabilitySetter final {
+public:
+    [[nodiscard]] static auto prepare(UObject* pal) -> std::optional<WorkSuitabilitySetter> {
+        auto* const function =
+            pal == nullptr ? nullptr
+                           : pal->GetFunctionByNameInChain(STR("SetWorkSuitabilityAddRank"));
+        auto* const suitability =
+            function == nullptr ? nullptr : find_enum(function, STR("WorkSuitability"));
+        auto* const rank = function == nullptr ? nullptr
+                                               : CastField<FIntProperty>(function->FindProperty(
+                                                     FName(STR("addRank"), FNAME_Find)));
+        if (function == nullptr || suitability == nullptr || rank == nullptr) {
+            return std::nullopt;
+        }
+        return WorkSuitabilitySetter{function, suitability, rank};
+    }
+
+    [[nodiscard]] auto add(UObject* pal, const WorkSuitability suitability, const int delta) const
+        -> bool {
+        if (!pal_game::is_valid(pal)) {
+            return false;
+        }
+        FunctionParams params{function_};
+        if (!write_enum(suitability_, params.data(), static_cast<int>(suitability))) {
+            return false;
+        }
+        rank_->SetPropertyValueInContainer(params.data(), static_cast<int32_t>(delta));
+        pal->ProcessEvent(function_, params.data());
+        return true;
+    }
+
+private:
+    WorkSuitabilitySetter(UFunction* function, FEnumProperty* suitability, FIntProperty* rank)
+        : function_{function}, suitability_{suitability}, rank_{rank} {}
+
+    UFunction* function_{};
+    FEnumProperty* suitability_{};
+    FIntProperty* rank_{};
+};
+
+/** @brief 通知游戏刷新由 SaveParameter 派生的缓存、委托和组件。 */
+[[nodiscard]] auto invoke_save_parameter_rep(UObject* pal, UFunction* function) -> bool {
+    if (!pal_game::is_valid(pal) || function == nullptr || function->GetParmsSize() != 0) {
+        return false;
+    }
+    pal->ProcessEvent(function, nullptr);
+    return true;
 }
 
 /** @brief 取得 `PalDatabaseCharacterParameter` 单例；不可用时返回 `nullptr`。 */
@@ -127,7 +357,9 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     const auto level = invoke_int_return(pal, STR("GetLevel"));
     const auto friendshipRank = invoke_int_return(pal, STR("GetFriendshipRank"));
     const auto friendshipPoint = invoke_int_return(pal, STR("GetFriendshipPoint"));
-    if (!level.has_value() || !friendshipRank.has_value() || !friendshipPoint.has_value()) {
+    const auto limits = runtime_limits(pal);
+    if (!level.has_value() || !friendshipRank.has_value() || !friendshipPoint.has_value() ||
+        !limits.has_value()) {
         return snapshot;
     }
 
@@ -140,15 +372,63 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     auto* const talentHp = find_byte(rowStruct, STR("Talent_HP"));
     auto* const talentShot = find_byte(rowStruct, STR("Talent_Shot"));
     auto* const talentDefense = find_byte(rowStruct, STR("Talent_Defense"));
-    if (talentHp == nullptr || talentShot == nullptr || talentDefense == nullptr) {
+    auto* const soulHpRank = find_byte(rowStruct, STR("Rank_HP"));
+    auto* const soulAttackRank = find_byte(rowStruct, STR("Rank_Attack"));
+    auto* const soulDefenseRank = find_byte(rowStruct, STR("Rank_Defence"));
+    auto* const soulWorkSpeedRank = find_byte(rowStruct, STR("Rank_CraftSpeed"));
+    auto* const condensationRank = find_byte(rowStruct, STR("Rank"));
+    auto* const rankUpExp = find_uint16(rowStruct, STR("RankUpExp"));
+    auto* const gender = find_enum(rowStruct, STR("Gender"));
+    if (talentHp == nullptr || talentShot == nullptr || talentDefense == nullptr ||
+        soulHpRank == nullptr || soulAttackRank == nullptr || soulDefenseRank == nullptr ||
+        soulWorkSpeedRank == nullptr || condensationRank == nullptr || rankUpExp == nullptr ||
+        gender == nullptr) {
         return snapshot;
     }
+
+    const int internalRank = read_byte(condensationRank, saveParam);
+    const auto rawGender = read_enum(gender, saveParam);
+    const auto workBonuses =
+        read_work_suitability_bonuses(rowStruct, saveParam, limits->workSuitabilityMaxRank);
+    if (internalRank < 1 || internalRank > limits->condensationMaxStars + 1 ||
+        !rawGender.has_value() || *rawGender < static_cast<int>(PalGender::none) ||
+        *rawGender > static_cast<int>(PalGender::female) || !workBonuses.has_value()) {
+        return snapshot;
+    }
+
+    WorkSuitabilityRanks workBases{};
+    WorkSuitabilityRanks workTotals{};
+    for (std::size_t index{}; index < workBases.size(); ++index) {
+        const auto suitability = static_cast<WorkSuitability>(index + 1);
+        const auto base = work_suitability_base(pal, suitability);
+        if (!base.has_value()) {
+            return snapshot;
+        }
+        workBases[index] = *base;
+        workTotals[index] = work_suitability_total_rank(*base, (*workBonuses)[index],
+                                                        limits->workSuitabilityMaxRank);
+    }
+
     snapshot.level = *level;
     snapshot.friendshipRank = *friendshipRank;
     snapshot.friendshipPoint = *friendshipPoint;
     snapshot.talentHp = read_byte(talentHp, saveParam);
     snapshot.talentShot = read_byte(talentShot, saveParam);
     snapshot.talentDefense = read_byte(talentDefense, saveParam);
+    snapshot.soulHpRank = read_byte(soulHpRank, saveParam);
+    snapshot.soulAttackRank = read_byte(soulAttackRank, saveParam);
+    snapshot.soulDefenseRank = read_byte(soulDefenseRank, saveParam);
+    snapshot.soulWorkSpeedRank = read_byte(soulWorkSpeedRank, saveParam);
+    snapshot.condensationStars =
+        internal_rank_to_condensation_stars(internalRank, limits->condensationMaxStars);
+    snapshot.condensationMaxStars = limits->condensationMaxStars;
+    snapshot.partnerSkillLevel = internalRank;
+    snapshot.rankUpExp = rankUpExp->GetPropertyValueInContainer(saveParam);
+    snapshot.gender = static_cast<PalGender>(*rawGender);
+    snapshot.workSuitabilityMaxRank = limits->workSuitabilityMaxRank;
+    snapshot.workSuitabilityBaseRanks = workBases;
+    snapshot.workSuitabilityBonusRanks = *workBonuses;
+    snapshot.workSuitabilityTotalRanks = workTotals;
     snapshot.readable = true;
     return snapshot;
 }
@@ -167,6 +447,18 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
         result.status = PalStatEditStatus::preflightFailed;
         result.message = "属性修改未执行：无法完整读取修改前快照。";
         return result;
+    }
+
+    PalStatValues expectedValues = request.values;
+    if (expectedValues.workSuitabilityBonusRanks.has_value()) {
+        for (std::size_t index{}; index < expectedValues.workSuitabilityBonusRanks->size();
+             ++index) {
+            const int maxBonus = max_editable_work_suitability_bonus(
+                before.workSuitabilityBaseRanks[index], before.workSuitabilityBonusRanks[index],
+                before.workSuitabilityMaxRank);
+            (*expectedValues.workSuitabilityBonusRanks)[index] =
+                std::clamp((*expectedValues.workSuitabilityBonusRanks)[index], 0, maxBonus);
+        }
     }
 
     FStructProperty* saveProperty = nullptr;
@@ -188,6 +480,24 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
     auto* const talentDefense = request.values.talentDefense.has_value()
                                     ? find_byte(rowStruct, STR("Talent_Defense"))
                                     : nullptr;
+    auto* const soulHpRank =
+        request.values.soulHpRank.has_value() ? find_byte(rowStruct, STR("Rank_HP")) : nullptr;
+    auto* const soulAttackRank = request.values.soulAttackRank.has_value()
+                                     ? find_byte(rowStruct, STR("Rank_Attack"))
+                                     : nullptr;
+    auto* const soulDefenseRank = request.values.soulDefenseRank.has_value()
+                                      ? find_byte(rowStruct, STR("Rank_Defence"))
+                                      : nullptr;
+    auto* const soulWorkSpeedRank = request.values.soulWorkSpeedRank.has_value()
+                                        ? find_byte(rowStruct, STR("Rank_CraftSpeed"))
+                                        : nullptr;
+    auto* const condensationRank =
+        request.values.condensationStars.has_value() ? find_byte(rowStruct, STR("Rank")) : nullptr;
+    auto* const rankUpExp = request.values.condensationStars.has_value()
+                                ? find_uint16(rowStruct, STR("RankUpExp"))
+                                : nullptr;
+    auto* const gender =
+        request.values.gender.has_value() ? find_enum(rowStruct, STR("Gender")) : nullptr;
     auto* const friendshipPoint = request.values.friendshipRank.has_value()
                                       ? CastField<FIntProperty>(rowStruct->FindProperty(
                                             FName(STR("FriendshipPoint"), FNAME_Find)))
@@ -196,18 +506,36 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
         request.values.friendshipRank.has_value()
             ? friendship_required_point(clamp_friendship_rank(*request.values.friendshipRank))
             : std::optional<int>{};
+    const bool needsSaveParameterRefresh = has_core_stat_change(request.values);
+    auto* const onRepSaveParameter = needsSaveParameterRefresh
+                                         ? pal->GetFunctionByNameInChain(STR("OnRep_SaveParameter"))
+                                         : nullptr;
+    const auto workSetter = request.values.workSuitabilityBonusRanks.has_value()
+                                ? WorkSuitabilitySetter::prepare(pal)
+                                : std::optional<WorkSuitabilitySetter>{};
 
     const bool preflightFailed =
         (request.values.level.has_value() && level == nullptr) ||
         (request.values.talentHp.has_value() && talentHp == nullptr) ||
         (request.values.talentShot.has_value() && talentShot == nullptr) ||
         (request.values.talentDefense.has_value() && talentDefense == nullptr) ||
+        (request.values.soulHpRank.has_value() && soulHpRank == nullptr) ||
+        (request.values.soulAttackRank.has_value() && soulAttackRank == nullptr) ||
+        (request.values.soulDefenseRank.has_value() && soulDefenseRank == nullptr) ||
+        (request.values.soulWorkSpeedRank.has_value() && soulWorkSpeedRank == nullptr) ||
+        (needsSaveParameterRefresh &&
+         (onRepSaveParameter == nullptr || onRepSaveParameter->GetParmsSize() != 0)) ||
+        (request.values.condensationStars.has_value() &&
+         (condensationRank == nullptr || rankUpExp == nullptr)) ||
+        (request.values.gender.has_value() &&
+         (gender == nullptr || !is_editable_gender(*request.values.gender))) ||
+        (request.values.workSuitabilityBonusRanks.has_value() && !workSetter.has_value()) ||
         (request.values.friendshipRank.has_value() &&
          (friendshipPoint == nullptr || !requiredFriendshipPoint.has_value()));
     if (preflightFailed) {
         result.status = PalStatEditStatus::preflightFailed;
         result.snapshot = before;
-        result.message = "属性修改未执行：当前游戏版本的字段或亲密度阈值不可用。";
+        result.message = "属性修改未执行：当前游戏版本的字段、原生接口或请求值不可安全使用。";
         return result;
     }
 
@@ -223,13 +551,54 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
     if (talentDefense != nullptr) {
         write_byte(talentDefense, saveParam, clamp_talent(*request.values.talentDefense));
     }
+    if (soulHpRank != nullptr) {
+        write_byte(soulHpRank, saveParam, clamp_soul_rank(*request.values.soulHpRank));
+    }
+    if (soulAttackRank != nullptr) {
+        write_byte(soulAttackRank, saveParam, clamp_soul_rank(*request.values.soulAttackRank));
+    }
+    if (soulDefenseRank != nullptr) {
+        write_byte(soulDefenseRank, saveParam, clamp_soul_rank(*request.values.soulDefenseRank));
+    }
+    if (soulWorkSpeedRank != nullptr) {
+        write_byte(soulWorkSpeedRank, saveParam,
+                   clamp_soul_rank(*request.values.soulWorkSpeedRank));
+    }
+    if (condensationRank != nullptr) {
+        write_byte(condensationRank, saveParam,
+                   condensation_stars_to_internal_rank(*request.values.condensationStars,
+                                                       before.condensationMaxStars));
+        rankUpExp->SetPropertyValueInContainer(saveParam, static_cast<std::uint16_t>(0));
+    }
+    bool writesCompleted = true;
+    if (gender != nullptr) {
+        writesCompleted = write_enum(gender, saveParam, static_cast<int>(*request.values.gender));
+    }
+    if (workSetter.has_value()) {
+        for (std::size_t index{};
+             writesCompleted && index < expectedValues.workSuitabilityBonusRanks->size(); ++index) {
+            const int expected = (*expectedValues.workSuitabilityBonusRanks)[index];
+            const int delta = work_suitability_bonus_delta(before.workSuitabilityBonusRanks[index],
+                                                           expected, before.workSuitabilityMaxRank);
+            if (delta != 0) {
+                writesCompleted =
+                    workSetter->add(pal, static_cast<WorkSuitability>(index + 1), delta);
+            }
+        }
+    }
     if (friendshipPoint != nullptr) {
         friendshipPoint->SetPropertyValueInContainer(
             saveParam, static_cast<int32_t>(*requiredFriendshipPoint));
     }
+    if (needsSaveParameterRefresh) {
+        writesCompleted = invoke_save_parameter_rep(pal, onRepSaveParameter) && writesCompleted;
+    }
 
     result.snapshot = read_stats(target);
-    if (verify_stat_edit(request.values, result.snapshot)) {
+    const bool rankProgressNormalized =
+        !request.values.condensationStars.has_value() || result.snapshot.rankUpExp == 0;
+    if (writesCompleted && rankProgressNormalized &&
+        verify_stat_edit(expectedValues, result.snapshot)) {
         result.status = PalStatEditStatus::succeeded;
         result.message = "属性修改成功，并已通过游戏数据重读验证。";
         return result;
@@ -247,9 +616,51 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
     if (talentDefense != nullptr) {
         write_byte(talentDefense, saveParam, before.talentDefense);
     }
+    if (soulHpRank != nullptr) {
+        write_byte(soulHpRank, saveParam, before.soulHpRank);
+    }
+    if (soulAttackRank != nullptr) {
+        write_byte(soulAttackRank, saveParam, before.soulAttackRank);
+    }
+    if (soulDefenseRank != nullptr) {
+        write_byte(soulDefenseRank, saveParam, before.soulDefenseRank);
+    }
+    if (soulWorkSpeedRank != nullptr) {
+        write_byte(soulWorkSpeedRank, saveParam, before.soulWorkSpeedRank);
+    }
+    if (condensationRank != nullptr) {
+        write_byte(condensationRank, saveParam,
+                   condensation_stars_to_internal_rank(before.condensationStars,
+                                                       before.condensationMaxStars));
+        rankUpExp->SetPropertyValueInContainer(saveParam,
+                                               static_cast<std::uint16_t>(before.rankUpExp));
+    }
+    bool rollbackOperationsSucceeded = true;
+    if (gender != nullptr) {
+        rollbackOperationsSucceeded =
+            write_enum(gender, saveParam, static_cast<int>(before.gender));
+    }
+    if (workSetter.has_value()) {
+        rollbackOperationsSucceeded = rollbackOperationsSucceeded && result.snapshot.readable;
+        for (std::size_t index{};
+             rollbackOperationsSucceeded && index < before.workSuitabilityBonusRanks.size();
+             ++index) {
+            const int delta = work_suitability_bonus_delta(
+                result.snapshot.workSuitabilityBonusRanks[index],
+                before.workSuitabilityBonusRanks[index], before.workSuitabilityMaxRank);
+            if (delta != 0) {
+                rollbackOperationsSucceeded =
+                    workSetter->add(pal, static_cast<WorkSuitability>(index + 1), delta);
+            }
+        }
+    }
     if (friendshipPoint != nullptr) {
         friendshipPoint->SetPropertyValueInContainer(saveParam,
                                                      static_cast<int32_t>(before.friendshipPoint));
+    }
+    if (needsSaveParameterRefresh) {
+        rollbackOperationsSucceeded =
+            invoke_save_parameter_rep(pal, onRepSaveParameter) && rollbackOperationsSucceeded;
     }
 
     result.snapshot = read_stats(target);
@@ -266,10 +677,34 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
     if (request.values.talentDefense.has_value()) {
         rollbackExpected.talentDefense = before.talentDefense;
     }
+    if (request.values.soulHpRank.has_value()) {
+        rollbackExpected.soulHpRank = before.soulHpRank;
+    }
+    if (request.values.soulAttackRank.has_value()) {
+        rollbackExpected.soulAttackRank = before.soulAttackRank;
+    }
+    if (request.values.soulDefenseRank.has_value()) {
+        rollbackExpected.soulDefenseRank = before.soulDefenseRank;
+    }
+    if (request.values.soulWorkSpeedRank.has_value()) {
+        rollbackExpected.soulWorkSpeedRank = before.soulWorkSpeedRank;
+    }
+    if (request.values.condensationStars.has_value()) {
+        rollbackExpected.condensationStars = before.condensationStars;
+    }
+    if (request.values.gender.has_value()) {
+        rollbackExpected.gender = before.gender;
+    }
+    if (request.values.workSuitabilityBonusRanks.has_value()) {
+        rollbackExpected.workSuitabilityBonusRanks = before.workSuitabilityBonusRanks;
+    }
     if (request.values.friendshipRank.has_value()) {
         rollbackExpected.friendshipRank = before.friendshipRank;
     }
-    if (verify_stat_edit(rollbackExpected, result.snapshot)) {
+    const bool rankProgressRestored = !request.values.condensationStars.has_value() ||
+                                      result.snapshot.rankUpExp == before.rankUpExp;
+    if (rollbackOperationsSucceeded && rankProgressRestored &&
+        verify_stat_edit(rollbackExpected, result.snapshot)) {
         result.status = PalStatEditStatus::verificationFailed;
         result.message = "属性写入后验证失败，已恢复修改前数值。";
     } else {

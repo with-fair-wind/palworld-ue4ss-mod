@@ -24,7 +24,7 @@ public:
     [[nodiscard]] auto is_valid(PalStatTarget target) const -> bool;
 
     /**
-     * @brief 读取当前等级、三项个体值与亲密度 rank/point。
+     * @brief 读取等级、个体值、强化、浓缩、性别、工作适应性与亲密度快照。
      * @param[in] target 已由 is_valid() 校验的目标句柄。
      * @return 从游戏反射读取的属性快照；目标失效或结构不可用时 `readable == false`。
      */
@@ -35,7 +35,9 @@ public:
      * @param[in] target 已由 is_valid() 校验的目标句柄。
      * @param[in] request 携带期望值与目标/世界代次的编辑请求。
      * @return 结构化事务结果，包含最终重读快照和面向用户的诊断。
-     * @details 任一所需反射字段或亲密度阈值不可用时零写入；写后不一致时恢复修改前值。
+     * @details 任一所需反射字段、原生 setter 或亲密度阈值不可用时零写入；写后不一致时恢复修改前值。
+     *          强化直接写入四个 Rank 字段；浓缩同步 Rank/RankUpExp；工作适应性通过原生 setter
+     * 更新。
      */
     [[nodiscard]] auto apply_stat_edit(PalStatTarget target, const PalStatEditRequest& request)
         -> PalStatEditResult;

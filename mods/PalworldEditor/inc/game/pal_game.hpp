@@ -166,6 +166,12 @@ struct SelectedPalTarget {
     /** @brief 当前帕鲁的个体参数对象；解析失败时为空。 */
     UObject* parameter{};
 
+    /** @brief Holder 是否提供了权威的当前出战 Handle 查询接口。 */
+    bool spawnStateKnown{};
+
+    /** @brief 当前选中 Handle 是否就是 Holder 报告的当前出战 Handle。 */
+    bool selectedIsSpawned{};
+
     /** @brief 跨线程发布所需的纯值个体 GUID 与 CharacterID。 */
     skill_editor::SelectedTargetObservation observation;
 
@@ -237,6 +243,25 @@ struct SelectedPalTarget {
         return failure(handleUnavailable);
     }
 
+    auto* const getSpawnedHandleFunction =
+        holder->GetFunctionByNameInChain(STR("TryGetSpawnedOtomoHandle"));
+    auto* const spawnedHandleResult =
+        getSpawnedHandleFunction == nullptr
+            ? nullptr
+            : CastField<FObjectPropertyBase>(
+                  getSpawnedHandleFunction->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    UObject* spawnedHandle{};
+    const bool spawnStateKnown = spawnedHandleResult != nullptr;
+    if (spawnStateKnown) {
+        std::vector<std::byte> params(
+            static_cast<std::size_t>(getSpawnedHandleFunction->GetParmsSize()));
+        getSpawnedHandleFunction->InitializeStruct(params.data());
+        holder->ProcessEvent(getSpawnedHandleFunction, params.data());
+        spawnedHandle = spawnedHandleResult->GetObjectPropertyValue(
+            spawnedHandleResult->ContainerPtrToValuePtr<void>(params.data()));
+        getSpawnedHandleFunction->DestroyStruct(params.data());
+    }
+
     auto* const getParameterFunction = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr,
         STR("/Script/Pal.PalIndividualCharacterHandle:TryGetIndividualParameter"));
@@ -293,6 +318,8 @@ struct SelectedPalTarget {
 
     return {
         .parameter = parameter,
+        .spawnStateKnown = spawnStateKnown,
+        .selectedIsSpawned = spawnStateKnown && spawnedHandle == handle,
         .observation =
             {
                 .identity =
