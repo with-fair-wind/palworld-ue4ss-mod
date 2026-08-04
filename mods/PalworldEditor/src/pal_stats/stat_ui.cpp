@@ -8,13 +8,14 @@
 #include <string>
 
 #include <imgui.h>
+#include <mod/editor_ui.hpp>
 #include <mod/mod_core.hpp>
 
 void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
                                          const SkillEditorSnapshot& snapshot,
                                          const bool mutationsDisabled,
                                          const bool workSuitabilityMutationsDisabled) {
-    ImGui::TextUnformatted("属性修改");
+    editor_ui::section_header("属性修改");
     const auto& stats = snapshot.palStat;
     if (!stats.readable) {
         ImGui::TextDisabled("属性读取中或不可用");
@@ -110,8 +111,11 @@ void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
         const auto workRequest =
             self->statDraft_.make_work_suitability_request(snapshot.worldGeneration);
         ImGui::BeginDisabled(workSuitabilityMutationsDisabled || !workRequest.has_value());
-        if (ImGui::Button("应用工作适应性修改")) {
-            self->statRequestSlot_.submit(*workRequest);
+        {
+            editor_ui::scoped_accent_button accent;
+            if (ImGui::Button("应用工作适应性修改")) {
+                self->statRequestSlot_.submit(*workRequest);
+            }
         }
         ImGui::EndDisabled();
         ImGui::TreePop();
@@ -123,8 +127,11 @@ void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
 
     const auto coreRequest = self->statDraft_.make_core_request(snapshot.worldGeneration);
     ImGui::BeginDisabled(mutationsDisabled || !coreRequest.has_value());
-    if (ImGui::Button("应用基础属性修改")) {
-        self->statRequestSlot_.submit(*coreRequest);
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("应用基础属性修改")) {
+            self->statRequestSlot_.submit(*coreRequest);
+        }
     }
     ImGui::EndDisabled();
     ImGui::SameLine();

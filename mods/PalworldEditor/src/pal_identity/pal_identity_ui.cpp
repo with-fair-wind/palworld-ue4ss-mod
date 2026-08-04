@@ -5,12 +5,13 @@
  *          拆出，签名不变。
  */
 #include <imgui.h>
+#include <mod/editor_ui.hpp>
 #include <mod/mod_core.hpp>
 
 void PalworldEditorMod::render_pal_identity(PalworldEditorMod* self,
                                             const SkillEditorSnapshot& snapshot,
                                             const bool mutationsDisabled) {
-    ImGui::TextUnformatted("形态修改");
+    editor_ui::section_header("形态修改");
     const auto& identity = snapshot.palIdentity;
     if (!identity.readable) {
         ImGui::TextDisabled("形态字段读取中或当前游戏版本不支持安全修改");
@@ -43,8 +44,11 @@ void PalworldEditorMod::render_pal_identity(PalworldEditorMod* self,
 
     const auto request = self->identityDraft_.make_request(snapshot.worldGeneration);
     ImGui::BeginDisabled(mutationsDisabled || identity.summoned || !request.has_value());
-    if (ImGui::Button("应用形态修改")) {
-        self->identityRequestSlot_.submit(*request);
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("应用形态修改")) {
+            self->identityRequestSlot_.submit(*request);
+        }
     }
     ImGui::EndDisabled();
     ImGui::SameLine();
