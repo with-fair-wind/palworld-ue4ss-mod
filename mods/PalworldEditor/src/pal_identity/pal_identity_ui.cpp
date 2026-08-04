@@ -41,6 +41,10 @@ void PalworldEditorMod::render_pal_identity(PalworldEditorMod* self,
                            "当前帕鲁正在场上；请先按 E 收回，再应用形态修改。");
     }
     ImGui::TextDisabled("三个维度相互独立；不消耗材料。Alpha 会切换普通/BOSS CharacterID。");
+    if (values.awakening != identity.awakening) {
+        ImGui::TextDisabled(
+            "提示：仅改觉醒时，金色气流视觉需另切一次头目或退出重进世界才会刷新；存档已正确写入。");
+    }
 
     const auto request = self->identityDraft_.make_request(snapshot.worldGeneration);
     ImGui::BeginDisabled(mutationsDisabled || identity.summoned || !request.has_value());
