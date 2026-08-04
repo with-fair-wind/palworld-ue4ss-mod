@@ -29,6 +29,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
+#include <common/text_encoding.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
@@ -42,7 +43,6 @@
 #include <skills/passive_skill_presets.hpp>
 #include <skills/selected_target_state.hpp>
 #include <skills/world_session_state.hpp>
-#include <support/text_encoding.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;

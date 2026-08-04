@@ -13,9 +13,9 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <common/text_encoding.hpp>
 #include <game/pal_game.hpp>
 #include <pal_identity/pal_identity.hpp>
-#include <support/text_encoding.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;

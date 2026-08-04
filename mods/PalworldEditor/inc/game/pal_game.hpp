@@ -24,29 +24,16 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
+#include <common/game_reflection.hpp>
+#include <common/text_encoding.hpp>
 #include <items/item_catalog.hpp>
 #include <skills/selected_target_state.hpp>
-#include <support/text_encoding.hpp>
 
 using namespace RC;
 using namespace RC::Unreal;
 
 /** @brief 封装 PalworldEditor 直接调用的游戏线程反射操作。 */
 namespace pal_game {
-/** @brief 主玩家背包数据对象的 Unreal 类名。 */
-inline constexpr const TCHAR* kInventoryClassName = STR("PalPlayerInventoryData");
-
-/**
- * @brief 对 UObject 观察指针执行轻量有效性检查。
- * @param[in] obj 待检查的非拥有 UObject 指针。
- * @retval true 指针非空且仍能取得类元数据。
- * @retval false 指针为空或对象的类元数据已经失效。
- * @warning 本检查不能延长对象生命周期，也不能保证对象在后续帧仍然有效。
- */
-inline auto is_valid(UObject* obj) -> bool {
-    return obj != nullptr && obj->GetClassPrivate() != nullptr;
-}
-
 /** @brief 本地玩家队伍 Holder 的运行时解析结果与诊断信息。 */
 struct LocalOtomoHolderResolution {
     UObject* holder{}; /**< 唯一的本地玩家 Holder；解析失败时为空。 */
@@ -56,49 +43,6 @@ struct LocalOtomoHolderResolution {
     std::size_t localCandidateCount{}; /**< 由本地控制器拥有的 Holder 数量。 */
     std::wstring candidateClasses;     /**< 用于状态变化日志的候选实际类名。 */
 };
-
-/**
- * @brief 从对象实际类链调用一个无参数、返回 UObject 派生指针的函数。
- * @param[in] object 非拥有调用目标。
- * @param[in] functionName 要从实际类开始查找的函数名。
- * @return 有效返回对象；目标、函数或返回值不可用时返回 nullptr。
- */
-[[nodiscard]] inline auto invoke_object_return(UObject* object, const TCHAR* functionName)
-    -> UObject* {
-    if (!is_valid(object)) {
-        return nullptr;
-    }
-    auto* const function = object->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
-        return nullptr;
-    }
-    struct Params {
-        UObject* ReturnValue{};
-    } params;
-    object->ProcessEvent(function, &params);
-    return is_valid(params.ReturnValue) ? params.ReturnValue : nullptr;
-}
-
-/**
- * @brief 从对象实际类链调用一个无参数、返回 bool 的函数。
- * @param[in] object 非拥有调用目标。
- * @param[in] functionName 要从实际类开始查找的函数名。
- * @return 函数返回值；目标或函数不可用时返回 false。
- */
-[[nodiscard]] inline auto invoke_bool_return(UObject* object, const TCHAR* functionName) -> bool {
-    if (!is_valid(object)) {
-        return false;
-    }
-    auto* const function = object->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
-        return false;
-    }
-    struct Params {
-        bool ReturnValue{};
-    } params;
-    object->ProcessEvent(function, &params);
-    return params.ReturnValue;
-}
 
 /**
  * @brief 从所有 Otomo Holder 中解析唯一属于本地玩家队伍的实例。
