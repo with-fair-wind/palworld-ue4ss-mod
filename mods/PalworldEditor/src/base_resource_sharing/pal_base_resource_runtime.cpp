@@ -1,5 +1,3 @@
-#include "pal_base_resource_runtime.hpp"
-
 #include <algorithm>
 #include <cstddef>
 #include <map>
@@ -15,6 +13,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <base_resource_sharing/current_base_resolution.hpp>
+#include <base_resource_sharing/pal_base_resource_runtime.hpp>
 
 namespace base_resource_sharing::detail {
 using namespace RC;

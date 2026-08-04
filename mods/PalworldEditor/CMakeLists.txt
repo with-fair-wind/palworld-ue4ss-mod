@@ -15,13 +15,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(${TARGET} SHARED
-    src/dllmain.cpp
-    src/pal_skills.cpp
-    src/pal_stats.cpp
-    src/pal_identity.cpp
-    src/grapple_cooldown_gateway.cpp
-    src/pal_base_resource_runtime.cpp
-    src/pal_base_resources.cpp
+    src/mod/dllmain.cpp
+    src/skills/pal_skills.cpp
+    src/pal_stats/pal_stats.cpp
+    src/pal_identity/pal_identity.cpp
+    src/grappling_hook/grapple_cooldown_gateway.cpp
+    src/base_resource_sharing/pal_base_resource_runtime.cpp
+    src/base_resource_sharing/pal_base_resources.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)

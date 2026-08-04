@@ -16,10 +16,9 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <base_resource_sharing/hook_manifest.hpp>
+#include <base_resource_sharing/pal_base_resource_runtime.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <base_resource_sharing/persistent_union.hpp>
-
-#include "pal_base_resource_runtime.hpp"
 
 namespace base_resource_sharing {
 using namespace RC;
