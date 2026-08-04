@@ -36,8 +36,8 @@ public:
      * @param[in] request 携带期望值与目标/世界代次的编辑请求。
      * @return 结构化事务结果，包含最终重读快照和面向用户的诊断。
      * @details 任一所需反射字段、原生 setter 或亲密度阈值不可用时零写入；写后不一致时恢复修改前值。
-     *          强化直接写入四个 Rank 字段；浓缩同步 Rank/RankUpExp；工作适应性通过原生 setter
-     * 更新。
+     *          强化直接写入四个 Rank 字段；浓缩同步 Rank/RankUpExp；工作适应性直接覆写
+     *          `GotWorkSuitabilityAddRankList` 数组。
      */
     [[nodiscard]] auto apply_stat_edit(PalStatTarget target, const PalStatEditRequest& request)
         -> PalStatEditResult;

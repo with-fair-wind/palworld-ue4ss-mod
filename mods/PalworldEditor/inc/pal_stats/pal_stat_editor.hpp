@@ -44,6 +44,8 @@ enum class WorkSuitability : std::uint8_t {
 };
 
 inline constexpr std::size_t kWorkSuitabilityCount = 13;
+/** @brief 工作适应性附加数组允许的最大条目数；只用于运行时安全校验。 */
+inline constexpr int kMaxWorkSuitabilityEntries = 13;
 using WorkSuitabilityRanks = std::array<int, kWorkSuitabilityCount>;
 
 /** @return 具体工作适应性在固定等级数组中的零基索引。 */
