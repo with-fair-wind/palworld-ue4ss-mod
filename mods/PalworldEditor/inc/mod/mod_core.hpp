@@ -247,6 +247,12 @@ private:
      */
     static void render_pal_editor(PalworldEditorMod* self);
 
+    /** @brief 渲染主窗口：应用主题 + 顶部 Tab 分页（物品/帕鲁/据点/诊断）。 */
+    static void render_main_window(PalworldEditorMod* self);
+
+    /** @brief 渲染诊断 Tab：发现对象按钮与预留诊断区。 */
+    static void render_diagnostics(PalworldEditorMod* self);
+
     /** @brief 给予物品输入框中的 ASCII Raw ID；只由 GUI 线程访问。 */
     char item_buf_[64] = "PalSphere_Tera";
     /** @brief 物品目录搜索缓冲区；只由 GUI 线程访问。 */

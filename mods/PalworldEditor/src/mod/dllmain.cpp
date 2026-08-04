@@ -41,25 +41,7 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
     register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
         UE4SS_ENABLE_IMGUI()
         auto* self = static_cast<PalworldEditorMod*>(mod);
-        ImGui::TextUnformatted("应可见一个浮动的「PalworldEditor」窗口 ->");
-        if (ImGui::Begin("PalworldEditor v1.6.10", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-            render_give_items(self);
-            ImGui::Separator();
-            render_item_browser(self);
-            ImGui::Separator();
-            render_inventory(self);
-            ImGui::Separator();
-            render_base_resource_sharing(self);
-            ImGui::Separator();
-            render_grapple_no_cooldown(self);
-            ImGui::Separator();
-            render_pal_editor(self);
-            ImGui::Separator();
-            if (ImGui::Button("发现对象")) {
-                self->want_discover_.store(true);
-            }
-        }
-        ImGui::End();
+        render_main_window(self);
     });
 }
 

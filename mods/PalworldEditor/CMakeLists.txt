@@ -16,6 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(${TARGET} SHARED
     src/mod/dllmain.cpp
+    src/mod/editor_ui.cpp
     src/items/item_ui.cpp
     src/skills/pal_skills.cpp
     src/skills/skill_ui.cpp
