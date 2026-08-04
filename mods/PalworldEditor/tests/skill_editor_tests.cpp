@@ -1307,14 +1307,15 @@ void test_pal_stat_clamp_respects_policy_bounds() {
     CHECK(work_suitability_bonus_delta(7, 0, 10) == -7);
     CHECK(work_suitability_bonus_delta(5, 5, 10) == 0);
     CHECK(work_suitability_bonus_delta(5, 11, 10) == 5);
-    // 原生 getter 返回基础 Lv.1，存档永久附加 +3 时，游戏面板显示 Lv.4。
-    CHECK(work_suitability_total_rank(1, 3, 10) == 4);
-    CHECK(work_suitability_total_rank(1, 6, 10) == 7);
-    CHECK(work_suitability_total_rank(1, 7, 10) == 8);
-    CHECK(work_suitability_total_rank(8, 7, 10) == 10);
-    CHECK(max_editable_work_suitability_bonus(1, 3, 10) == 9);
+    // baseRank(getter)已含 bonus 与浓缩，面板显示 = baseRank；intrinsic = baseRank - bonus 只读。
+    CHECK(work_suitability_total_rank(4, 1, 10) == 4);
+    CHECK(work_suitability_total_rank(10, 7, 10) == 10);
+    CHECK(work_suitability_total_rank(8, 5, 10) == 8);
+    CHECK(work_suitability_total_rank(6, 3, 10) == 6);
+    CHECK(max_editable_work_suitability_bonus(10, 7, 10) == 7);
+    CHECK(max_editable_work_suitability_bonus(8, 5, 10) == 7);
+    CHECK(max_editable_work_suitability_bonus(6, 3, 10) == 7);
     CHECK(max_editable_work_suitability_bonus(0, 0, 10) == 0);
-    CHECK(max_editable_work_suitability_bonus(0, 3, 10) == 3);
     CHECK(is_editable_gender(PalGender::male));
     CHECK(is_editable_gender(PalGender::female));
     CHECK(!is_editable_gender(PalGender::none));
@@ -1341,7 +1342,7 @@ void test_pal_stat_verification_checks_only_requested_fields() {
     pal_stats::WorkSuitabilityRanks workBonusRanks{};
     workBonusRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 2;
     pal_stats::WorkSuitabilityRanks workTotalRanks{};
-    workTotalRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 6;
+    workTotalRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 4;
     pal_stats::WorkSuitabilityRanks workBaseRanks{};
     workBaseRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 4;
     const pal_stats::PalStatSnapshot actual{
@@ -1388,7 +1389,7 @@ void test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes() {
     pal_stats::WorkSuitabilityRanks workBonusRanks{};
     workBonusRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 1;
     pal_stats::WorkSuitabilityRanks workTotalRanks{};
-    workTotalRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 5;
+    workTotalRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 4;
     pal_stats::WorkSuitabilityRanks workBaseRanks{};
     workBaseRanks[pal_stats::work_suitability_index(pal_stats::WorkSuitability::transport)] = 4;
     pal_stats::PalStatEditDraft draft;
@@ -1441,7 +1442,7 @@ void test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes() {
     CHECK(request->values.gender == pal_stats::PalGender::female);
     CHECK(request->values.workSuitabilityBonusRanks.has_value());
     CHECK((*request->values.workSuitabilityBonusRanks)[pal_stats::work_suitability_index(
-              pal_stats::WorkSuitability::transport)] == 2);
+              pal_stats::WorkSuitability::transport)] == 3);
     CHECK(!request->values.friendshipRank.has_value());
     CHECK(request->targetGeneration == 7);
     CHECK(request->worldGeneration == 11);
@@ -1454,7 +1455,7 @@ void test_pal_stat_draft_starts_from_snapshot_and_emits_only_changes() {
     CHECK(workRequest.has_value());
     CHECK(!workRequest->values.soulWorkSpeedRank.has_value());
     CHECK((*workRequest->values.workSuitabilityBonusRanks)[pal_stats::work_suitability_index(
-              pal_stats::WorkSuitability::transport)] == 2);
+              pal_stats::WorkSuitability::transport)] == 3);
 }
 
 void test_pal_stat_work_suitability_draft_preserves_absolute_bonus_on_reselection() {
@@ -1463,7 +1464,7 @@ void test_pal_stat_work_suitability_draft_preserves_absolute_bonus_on_reselectio
     WorkSuitabilityRanks baseRanks{};
     WorkSuitabilityRanks bonusRanks{};
     WorkSuitabilityRanks totalRanks{};
-    baseRanks[miningIndex] = 1;
+    baseRanks[miningIndex] = 4;
     bonusRanks[miningIndex] = 3;
     totalRanks[miningIndex] = 4;
     const PalStatSnapshot snapshot{

@@ -169,28 +169,29 @@ struct PalStatEditResult {
 [[nodiscard]] inline auto clamp_work_suitability_bonus(const int value, const int maxRank) -> int {
     return std::clamp(value, 0, std::max(0, maxRank));
 }
-/** @brief 由原生基础等级和存档永久附加值计算面板所显示的合计等级。 */
-[[nodiscard]] inline auto work_suitability_total_rank(const int baseRank, const int bonusRank,
+/** @brief 返回面板显示的实际工作适应性等级。
+ *  @details baseRank 是 `GetWorkSuitabilityRankWithCharacterRank` 的返回值，**已包含**
+ *           bonus 与浓缩加成，即游戏面板显示的实际等级；bonus 已在 baseRank 内，不再相加。 */
+[[nodiscard]] inline auto work_suitability_total_rank(const int baseRank, const int /*bonusRank*/,
                                                       const int maxRank) -> int {
-    const int safeMax = std::max(0, maxRank);
-    const int safeBase = std::clamp(baseRank, 0, safeMax);
-    const int safeBonus = std::clamp(bonusRank, 0, safeMax - safeBase);
-    return safeBase + safeBonus;
+    return std::clamp(baseRank, 0, std::max(0, maxRank));
 }
 /**
  * @brief 计算一个方向允许编辑到的最大永久附加值。
- * @details 原生基础等级大于零时允许强化到运行时总上限。基础等级为零但已有附加值时，只允许
- *          保持或降低这个遗留值；从零开始的物种不允许凭空创建新的工作适应性。
+ * @details `baseRank` 是 `GetWorkSuitabilityRankWithCharacterRank` 的返回值，**已包含**
+ *          `currentBonusRank` 与浓缩加成；物种固有+浓缩 = `baseRank - currentBonusRank`，
+ *          只读。bonus 可上调到运行时总上限 `maxRank`，故上限 = `maxRank - 固有`。
+ *          固有为零（物种不具备该方向）时不允许凭空新增，返回 0。
  */
 [[nodiscard]] inline auto max_editable_work_suitability_bonus(const int baseRank,
                                                               const int currentBonusRank,
                                                               const int maxRank) -> int {
     const int safeMax = std::max(0, maxRank);
-    const int safeBase = std::clamp(baseRank, 0, safeMax);
-    if (safeBase > 0) {
-        return safeMax - safeBase;
+    const int intrinsicRank = std::clamp(baseRank - currentBonusRank, 0, safeMax);
+    if (intrinsicRank <= 0) {
+        return 0;
     }
-    return clamp_work_suitability_bonus(currentBonusRank, safeMax);
+    return std::max(0, safeMax - intrinsicRank);
 }
 /** @brief 把期望的永久附加值转换为 `SetWorkSuitabilityAddRank` 所需的有符号增量。 */
 [[nodiscard]] inline auto work_suitability_bonus_delta(const int current, const int desired,

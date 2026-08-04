@@ -229,8 +229,9 @@ struct RuntimeLimits {
 
 /**
  * @brief 调用原生工作适应性 getter。
- * @details Palworld 1.0.2 中该 getter 不包含 `GotWorkSuitabilityAddRankList` 的永久附加值，
- *          因此这里只把返回值作为基础等级，合计等级由纯值层显式计算。
+ * @details Palworld 1.0.2 中该 getter 的返回值**已包含** `GotWorkSuitabilityAddRankList` 的
+ *          永久附加值与浓缩（character）加成；物种固有+浓缩 = 返回值 − 永久附加，只读。
+ *          永久附加（bonus）才是玩家可编辑的部分，调整后 getter 会等量反映。
  *          优先尝试 Handle（`GetOuter()`），因为浓缩升星后 Handle 上的缓存比 Parameter 更及时刷新；
  *          Handle 不可用或没有该函数时透明回退到 Parameter。
  */

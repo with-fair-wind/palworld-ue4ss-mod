@@ -97,13 +97,14 @@ void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
             const std::string label =
                 std::string{workSuitabilityLabels[index]} + "##stat-work-" + std::to_string(index);
             ImGui::DragInt(label.c_str(), &values.workSuitabilityBonusRanks[index], 1.0F, 0,
-                           maxBonus);
+                           maxBonus, "%d", ImGuiSliderFlags_ClampZeroRange);
             ImGui::EndDisabled();
             ImGui::SameLine();
             if (supported) {
                 ImGui::TextDisabled(
-                    "(基础 Lv.%d，永久附加 +%d，合计 Lv.%d)", stats.workSuitabilityBaseRanks[index],
-                    stats.workSuitabilityBonusRanks[index], stats.workSuitabilityTotalRanks[index]);
+                    "(当前 Lv.%d = 固有 %d + 永久附加 +%d)", stats.workSuitabilityBaseRanks[index],
+                    stats.workSuitabilityBaseRanks[index] - stats.workSuitabilityBonusRanks[index],
+                    stats.workSuitabilityBonusRanks[index]);
             } else {
                 ImGui::TextDisabled("(该物种不具备此适应性)");
             }
