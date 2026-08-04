@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <imgui.h>
+#include <mod/editor_ui.hpp>
 #include <mod/mod_core.hpp>
 #include <skills/passive_skill_presets.hpp>
 
@@ -202,6 +203,7 @@ void PalworldEditorMod::render_passive_skills(PalworldEditorMod* self,
                                    ? presets[*self->passivePresetIndex_].displayName
                                    : std::string_view{"请选择词条预设"};
 
+    editor_ui::section_header("词条预设");
     ImGui::BeginDisabled(mutationsDisabled);
     if (ImGui::BeginCombo("词条预设##passive-preset", presetPreview.data())) {
         for (std::size_t index{}; index < presets.size(); ++index) {
@@ -226,12 +228,15 @@ void PalworldEditorMod::render_passive_skills(PalworldEditorMod* self,
     }
 
     ImGui::BeginDisabled(!presetSelectionValid);
-    if (ImGui::Button("应用预设")) {
-        self->skillQueue_.push(skill_editor::make_passive_preset_request(
-            presets[*self->passivePresetIndex_], snapshot.targetGeneration,
-            snapshot.worldGeneration));
-        self->passiveEditIndex_ = -1;
-        self->passivePickerState_.clear_selection();
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("应用预设")) {
+            self->skillQueue_.push(skill_editor::make_passive_preset_request(
+                presets[*self->passivePresetIndex_], snapshot.targetGeneration,
+                snapshot.worldGeneration));
+            self->passiveEditIndex_ = -1;
+            self->passivePickerState_.clear_selection();
+        }
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
@@ -293,22 +298,25 @@ void PalworldEditorMod::render_passive_skills(PalworldEditorMod* self,
                             (!replacing || self->passiveEditIndex_ <
                                                static_cast<int>(snapshot.state.passiveIds.size()));
     ImGui::BeginDisabled(!canConfirm);
-    if (ImGui::Button("确认被动技能修改")) {
-        skill_editor::SkillEditRequest request{
-            .targetGeneration = snapshot.targetGeneration,
-            .worldGeneration = snapshot.worldGeneration,
-            .kind = skill_editor::SkillKind::passive,
-            .operation = replacing ? skill_editor::SkillEditOperation::replace
-                                   : skill_editor::SkillEditOperation::add,
-            .newPassiveId = self->passivePickerState_.selected->id,
-        };
-        if (replacing) {
-            request.oldPassiveId =
-                snapshot.state.passiveIds[static_cast<std::size_t>(self->passiveEditIndex_)];
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("确认被动技能修改")) {
+            skill_editor::SkillEditRequest request{
+                .targetGeneration = snapshot.targetGeneration,
+                .worldGeneration = snapshot.worldGeneration,
+                .kind = skill_editor::SkillKind::passive,
+                .operation = replacing ? skill_editor::SkillEditOperation::replace
+                                       : skill_editor::SkillEditOperation::add,
+                .newPassiveId = self->passivePickerState_.selected->id,
+            };
+            if (replacing) {
+                request.oldPassiveId =
+                    snapshot.state.passiveIds[static_cast<std::size_t>(self->passiveEditIndex_)];
+            }
+            self->skillQueue_.push(std::move(request));
+            self->passiveEditIndex_ = -1;
+            self->passivePickerState_.clear_selection();
         }
-        self->skillQueue_.push(std::move(request));
-        self->passiveEditIndex_ = -1;
-        self->passivePickerState_.clear_selection();
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
@@ -322,7 +330,7 @@ void PalworldEditorMod::render_passive_skills(PalworldEditorMod* self,
 void PalworldEditorMod::render_active_skills(PalworldEditorMod* self,
                                              const SkillEditorSnapshot& snapshot,
                                              const bool mutationsDisabled) {
-    ImGui::TextUnformatted("主动技能（EquipWaza）");
+    editor_ui::section_header("主动技能（EquipWaza）");
     std::unordered_set<std::string> excluded;
     for (const auto& skill : snapshot.state.activeSkills) {
         excluded.insert(skill.id);
@@ -380,18 +388,21 @@ void PalworldEditorMod::render_active_skills(PalworldEditorMod* self,
     const bool canConfirm =
         self->activeChoice_.has_value() && self->activeChoice_->activeValue.has_value();
     ImGui::BeginDisabled(!canConfirm);
-    if (ImGui::Button("确认主动技能修改")) {
-        self->skillQueue_.push(
-            {.targetGeneration = snapshot.targetGeneration,
-             .worldGeneration = snapshot.worldGeneration,
-             .kind = skill_editor::SkillKind::active,
-             .operation = replacing ? skill_editor::SkillEditOperation::replace
-                                    : skill_editor::SkillEditOperation::add,
-             .activeSlot = slot,
-             .newActiveSkill = skill_editor::ActiveSkill{.value = *self->activeChoice_->activeValue,
-                                                         .id = self->activeChoice_->id}});
-        self->activeEditSlot_ = -1;
-        self->activeChoice_.reset();
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("确认主动技能修改")) {
+            self->skillQueue_.push(
+                {.targetGeneration = snapshot.targetGeneration,
+                 .worldGeneration = snapshot.worldGeneration,
+                 .kind = skill_editor::SkillKind::active,
+                 .operation = replacing ? skill_editor::SkillEditOperation::replace
+                                        : skill_editor::SkillEditOperation::add,
+                 .activeSlot = slot,
+                 .newActiveSkill = skill_editor::ActiveSkill{
+                     .value = *self->activeChoice_->activeValue, .id = self->activeChoice_->id}});
+            self->activeEditSlot_ = -1;
+            self->activeChoice_.reset();
+        }
     }
     ImGui::EndDisabled();
     ImGui::EndDisabled();
