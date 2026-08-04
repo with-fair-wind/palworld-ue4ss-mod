@@ -243,21 +243,21 @@ struct RuntimeLimits {
     UObject* callTarget = pal;
     UFunction* function = nullptr;
     if (handleValid) {
-        function = handle->GetFunctionByNameInChain(STR("GetWorkSuitabilityRank"));
+        function = handle->GetFunctionByNameInChain(STR("GetWorkSuitabilityRankWithCharacterRank"));
         if (function != nullptr) {
             callTarget = handle;
         }
     }
     // Fall back to Parameter
     if (function == nullptr) {
-        function = pal != nullptr
-                       ? pal->GetFunctionByNameInChain(STR("GetWorkSuitabilityRank"))
-                       : nullptr;
+        function =
+            pal != nullptr
+                ? pal->GetFunctionByNameInChain(STR("GetWorkSuitabilityRankWithCharacterRank"))
+                : nullptr;
         callTarget = pal;
     }
 
-    auto* const input =
-        function == nullptr ? nullptr : find_enum(function, STR("InWorkSuitability"));
+    auto* const input = function == nullptr ? nullptr : find_enum(function, STR("WorkSuitability"));
     auto* const output = function == nullptr ? nullptr
                                              : CastField<FIntProperty>(function->FindProperty(
                                                    FName(STR("ReturnValue"), FNAME_Find)));
@@ -326,8 +326,7 @@ struct RuntimeLimits {
         if (arrayIndex < 0) {
             continue;  // entry doesn't exist — handled by SetWorkSuitabilityAddRank
         }
-        const int clamped =
-            clamp_work_suitability_bonus(bonuses[suitabilityIndex], maxRank);
+        const int clamped = clamp_work_suitability_bonus(bonuses[suitabilityIndex], maxRank);
         void* const item = entries.GetRawPtr(arrayIndex);
         rank->SetPropertyValueInContainer(item, static_cast<int32_t>(clamped));
     }
@@ -394,8 +393,7 @@ private:
  * @details 先尝试带显式 Rank 参数的数据库函数，回退到不带 Rank 的查询。
  *          这样可以绕过 Parameter 端可能存在的缓存问题。
  */
-[[nodiscard]] auto work_suitability_from_database(const FName characterId,
-                                                  const int internalRank,
+[[nodiscard]] auto work_suitability_from_database(const FName characterId, const int internalRank,
                                                   const WorkSuitability suitability)
     -> std::optional<int> {
     auto* const db = database();
@@ -409,19 +407,24 @@ private:
         return std::nullopt;
     }
     // Call GetRowStruct() through ProcessEvent
-    struct RowStructParams { void* ReturnValue{}; } rsParams;
+    struct RowStructParams {
+        void* ReturnValue{};
+    } rsParams;
     db->ProcessEvent(getRowStruct, &rsParams);
     auto* const rowStruct = static_cast<UScriptStruct*>(rsParams.ReturnValue);
     if (rowStruct == nullptr) {
         return std::nullopt;
     }
 
-    auto* const findRowFunc =
-        db->GetFunctionByNameInChain(STR("FindRowUnchecked"));
-    auto* const rowNameInput = findRowFunc == nullptr ? nullptr
-        : CastField<FNameProperty>(findRowFunc->FindProperty(FName(STR("RowName"), FNAME_Find)));
-    auto* const rowOutput = findRowFunc == nullptr ? nullptr
-        : CastField<FStructProperty>(findRowFunc->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    auto* const findRowFunc = db->GetFunctionByNameInChain(STR("FindRowUnchecked"));
+    auto* const rowNameInput =
+        findRowFunc == nullptr ? nullptr
+                               : CastField<FNameProperty>(
+                                     findRowFunc->FindProperty(FName(STR("RowName"), FNAME_Find)));
+    auto* const rowOutput = findRowFunc == nullptr
+                                ? nullptr
+                                : CastField<FStructProperty>(findRowFunc->FindProperty(
+                                      FName(STR("ReturnValue"), FNAME_Find)));
     if (findRowFunc == nullptr || rowNameInput == nullptr || rowOutput == nullptr) {
         // Fallback: get row map and search manually
         // (FindRowUnchecked signature doesn't match)
@@ -431,8 +434,7 @@ private:
     FunctionParams fp{findRowFunc};
     rowNameInput->SetPropertyValueInContainer(fp.data(), characterId);
     db->ProcessEvent(findRowFunc, fp.data());
-    auto* const rowData = static_cast<uint8*>(
-        rowOutput->ContainerPtrToValuePtr<void>(fp.data()));
+    auto* const rowData = static_cast<uint8*>(rowOutput->ContainerPtrToValuePtr<void>(fp.data()));
 
     if (rowData == nullptr) {
         return std::nullopt;
@@ -441,17 +443,17 @@ private:
     // Try to read a work suitability field from the row.
     // Common Palworld field name patterns per suitability type.
     static constexpr const TCHAR* kFieldNames[] = {
-        STR("EmitFlame"),          STR("Watering"),       STR("Seeding"),
-        STR("GenerateElectricity"), STR("Handcraft"),     STR("Collection"),
-        STR("Deforest"),           STR("Mining"),         STR("OilExtraction"),
-        STR("ProductMedicine"),    STR("Cool"),           STR("Transport"),
+        STR("EmitFlame"),     STR("Watering"),        STR("Seeding"),  STR("GenerateElectricity"),
+        STR("Handcraft"),     STR("Collection"),      STR("Deforest"), STR("Mining"),
+        STR("OilExtraction"), STR("ProductMedicine"), STR("Cool"),     STR("Transport"),
         STR("MonsterFarm"),
     };
     const auto suitIndex = static_cast<std::size_t>(suitability) - 1;
-    if (suitIndex >= 13) return std::nullopt;
+    if (suitIndex >= 13)
+        return std::nullopt;
 
-    auto* const field = CastField<FIntProperty>(
-        rowStruct->FindProperty(FName(kFieldNames[suitIndex], FNAME_Find)));
+    auto* const field =
+        CastField<FIntProperty>(rowStruct->FindProperty(FName(kFieldNames[suitIndex], FNAME_Find)));
     if (field != nullptr) {
         const int value = field->GetPropertyValueInContainer(rowData);
         if (value >= 0 && value <= 100) {
@@ -459,7 +461,8 @@ private:
             // Palworld work suitability at rank N ≈ base * (1 + (N-1) * multiplier).
             // The multiplier varies; for most species it's ~5% per rank.
             // But since the game uses per-species tables, this is an approximation.
-            if (internalRank <= 1) return value;
+            if (internalRank <= 1)
+                return value;
             // Return at least the base; without per-rank data we cannot compute
             // the exact yellow-bar value.
             return value;
@@ -581,8 +584,8 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     }
 
     // Try to read CharacterID for potential database-driven work suitability lookup.
-    auto* const characterIdProp = CastField<FNameProperty>(
-        rowStruct->FindProperty(FName(STR("CharacterID"), FNAME_Find)));
+    auto* const characterIdProp =
+        CastField<FNameProperty>(rowStruct->FindProperty(FName(STR("CharacterID"), FNAME_Find)));
     const bool hasCharId = characterIdProp != nullptr;
     const FName characterId =
         hasCharId ? characterIdProp->GetPropertyValueInContainer(saveParam) : FName{};
@@ -591,30 +594,21 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     WorkSuitabilityRanks workTotals{};
     for (std::size_t index{}; index < workBases.size(); ++index) {
         const auto suitability = static_cast<WorkSuitability>(index + 1);
-        // Prefer database lookup with explicit Rank — the Parameter's GetWorkSuitabilityRank
-        // may only return the species base (rank-1) value, omitting condensation boost.
-        std::optional<int> dbBase;
-        if (hasCharId) {
-            dbBase = work_suitability_from_database(characterId, internalRank, suitability);
+        // work_suitability_base calls GetWorkSuitabilityRankWithCharacterRank, which
+        // includes the condensation (character) rank bonus that GetWorkSuitabilityRank omits.
+        const auto paramBase = work_suitability_base(pal, suitability);
+        if (!paramBase.has_value()) {
+            return snapshot;
         }
-        if (dbBase.has_value()) {
-            workBases[index] = *dbBase;
-        } else {
-            const auto paramBase = work_suitability_base(pal, suitability);
-            if (!paramBase.has_value()) {
-                return snapshot;
-            }
-            workBases[index] = *paramBase;
-        }
+        workBases[index] = *paramBase;
         workTotals[index] = work_suitability_total_rank(workBases[index], (*workBonuses)[index],
                                                         limits->workSuitabilityMaxRank);
     }
 
     // Diagnostic: log CharacterID being read to help troubleshoot database lookup.
     if (hasCharId) {
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: CharacterID={} rank={}\n"),
-            characterId.ToString().c_str(), internalRank);
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor: CharacterID={} rank={}\n"),
+                                        characterId.ToString().c_str(), internalRank);
     }
 
     // Diagnostic: log raw GetWorkSuitabilityRank values alongside the internal Rank.
@@ -726,8 +720,7 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
             ? friendship_required_point(clamp_friendship_rank(*request.values.friendshipRank))
             : std::optional<int>{};
     const bool hasWorkChange = request.values.workSuitabilityBonusRanks.has_value();
-    const bool needsSaveParameterRefresh =
-        has_core_stat_change(request.values) || hasWorkChange;
+    const bool needsSaveParameterRefresh = has_core_stat_change(request.values) || hasWorkChange;
     auto* const onRepSaveParameter = needsSaveParameterRefresh
                                          ? pal->GetFunctionByNameInChain(STR("OnRep_SaveParameter"))
                                          : nullptr;
@@ -740,9 +733,8 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
             : nullptr;
     // WorkSuitabilitySetter is only used to ADD new entries (positive delta);
     // decreases and in-place modifications are handled by write_work_suitability_bonuses_in_place.
-    const auto workSetter = hasWorkChange
-                                ? WorkSuitabilitySetter::prepare(pal)
-                                : std::optional<WorkSuitabilitySetter>{};
+    const auto workSetter = hasWorkChange ? WorkSuitabilitySetter::prepare(pal)
+                                          : std::optional<WorkSuitabilitySetter>{};
 
     const bool preflightFailed =
         (request.values.level.has_value() && level == nullptr) ||
@@ -759,10 +751,9 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
          (condensationRank == nullptr || rankUpExp == nullptr)) ||
         (request.values.gender.has_value() &&
          (gender == nullptr || !is_editable_gender(*request.values.gender))) ||
-        (hasWorkChange &&
-         (rowStruct->FindProperty(
-              FName(STR("GotWorkSuitabilityAddRankList"), FNAME_Find)) == nullptr ||
-          !workSetter.has_value())) ||
+        (hasWorkChange && (rowStruct->FindProperty(FName(STR("GotWorkSuitabilityAddRankList"),
+                                                         FNAME_Find)) == nullptr ||
+                           !workSetter.has_value())) ||
         (request.values.friendshipRank.has_value() &&
          (friendshipPoint == nullptr || !requiredFriendshipPoint.has_value()));
     if (preflightFailed) {
@@ -812,17 +803,16 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
     }
     if (hasWorkChange) {
         // Phase 1: in-place modification for EXISTING entries（增大、减小或清零）
-        writesCompleted =
-            write_work_suitability_bonuses_in_place(
-                rowStruct, saveParam, *expectedValues.workSuitabilityBonusRanks,
-                before.workSuitabilityMaxRank) &&
-            writesCompleted;
+        writesCompleted = write_work_suitability_bonuses_in_place(
+                              rowStruct, saveParam, *expectedValues.workSuitabilityBonusRanks,
+                              before.workSuitabilityMaxRank) &&
+                          writesCompleted;
         // Phase 2: SetWorkSuitabilityAddRank ONLY for NEW entries（before 为 0 且期望 > 0）。
         // Phase 1 already wrote the correct value for existing entries; double-applying
         // a delta on top would corrupt the value.
         if (writesCompleted) {
-            for (std::size_t index{};
-                 index < expectedValues.workSuitabilityBonusRanks->size(); ++index) {
+            for (std::size_t index{}; index < expectedValues.workSuitabilityBonusRanks->size();
+                 ++index) {
                 const bool isNewEntry = before.workSuitabilityBonusRanks[index] == 0;
                 const int expected = (*expectedValues.workSuitabilityBonusRanks)[index];
                 if (!isNewEntry || expected <= 0) {
@@ -841,8 +831,7 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
             saveParam, static_cast<int32_t>(*requiredFriendshipPoint));
     }
     if (needsSaveParameterRefresh) {
-        writesCompleted =
-            invoke_save_parameter_rep(pal, onRepSaveParameter) && writesCompleted;
+        writesCompleted = invoke_save_parameter_rep(pal, onRepSaveParameter) && writesCompleted;
         if (onRepSaveParameterHandle != nullptr) {
             writesCompleted =
                 invoke_save_parameter_rep(handle, onRepSaveParameterHandle) && writesCompleted;
@@ -901,11 +890,10 @@ auto PalStatGateway::apply_stat_edit(const PalStatTarget target, const PalStatEd
         // (including newly-created ones and those set to 0) exist in the array at
         // this point — the in-place write handles every case without needing a
         // secondary SetWorkSuitabilityAddRank pass.
-        rollbackOperationsSucceeded =
-            write_work_suitability_bonuses_in_place(rowStruct, saveParam,
-                                                    before.workSuitabilityBonusRanks,
-                                                    before.workSuitabilityMaxRank) &&
-            rollbackOperationsSucceeded;
+        rollbackOperationsSucceeded = write_work_suitability_bonuses_in_place(
+                                          rowStruct, saveParam, before.workSuitabilityBonusRanks,
+                                          before.workSuitabilityMaxRank) &&
+                                      rollbackOperationsSucceeded;
     }
     if (friendshipPoint != nullptr) {
         friendshipPoint->SetPropertyValueInContainer(saveParam,
