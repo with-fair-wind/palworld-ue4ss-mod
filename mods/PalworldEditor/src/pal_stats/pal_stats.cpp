@@ -613,7 +613,7 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     }
 
     // Diagnostic: log raw GetWorkSuitabilityRank values alongside the internal Rank.
-    Output::send<LogLevel::Warning>(
+    Output::send<LogLevel::Verbose>(
         STR("PalworldEditor: read_stats(rank={} maxWS={}) "
             "base_ws=[{},{},{},{},{},{},{},{},{},{},{},{},{}] "
             "bonus=[{},{},{},{},{},{},{},{},{},{},{},{},{}]\n"),
