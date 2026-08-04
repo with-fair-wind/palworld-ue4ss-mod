@@ -612,15 +612,16 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     }
 
     // Diagnostic: log raw GetWorkSuitabilityRank values alongside the internal Rank.
-    Output::send<LogLevel::Verbose>(
-        STR("PalworldEditor: read_stats(rank={}) base_ws=[{},{},{},{},{},{},{},{},{},{},{},{},{}] "
+    Output::send<LogLevel::Warning>(
+        STR("PalworldEditor: read_stats(rank={} maxWS={}) "
+            "base_ws=[{},{},{},{},{},{},{},{},{},{},{},{},{}] "
             "bonus=[{},{},{},{},{},{},{},{},{},{},{},{},{}]\n"),
-        internalRank, workBases[0], workBases[1], workBases[2], workBases[3], workBases[4],
-        workBases[5], workBases[6], workBases[7], workBases[8], workBases[9], workBases[10],
-        workBases[11], workBases[12], (*workBonuses)[0], (*workBonuses)[1], (*workBonuses)[2],
-        (*workBonuses)[3], (*workBonuses)[4], (*workBonuses)[5], (*workBonuses)[6],
-        (*workBonuses)[7], (*workBonuses)[8], (*workBonuses)[9], (*workBonuses)[10],
-        (*workBonuses)[11], (*workBonuses)[12]);
+        internalRank, limits->workSuitabilityMaxRank, workBases[0], workBases[1], workBases[2],
+        workBases[3], workBases[4], workBases[5], workBases[6], workBases[7], workBases[8],
+        workBases[9], workBases[10], workBases[11], workBases[12], (*workBonuses)[0],
+        (*workBonuses)[1], (*workBonuses)[2], (*workBonuses)[3], (*workBonuses)[4],
+        (*workBonuses)[5], (*workBonuses)[6], (*workBonuses)[7], (*workBonuses)[8],
+        (*workBonuses)[9], (*workBonuses)[10], (*workBonuses)[11], (*workBonuses)[12]);
 
     snapshot.level = *level;
     snapshot.friendshipRank = *friendshipRank;
