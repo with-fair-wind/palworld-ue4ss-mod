@@ -10,6 +10,7 @@
 #include <string>
 
 #include <imgui.h>
+#include <mod/editor_ui.hpp>
 #include <mod/mod_core.hpp>
 
 auto PalworldEditorMod::clamp(int v, int lo, int hi) -> int {
@@ -17,19 +18,24 @@ auto PalworldEditorMod::clamp(int v, int lo, int hi) -> int {
 }
 
 void PalworldEditorMod::render_give_items(PalworldEditorMod* self) {
-    ImGui::TextUnformatted("给予物品");
+    editor_ui::section_header("给予物品");
+    ImGui::SetNextItemWidth(200.0F);
     ImGui::InputText("物品 ID", self->item_buf_, sizeof(self->item_buf_));
     ImGui::InputInt("数量", &self->count_input_);
     self->count_input_ = clamp(self->count_input_, 1, 9999);
-    if (ImGui::Button("给予")) {
-        const std::lock_guard lock(self->req_mutex_);
-        self->give_item_ = self->item_buf_;
-        self->give_count_ = self->count_input_;
-        self->give_requested_ = true;
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("给予")) {
+            const std::lock_guard lock(self->req_mutex_);
+            self->give_item_ = self->item_buf_;
+            self->give_count_ = self->count_input_;
+            self->give_requested_ = true;
+        }
     }
 }
 
 void PalworldEditorMod::render_item_browser(PalworldEditorMod* self) {
+    editor_ui::section_header("物品目录");
     if (ImGui::Button("扫描游戏物品")) {
         self->want_scan_items_.store(true);
     }
@@ -59,6 +65,7 @@ void PalworldEditorMod::render_item_browser(PalworldEditorMod* self) {
 }
 
 void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
+    editor_ui::section_header("背包");
     if (ImGui::Button("刷新背包")) {
         self->want_read_.store(true);
     }
@@ -86,11 +93,14 @@ void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
                         static_cast<int>(e.slot_index), e.count);
             ImGui::InputInt("新数量", &self->set_count_input_);
             self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
-            if (ImGui::Button("设置数量")) {
-                const std::lock_guard lock2(self->req_mutex_);
-                self->modify_slot_ = e.slot_index;
-                self->modify_count_ = self->set_count_input_;
-                self->modify_requested_ = true;
+            {
+                editor_ui::scoped_accent_button accent;
+                if (ImGui::Button("设置数量")) {
+                    const std::lock_guard lock2(self->req_mutex_);
+                    self->modify_slot_ = e.slot_index;
+                    self->modify_count_ = self->set_count_input_;
+                    self->modify_requested_ = true;
+                }
             }
         }
     }
