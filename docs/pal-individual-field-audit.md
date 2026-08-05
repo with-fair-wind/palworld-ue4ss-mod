@@ -1,6 +1,6 @@
 # 帕鲁个体字段可编辑性审计（Palworld 1.0.2）
 
-本审计以 `UHTHeaderDump/Pal/Public/PalIndividualCharacterSaveParameter.h`、
+本审计以 `Dump/UHTHeaderDump/Pal/Public/PalIndividualCharacterSaveParameter.h`、
 `PalIndividualCharacterParameter.h` 和相关枚举/设置类型为准。结论面向运行中 UE4SS Mod：所有反射访问只能在
 游戏线程发生，跨帧只保存纯值，不缓存 UObject 或属性地址。
 

@@ -276,7 +276,7 @@ mods/PalworldEditor/
 - 主动技能只修改 `EquipWaza`，不会解锁或修改 `MasteredWaza`，也不编辑伙伴技能。
 - 技能数组通过 UE4SS 的真实 `TArray<T>` 读取；仍依赖 Palworld 1.0 的 UFunction 参数布局，
   游戏更新后可能需要同步 UHT 签名。
-- 游戏版本更新并替换 `UHTHeaderDump/` 后，需要运行
+- 游戏版本更新并替换 `Dump/UHTHeaderDump/` 后，需要运行
   `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/generate-active-skill-definitions.ps1`
   更新主动技能定义表。
 - 是否持久化由游戏公开函数和存档流程决定；修改后请正常保存，并在重载存档后确认。
