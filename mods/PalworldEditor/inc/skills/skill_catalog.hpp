@@ -73,13 +73,21 @@ struct PassiveSkillMetadata {
     return PassiveSkillCategory::normal;
 }
 
+/** @brief 主动技能的战斗类型，值与 Palworld EPalWazaCategory 对齐。 */
+enum class ActiveSkillCategory : std::uint8_t {
+    Melee = 0,    ///< 近战
+    Shot = 1,     ///< 射击
+    Support = 2,  ///< 辅助
+};
+
 /**
  * @brief 表示一个可供技能编辑界面展示的技能。
  */
 struct SkillOption {
     std::string id;            /**< 技能的 Raw ID。 */
     std::string localizedName; /**< 当前游戏语言的展示名称；为空时界面回退到 `id`。 */
-    std::optional<std::uint16_t> activeValue; /**< 仅主动技能具有的 `EPalWazaID` 数值。 */
+    std::optional<std::uint16_t> activeValue;          /**< 仅主动技能具有的 `EPalWazaID` 数值。 */
+    std::optional<ActiveSkillCategory> activeCategory; /**< 仅主动技能具有的战斗类型。 */
     std::optional<PassiveSkillMetadata> passiveMetadata; /**< 仅被动技能具有的分类元数据。 */
 };
 
