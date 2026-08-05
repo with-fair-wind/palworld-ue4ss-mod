@@ -14,39 +14,14 @@
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <base_resource_sharing/current_base_resolution.hpp>
 #include <base_resource_sharing/pal_base_resource_runtime.hpp>
+#include <common/game_reflection.hpp>
 
 namespace base_resource_sharing::detail {
+using pal_game::FunctionParams;
 using namespace RC;
 using namespace RC::Unreal;
 
 namespace {
-class FunctionParams {
-public:
-    explicit FunctionParams(UFunction* function)
-        : function_{function},
-          storage_(function == nullptr ? 0U : static_cast<std::size_t>(function->GetParmsSize())) {
-        if (function_ != nullptr) {
-            function_->InitializeStruct(storage_.data());
-        }
-    }
-
-    ~FunctionParams() {
-        if (function_ != nullptr) {
-            function_->DestroyStruct(storage_.data());
-        }
-    }
-
-    FunctionParams(const FunctionParams&) = delete;
-    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
-
-    [[nodiscard]] auto data() noexcept -> void* {
-        return storage_.data();
-    }
-
-private:
-    UFunction* function_{};
-    std::vector<std::byte> storage_;
-};
 
 [[nodiscard]] auto to_key(const FGuid& guid) -> GuidKey {
     return {{guid.A, guid.B, guid.C, guid.D}};

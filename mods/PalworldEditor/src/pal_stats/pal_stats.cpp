@@ -23,6 +23,7 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace pal_stats {
+using pal_game::FunctionParams;
 namespace {
 /** @brief 把目标句柄还原为非拥有帕鲁 UObject，失效时返回 `nullptr`。 */
 [[nodiscard]] auto to_pal(const PalStatTarget target) -> UObject* {
@@ -116,30 +117,6 @@ auto write_byte(FByteProperty* property, void* saveParam, const int value) -> vo
 }
 
 /** @brief 一次动态 UFunction 参数缓冲区，负责初始化和析构非平凡属性。 */
-class FunctionParams final {
-public:
-    explicit FunctionParams(UFunction* function)
-        : function_{function}, storage_(static_cast<std::size_t>(function->GetParmsSize())) {
-        function_->InitializeStruct(storage_.data());
-    }
-
-    FunctionParams(const FunctionParams&) = delete;
-    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
-    FunctionParams(FunctionParams&&) = delete;
-    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
-
-    ~FunctionParams() {
-        function_->DestroyStruct(storage_.data());
-    }
-
-    [[nodiscard]] auto data() noexcept -> void* {
-        return storage_.data();
-    }
-
-private:
-    UFunction* function_{};
-    std::vector<std::byte> storage_;
-};
 
 struct RuntimeLimits {
     int condensationMaxStars{};

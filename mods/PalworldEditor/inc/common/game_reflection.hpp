@@ -7,6 +7,10 @@
  */
 #pragma once
 
+#include <cstddef>
+#include <vector>
+
+#include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/UObject.hpp>
 
 namespace pal_game {
@@ -67,4 +71,37 @@ inline auto is_valid(RC::Unreal::UObject* obj) -> bool {
     object->ProcessEvent(function, &params);
     return params.ReturnValue;
 }
+/**
+ * @brief RAII 包装 UFunction 参数缓冲区（构造时 InitializeStruct、析构时 DestroyStruct）。
+ * @details function 为 null 时为空操作；data() 返回的内存仅在本对象存活期间有效。
+ */
+class FunctionParams final {
+public:
+    explicit FunctionParams(RC::Unreal::UFunction* function)
+        : function_{function},
+          storage_(function == nullptr ? 0U : static_cast<std::size_t>(function->GetParmsSize())) {
+        if (function_ != nullptr) {
+            function_->InitializeStruct(storage_.data());
+        }
+    }
+
+    FunctionParams(const FunctionParams&) = delete;
+    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
+    FunctionParams(FunctionParams&&) = delete;
+    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
+
+    ~FunctionParams() {
+        if (function_ != nullptr) {
+            function_->DestroyStruct(storage_.data());
+        }
+    }
+
+    [[nodiscard]] auto data() noexcept -> void* {
+        return storage_.data();
+    }
+
+private:
+    RC::Unreal::UFunction* function_{};
+    std::vector<std::byte> storage_;
+};
 }  // namespace pal_game
