@@ -407,6 +407,8 @@ private:
     skill_editor::PassiveSkillPickerState passivePickerState_;
     /** @brief 主动技能下拉框当前选择的目录值；只由 GUI 线程访问。 */
     std::optional<skill_editor::SkillOption> activeChoice_;
+    /** @brief 主动技能目录的 Category 过滤；空值表示“全部”。 */
+    std::optional<skill_editor::ActiveSkillCategory> activeCategoryFilter_;
     /** @brief 词条预设下拉框当前选择的静态目录索引；只由 GUI 线程访问。 */
     std::optional<std::size_t> passivePresetIndex_;
     /** @brief GUI 上一次渲染的目标代数；变化时重置临时编辑状态。 */
