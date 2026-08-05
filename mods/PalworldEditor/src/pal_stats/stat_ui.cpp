@@ -87,12 +87,14 @@ void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
         ImGui::TextDisabled(
             "直接编辑存档永久附加值；原生接口按当前值差量提交，不会创建物种没有的适应性。");
         for (std::size_t index{}; index < workSuitabilityLabels.size(); ++index) {
+            // 固有（getter − 永久附加）<= 0 表示该物种不具备此工作适应性，跳过不渲染。
+            if (stats.workSuitabilityBaseRanks[index] <= stats.workSuitabilityBonusRanks[index]) {
+                continue;
+            }
             const int maxBonus = pal_stats::max_editable_work_suitability_bonus(
                 stats.workSuitabilityBaseRanks[index], stats.workSuitabilityBonusRanks[index],
                 stats.workSuitabilityMaxRank);
-            const bool supported = stats.workSuitabilityBaseRanks[index] > 0 ||
-                                   stats.workSuitabilityBonusRanks[index] > 0;
-            ImGui::BeginDisabled(workSuitabilityMutationsDisabled || !supported);
+            ImGui::BeginDisabled(workSuitabilityMutationsDisabled);
             ImGui::SetNextItemWidth(120.0F);
             const std::string label =
                 std::string{workSuitabilityLabels[index]} + "##stat-work-" + std::to_string(index);
@@ -100,14 +102,10 @@ void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
                            maxBonus, "%d", ImGuiSliderFlags_ClampZeroRange);
             ImGui::EndDisabled();
             ImGui::SameLine();
-            if (supported) {
-                ImGui::TextDisabled(
-                    "(当前 Lv.%d = 固有 %d + 永久附加 +%d)", stats.workSuitabilityBaseRanks[index],
-                    stats.workSuitabilityBaseRanks[index] - stats.workSuitabilityBonusRanks[index],
-                    stats.workSuitabilityBonusRanks[index]);
-            } else {
-                ImGui::TextDisabled("(该物种不具备此适应性)");
-            }
+            ImGui::TextDisabled(
+                "(当前 Lv.%d = 固有 %d + 永久附加 +%d)", stats.workSuitabilityBaseRanks[index],
+                stats.workSuitabilityBaseRanks[index] - stats.workSuitabilityBonusRanks[index],
+                stats.workSuitabilityBonusRanks[index]);
         }
         const auto workRequest =
             self->statDraft_.make_work_suitability_request(snapshot.worldGeneration);
