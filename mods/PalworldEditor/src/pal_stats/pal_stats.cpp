@@ -31,22 +31,6 @@ namespace {
     return pal_game::is_valid(pal) ? pal : nullptr;
 }
 
-/** @brief 调用无参、返回 `int32` 的 UFunction；目标或函数不可用时返回空。 */
-[[nodiscard]] auto invoke_int_return(UObject* object, const TCHAR* name) -> std::optional<int> {
-    if (!pal_game::is_valid(object)) {
-        return std::nullopt;
-    }
-    auto* const function = object->GetFunctionByNameInChain(name);
-    if (function == nullptr) {
-        return std::nullopt;
-    }
-    struct Params {
-        int32_t ReturnValue{};
-    } params;
-    object->ProcessEvent(function, &params);
-    return params.ReturnValue;
-}
-
 /** @brief 取得帕鲁 `SaveParameter` 结构体内存指针与其 `FStructProperty`；不可达时返回 `nullptr`。
  */
 [[nodiscard]] auto save_parameter_slot(UObject* pal, FStructProperty*& outProperty) -> void* {
@@ -115,8 +99,6 @@ namespace {
 auto write_byte(FByteProperty* property, void* saveParam, const int value) -> void {
     property->SetPropertyValueInContainer(saveParam, static_cast<std::uint8_t>(value));
 }
-
-/** @brief 一次动态 UFunction 参数缓冲区，负责初始化和析构非平凡属性。 */
 
 struct RuntimeLimits {
     int condensationMaxStars{};
@@ -435,9 +417,9 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     if (pal == nullptr) {
         return snapshot;
     }
-    const auto level = invoke_int_return(pal, STR("GetLevel"));
-    const auto friendshipRank = invoke_int_return(pal, STR("GetFriendshipRank"));
-    const auto friendshipPoint = invoke_int_return(pal, STR("GetFriendshipPoint"));
+    const auto level = pal_game::invoke<int>(pal, STR("GetLevel"));
+    const auto friendshipRank = pal_game::invoke<int>(pal, STR("GetFriendshipRank"));
+    const auto friendshipPoint = pal_game::invoke<int>(pal, STR("GetFriendshipPoint"));
     const auto limits = runtime_limits(pal);
     if (!level.has_value() || !friendshipRank.has_value() || !friendshipPoint.has_value() ||
         !limits.has_value()) {

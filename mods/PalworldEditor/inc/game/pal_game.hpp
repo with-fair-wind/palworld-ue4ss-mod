@@ -67,11 +67,13 @@ struct LocalOtomoHolderResolution {
     const auto selection = skill_editor::find_unique_local_candidate(
         holders, [](UObject* holder) { return is_valid(holder); },
         [](UObject* holder) {
-            return invoke_object_return(holder, STR("TryGetOwnerControlledPawn"));
+            return invoke<UObject*>(holder, STR("TryGetOwnerControlledPawn")).value_or(nullptr);
         },
-        [](UObject* pawn) { return invoke_object_return(pawn, STR("GetController")); },
+        [](UObject* pawn) {
+            return invoke<UObject*>(pawn, STR("GetController")).value_or(nullptr);
+        },
         [](UObject* controller) {
-            return invoke_bool_return(controller, STR("IsLocalPlayerController"));
+            return invoke<bool>(controller, STR("IsLocalPlayerController")).value_or(false);
         });
 
     using SelectionStatus = skill_editor::LocalCandidateSelectionStatus;
