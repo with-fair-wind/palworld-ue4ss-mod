@@ -329,6 +329,11 @@ template <typename Localizer>
         if (localizedName.empty()) {
             continue;
         }
+        // 过滤没有中文翻译的技能（纯 ASCII 名 = 可能废弃/内部，效果不正常）
+        if (std::ranges::all_of(localizedName,
+                                [](char c) { return static_cast<unsigned char>(c) < 128; })) {
+            continue;
+        }
         options.push_back({
             .id = std::string(definition.id),
             .localizedName = std::move(localizedName),
