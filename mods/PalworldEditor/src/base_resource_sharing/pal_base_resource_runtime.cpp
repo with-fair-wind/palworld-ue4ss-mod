@@ -17,6 +17,7 @@
 #include <common/game_reflection.hpp>
 
 namespace base_resource_sharing::detail {
+using pal_game::find_object_by_full_name;
 using pal_game::FunctionParams;
 using namespace RC;
 using namespace RC::Unreal;
@@ -33,16 +34,6 @@ namespace {
 
 [[nodiscard]] auto object_name(UObject* object) -> std::wstring {
     return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
-}
-
-[[nodiscard]] auto find_object_by_full_name(const std::wstring& fullName) -> UObject* {
-    if (fullName.empty()) {
-        return nullptr;
-    }
-    const auto separator = fullName.find(L' ');
-    const auto objectPath =
-        separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
-    return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, objectPath.c_str());
 }
 
 [[nodiscard]] auto pal_utility() -> UObject* {

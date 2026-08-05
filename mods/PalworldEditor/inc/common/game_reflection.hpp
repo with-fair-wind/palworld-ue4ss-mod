@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstddef>
+#include <string>
 #include <vector>
 
 #include <Unreal/CoreUObject/UObject/Class.hpp>
@@ -104,4 +105,17 @@ private:
     RC::Unreal::UFunction* function_{};
     std::vector<std::byte> storage_;
 };
+
+/** @brief 从完整对象名恢复 UObject；类名前缀存在时只传递后半对象路径。 */
+[[nodiscard]] inline auto find_object_by_full_name(const std::wstring& fullName)
+    -> RC::Unreal::UObject* {
+    if (fullName.empty()) {
+        return nullptr;
+    }
+    const auto separator = fullName.find(L' ');
+    const auto objectPath =
+        separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
+    return RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(nullptr, nullptr,
+                                                                              objectPath.c_str());
+}
 }  // namespace pal_game
