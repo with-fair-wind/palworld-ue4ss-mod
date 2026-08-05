@@ -7,6 +7,11 @@
  */
 #pragma once
 
+#include <cstddef>
+#include <string>
+#include <vector>
+
+#include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/UObject.hpp>
 
 namespace pal_game {
@@ -66,5 +71,51 @@ inline auto is_valid(RC::Unreal::UObject* obj) -> bool {
     } params;
     object->ProcessEvent(function, &params);
     return params.ReturnValue;
+}
+/**
+ * @brief RAII 包装 UFunction 参数缓冲区（构造时 InitializeStruct、析构时 DestroyStruct）。
+ * @details function 为 null 时为空操作；data() 返回的内存仅在本对象存活期间有效。
+ */
+class FunctionParams final {
+public:
+    explicit FunctionParams(RC::Unreal::UFunction* function)
+        : function_{function},
+          storage_(function == nullptr ? 0U : static_cast<std::size_t>(function->GetParmsSize())) {
+        if (function_ != nullptr) {
+            function_->InitializeStruct(storage_.data());
+        }
+    }
+
+    FunctionParams(const FunctionParams&) = delete;
+    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
+    FunctionParams(FunctionParams&&) = delete;
+    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
+
+    ~FunctionParams() {
+        if (function_ != nullptr) {
+            function_->DestroyStruct(storage_.data());
+        }
+    }
+
+    [[nodiscard]] auto data() noexcept -> void* {
+        return storage_.data();
+    }
+
+private:
+    RC::Unreal::UFunction* function_{};
+    std::vector<std::byte> storage_;
+};
+
+/** @brief 从完整对象名恢复 UObject；类名前缀存在时只传递后半对象路径。 */
+[[nodiscard]] inline auto find_object_by_full_name(const std::wstring& fullName)
+    -> RC::Unreal::UObject* {
+    if (fullName.empty()) {
+        return nullptr;
+    }
+    const auto separator = fullName.find(L' ');
+    const auto objectPath =
+        separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
+    return RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(nullptr, nullptr,
+                                                                              objectPath.c_str());
 }
 }  // namespace pal_game

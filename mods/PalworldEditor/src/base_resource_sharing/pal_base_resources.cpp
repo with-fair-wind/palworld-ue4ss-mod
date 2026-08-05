@@ -19,8 +19,10 @@
 #include <base_resource_sharing/pal_base_resource_runtime.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <base_resource_sharing/persistent_union.hpp>
+#include <common/game_reflection.hpp>
 
 namespace base_resource_sharing {
+using pal_game::find_object_by_full_name;
 using namespace RC;
 using namespace RC::Unreal;
 
@@ -32,16 +34,6 @@ namespace {
 [[nodiscard]] auto registration_key(const PersistentUnionEdge& edge)
     -> ConcreteModelRegistrationKey {
     return {.moduleFullName = edge.targetModuleFullName, .ownerMapObjectId = edge.ownerMapObjectId};
-}
-
-[[nodiscard]] auto find_object_by_full_name(const std::wstring& fullName) -> UObject* {
-    if (fullName.empty()) {
-        return nullptr;
-    }
-    const auto separator = fullName.find(L' ');
-    const auto objectPath =
-        separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
-    return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, objectPath.c_str());
 }
 
 class MutationScope {

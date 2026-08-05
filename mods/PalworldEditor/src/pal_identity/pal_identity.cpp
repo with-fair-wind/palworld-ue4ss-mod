@@ -3,11 +3,9 @@
  * @brief 实现 Alpha、Lucky 与觉醒的游戏线程反射事务。
  * @details 不缓存 UObject 或属性地址；只有显式选择/应用请求会进入本文件。
  */
-#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/NameTypes.hpp>
@@ -21,33 +19,9 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace pal_identity {
+using pal_game::FunctionParams;
 namespace {
 inline constexpr std::string_view kBossPrefix{"BOSS_"};
-
-class FunctionParams final {
-public:
-    explicit FunctionParams(UFunction* function)
-        : function_{function}, storage_(static_cast<std::size_t>(function->GetParmsSize())) {
-        function_->InitializeStruct(storage_.data());
-    }
-
-    FunctionParams(const FunctionParams&) = delete;
-    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
-    FunctionParams(FunctionParams&&) = delete;
-    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
-
-    ~FunctionParams() {
-        function_->DestroyStruct(storage_.data());
-    }
-
-    [[nodiscard]] auto data() noexcept -> void* {
-        return storage_.data();
-    }
-
-private:
-    UFunction* function_{};
-    std::vector<std::byte> storage_;
-};
 
 struct SaveFields {
     void* saveParameter{};
