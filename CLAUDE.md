@@ -36,6 +36,16 @@ cmake --build --preset ninja-msvc-x64 --target deploy
 DLL 输出为 `build/Game__Shipping__Win64/bin/PalworldEditor.dll`；部署目标为
 `Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll`。
 
+## 分支与协作流程
+
+- `main` 仅用于发布；开发基线是 `develop`。
+- 所有修改（功能、修复、文档、重构、脚本）都必须从 `develop` 切出独立分支，禁止直接在
+  `develop` 或 `main` 上提交；分支名使用 `feat/`、`fix/`、`docs/`、`chore/`、`refactor/`、
+  `style/`、`test/`、`diag/` 前缀。
+- 每个修改集 = 一个分支 → 推送远端 → 先提交 PR 到 `develop`；合入 `develop` 验证通过后，
+  再按发布流程合入 `main`。
+- 本地 `develop` 与 `main` 只用于 `pull` 对齐，不直接提交。
+
 ## 架构
 
 - `inc/game/pal_game.hpp`：背包、物品、当前待出战队伍帕鲁的反射访问，以及 `TryGetSpawnedOtomoHandle` 出战状态检测；
