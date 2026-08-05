@@ -303,8 +303,8 @@ inline void apply_passive_metadata(
  * @brief Returns whether a stable active-skill Raw ID is clearly game-internal.
  */
 [[nodiscard]] inline auto is_internal_active_skill_id(const std::string_view id) noexcept -> bool {
-    return id.starts_with("Human_") || id.contains("_GYM_") || id.contains("Raid") ||
-           id.contains("Boss");
+    return id.starts_with("Human_") || id.starts_with("Unique_") || id.contains("_GYM_") ||
+           id.contains("Raid") || id.contains("Boss");
 }
 
 /**
@@ -325,9 +325,13 @@ template <typename Localizer>
             continue;
         }
 
+        std::string localizedName = localize(definition);
+        if (localizedName.empty()) {
+            continue;
+        }
         options.push_back({
             .id = std::string(definition.id),
-            .localizedName = localize(definition),
+            .localizedName = std::move(localizedName),
             .activeValue = definition.value,
         });
     }
