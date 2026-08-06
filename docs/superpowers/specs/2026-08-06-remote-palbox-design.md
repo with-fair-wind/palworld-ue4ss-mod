@@ -30,7 +30,8 @@
 ### 不包含
 
 - 聊天命令入口（F10 控制台不可用，交互全部走 UE4SS GUI）；
-- 地牢内打开（默认禁，即使开启开关也提示风险）；
+- 地牢内打开的稳定性：`DisableInDungeon` 关闭时可在地牢尝试打开，但原版存在崩溃 bug
+  （参考 1944 的封禁原因），GUI 在该开关旁显示风险警告，本 mod 不承诺地牢内稳定；
 - 专用服务器/主机端支持（沿用单人/本地房主基线）；
 - 修改终端交互语义、动画或存档。
 
@@ -65,7 +66,8 @@ src/pal_remote_palbox/
 
 1. **按键检测（每帧）**：`GetAsyncKeyState(配置VK)` 上升沿 + 游戏窗口前台检查 +
    300ms 防连点 + 进行中保护。每帧固定 2 次 WinAPI 调用，不接触任何游戏对象。
-2. **世界就绪**：已进档、LoadMap 后、世界代次有效；否则静默忽略。
+2. **世界就绪**：已进档、LoadMap 后、世界代次有效（复用 `world_session_state` 的现有
+   世界代次判定）；否则静默忽略。
 3. **门控（仅在上升沿）**：`PalPlayerState:IsInStage()`（默认禁）→
    `PalPlayerController:IsRiding()`（默认禁）→ `OnlyInsideBaseCircle`（默认关，
    开时检查玩家是否在某基地圈内）。
