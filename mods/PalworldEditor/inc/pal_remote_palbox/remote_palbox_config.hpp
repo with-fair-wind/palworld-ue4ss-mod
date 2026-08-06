@@ -16,9 +16,9 @@ namespace pal_remote_palbox {
 
 /** @brief 远程终端运行时配置；与 remote_palbox.ini 的键一一对应。 */
 struct RemotePalboxConfig {
-    int hotkeyVk{74};                /**< 打开快捷键 VK 码；默认 J（0x4A=74）。 */
-    bool disableWhileMounted{true};  /**< 骑乘时禁用。 */
-    bool disableInDungeon{true};     /**< 地牢内禁用。 */
+    int hotkeyVk{74};                 /**< 打开快捷键 VK 码；默认 J（0x4A=74）。 */
+    bool disableWhileMounted{true};   /**< 骑乘时禁用。 */
+    bool disableInDungeon{true};      /**< 地牢内禁用。 */
     bool onlyInsideBaseCircle{false}; /**< 仅基地圈内可用。 */
     bool disableDuringCombat{false};  /**< 战斗中禁用。 */
 };
@@ -52,8 +52,8 @@ inline constexpr RemotePalboxConfig kDefaultRemotePalboxConfig{};
     std::size_t pos{};
     while (pos < content.size()) {
         const auto eol = content.find('\n', pos);
-        const auto line = content.substr(
-            pos, eol == std::string_view::npos ? content.size() - pos : eol - pos);
+        const auto line =
+            content.substr(pos, eol == std::string_view::npos ? content.size() - pos : eol - pos);
         pos = eol == std::string_view::npos ? content.size() : eol + 1;
         const auto eq = line.find('=');
         if (eq == std::string_view::npos || eq == 0) {
@@ -91,10 +91,18 @@ inline constexpr RemotePalboxConfig kDefaultRemotePalboxConfig{};
 /** @brief 固定键序序列化，与 parse 互逆。 */
 [[nodiscard]] inline auto serialize_remote_palbox_config(const RemotePalboxConfig& config)
     -> std::string {
-    return "HotkeyVk=" + std::to_string(config.hotkeyVk) + "\n"
-           "DisableWhileMounted=" + (config.disableWhileMounted ? "true" : "false") + "\n"
-           "DisableInDungeon=" + (config.disableInDungeon ? "true" : "false") + "\n"
-           "OnlyInsideBaseCircle=" + (config.onlyInsideBaseCircle ? "true" : "false") + "\n"
-           "DisableDuringCombat=" + (config.disableDuringCombat ? "true" : "false") + "\n";
+    return "HotkeyVk=" + std::to_string(config.hotkeyVk) +
+           "\n"
+           "DisableWhileMounted=" +
+           (config.disableWhileMounted ? "true" : "false") +
+           "\n"
+           "DisableInDungeon=" +
+           (config.disableInDungeon ? "true" : "false") +
+           "\n"
+           "OnlyInsideBaseCircle=" +
+           (config.onlyInsideBaseCircle ? "true" : "false") +
+           "\n"
+           "DisableDuringCombat=" +
+           (config.disableDuringCombat ? "true" : "false") + "\n";
 }
 }  // namespace pal_remote_palbox

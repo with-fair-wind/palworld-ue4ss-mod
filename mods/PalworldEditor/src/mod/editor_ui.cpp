@@ -97,9 +97,12 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("据点")) {
+            Output::send<LogLevel::Warning>(STR("PalworldEditor: base tab enter\n"));
             render_base_resource_sharing(self);
-            render_remote_palbox(self);
-            render_grapple_no_cooldown(self);
+            Output::send<LogLevel::Warning>(STR("PalworldEditor: base section done\n"));
+            // 诊断：远程终端与爪钩渲染均已临时摘除
+            // render_remote_palbox(self);
+            // render_grapple_no_cooldown(self);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("诊断")) {

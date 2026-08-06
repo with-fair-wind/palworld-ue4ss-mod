@@ -10,8 +10,8 @@
 #include <string_view>
 #include <vector>
 
-#include <pal_remote_palbox/remote_palbox_config.hpp>
 #include <pal_remote_palbox/remote_palbox.hpp>
+#include <pal_remote_palbox/remote_palbox_config.hpp>
 
 namespace {
 int failures = 0;
@@ -74,11 +74,11 @@ void test_edge_trigger_basic() {
     using clock = std::chrono::steady_clock;
     pal_remote_palbox::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
-    CHECK(!trigger.update(t0, false));                             // 未按不触发
-    CHECK(!trigger.update(t0 + std::chrono::seconds(1), false));   // 仍未按
-    CHECK(trigger.update(t0 + std::chrono::seconds(2), true));     // 上升沿触发
+    CHECK(!trigger.update(t0, false));                            // 未按不触发
+    CHECK(!trigger.update(t0 + std::chrono::seconds(1), false));  // 仍未按
+    CHECK(trigger.update(t0 + std::chrono::seconds(2), true));    // 上升沿触发
     CHECK(trigger.in_flight());
-    CHECK(!trigger.update(t0 + std::chrono::seconds(3), true));    // 进行中忽略
+    CHECK(!trigger.update(t0 + std::chrono::seconds(3), true));  // 进行中忽略
     trigger.end_trigger();
     CHECK(!trigger.in_flight());
 }
