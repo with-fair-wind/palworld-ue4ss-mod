@@ -180,8 +180,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         want_read_.store(true);
     }
 
+    // 主菜单（无背包容器）时跳过物品扫描和背包读取，避免 fallback 日志噪音和无谓 ForEachUObject。
+    const auto worldContextReady = pal_game::is_valid(pal_game::get_main_container());
+
     // Read inventory
-    if (want_read_.exchange(false)) {
+    if (worldContextReady && want_read_.exchange(false)) {
         auto fresh = pal_game::read_inventory();
         const std::lock_guard lock(inv_mutex_);
         if (selected_ >= static_cast<int>(fresh.size())) {
@@ -193,10 +196,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     // Scan items. StaticItemDataMap may become ready after LoadMap, so fallback scans retry
     // with a bounded pure-value scheduler instead of probing UObject state every frame.
     const auto worldGeneration = worldSession_.generation();
-    if (want_scan_items_.exchange(false)) {
+    if (worldContextReady && want_scan_items_.exchange(false)) {
         itemCatalogScanScheduler_.request(worldGeneration);
     }
-    if (itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
+    if (worldContextReady &&
+        itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
         auto result = pal_game::scan_all_items();
         static_cast<void>(
             itemCatalogScanScheduler_.complete(worldGeneration, result.usedStaticItemDataMap));
