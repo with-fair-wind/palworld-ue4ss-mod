@@ -536,12 +536,15 @@ auto PalworldEditorMod::set_grapple_runtime_status(std::string status) -> void {
 auto PalworldEditorMod::revive_team_pals() -> void {
     auto* const holder = UObjectGlobals::FindFirstOf(STR("PalOtomoHolderComponentBase"));
     if (!pal_game::is_valid(holder)) {
+        Output::send<LogLevel::Warning>(STR("PalworldEditor: revive: holder not found\n"));
         skillRuntimeSnapshot_.lastResult = "复活失败：未找到队伍 Holder。";
         skillSnapshotDirty_ = true;
         return;
     }
 
     const auto maxNum = pal_game::invoke<int>(holder, STR("GetMaxOtomoNum")).value_or(0);
+    Output::send<LogLevel::Warning>(STR("PalworldEditor: revive: holder valid, maxNum={}\n"),
+                                    maxNum);
     if (maxNum <= 0 || maxNum > 20) {
         skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位数异常。";
         skillSnapshotDirty_ = true;
@@ -571,6 +574,8 @@ auto PalworldEditorMod::revive_team_pals() -> void {
                       handleRetProp->ContainerPtrToValuePtr<void>(handleParams.data()))
                 : nullptr;
         if (!pal_game::is_valid(handle)) {
+            Output::send<LogLevel::Warning>(STR("PalworldEditor: revive: slot {} handle null\n"),
+                                            slotIndex);
             continue;
         }
 
@@ -579,13 +584,19 @@ auto PalworldEditorMod::revive_team_pals() -> void {
             pal_game::invoke<RC::Unreal::UObject*>(handle, STR("TryGetIndividualParameter"))
                 .value_or(nullptr);
         if (!pal_game::is_valid(parameter)) {
+            Output::send<LogLevel::Warning>(STR("PalworldEditor: revive: slot {} parameter null\n"),
+                                            slotIndex);
             continue;
         }
 
-        // IsDead → SetPhysicalHealth(Healthful = 0)
-        const auto isDead = pal_game::invoke<bool>(parameter, STR("IsDead")).value_or(false);
-        if (!isDead) {
-            continue;
+        // 检查 PhysicalHealth：Healthful=0, MinorInjury=1, Severe=2, Dying=3, DeadBody=4
+        // CloudCemetery=5。非 Healthful 都需要复活。
+        const auto physicalHealth =
+            pal_game::invoke<int>(parameter, STR("GetPhysicalHealth")).value_or(0);
+        Output::send<LogLevel::Warning>(STR("PalworldEditor: revive: slot {} physicalHealth={}\n"),
+                                        slotIndex, physicalHealth);
+        if (physicalHealth <= 0) {
+            continue;  // 已经 Healthful，跳过
         }
         auto* const setHealthFunction =
             parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
