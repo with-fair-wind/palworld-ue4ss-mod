@@ -20,7 +20,9 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
 #include <UE4SSProgram.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/text_encoding.hpp>
@@ -417,6 +419,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     }
     publish_skill_snapshot_if_dirty();
 
+    // Revive team pals
+    if (wantReviveTeam_.exchange(false)) {
+        revive_team_pals();
+    }
+
     // Discover
     if (want_discover_.exchange(false)) {
         pal_game::discover_objects();
@@ -524,6 +531,86 @@ auto PalworldEditorMod::finish_passive_classification_on_game_thread() -> void {
 auto PalworldEditorMod::set_grapple_runtime_status(std::string status) -> void {
     const std::lock_guard lock(grappleStatusMutex_);
     grappleRuntimeStatus_ = std::move(status);
+}
+
+auto PalworldEditorMod::revive_team_pals() -> void {
+    auto* const holder = UObjectGlobals::FindFirstOf(STR("PalOtomoHolderComponentBase"));
+    if (!pal_game::is_valid(holder)) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：未找到队伍 Holder。";
+        skillSnapshotDirty_ = true;
+        return;
+    }
+
+    const auto maxNum = pal_game::invoke<int>(holder, STR("GetMaxOtomoNum")).value_or(0);
+    if (maxNum <= 0 || maxNum > 20) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位数异常。";
+        skillSnapshotDirty_ = true;
+        return;
+    }
+
+    int revivedCount = 0;
+    for (int slotIndex = 0; slotIndex < maxNum; ++slotIndex) {
+        // GetOtomoIndividualHandle(slotIndex) → Handle
+        auto* const getHandleFunction =
+            holder->GetFunctionByNameInChain(STR("GetOtomoIndividualHandle"));
+        if (getHandleFunction == nullptr) {
+            continue;
+        }
+        pal_game::FunctionParams handleParams{getHandleFunction};
+        auto* const slotProp = CastField<FIntProperty>(
+            getHandleFunction->FindProperty(FName(STR("SlotIndex"), FNAME_Find)));
+        if (slotProp != nullptr) {
+            slotProp->SetPropertyValueInContainer(handleParams.data(), slotIndex);
+        }
+        holder->ProcessEvent(getHandleFunction, handleParams.data());
+        auto* const handleRetProp = CastField<FObjectPropertyBase>(
+            getHandleFunction->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+        auto* const handle =
+            handleRetProp != nullptr
+                ? handleRetProp->GetObjectPropertyValue(
+                      handleRetProp->ContainerPtrToValuePtr<void>(handleParams.data()))
+                : nullptr;
+        if (!pal_game::is_valid(handle)) {
+            continue;
+        }
+
+        // Handle → TryGetIndividualParameter → Parameter
+        auto* const parameter =
+            pal_game::invoke<RC::Unreal::UObject*>(handle, STR("TryGetIndividualParameter"))
+                .value_or(nullptr);
+        if (!pal_game::is_valid(parameter)) {
+            continue;
+        }
+
+        // IsDead → SetPhysicalHealth(Healthful = 0)
+        const auto isDead = pal_game::invoke<bool>(parameter, STR("IsDead")).value_or(false);
+        if (!isDead) {
+            continue;
+        }
+        auto* const setHealthFunction =
+            parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
+        if (setHealthFunction == nullptr) {
+            continue;
+        }
+        pal_game::FunctionParams healthParams{setHealthFunction};
+        auto* const healthProp =
+            setHealthFunction->FindProperty(FName(STR("PhysicalHealth"), FNAME_Find));
+        if (auto* const enumProp = CastField<FEnumProperty>(healthProp)) {
+            enumProp->GetUnderlyingProperty()->SetIntPropertyValue(
+                enumProp->ContainerPtrToValuePtr<void>(healthParams.data()),
+                static_cast<int64_t>(0));
+        }
+        parameter->ProcessEvent(setHealthFunction, healthParams.data());
+        ++revivedCount;
+    }
+
+    if (revivedCount > 0) {
+        skillRuntimeSnapshot_.lastResult =
+            "复活了 " + std::to_string(revivedCount) + " 只队伍帕鲁。";
+    } else {
+        skillRuntimeSnapshot_.lastResult = "队伍中没有需要复活的帕鲁。";
+    }
+    skillSnapshotDirty_ = true;
 }
 
 auto PalworldEditorMod::process_grapple_work(const float deltaSeconds) -> void {
