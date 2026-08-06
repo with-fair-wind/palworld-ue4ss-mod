@@ -61,6 +61,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PalworldEditor.BaseResourceSharing
         COMMAND PalworldEditorBaseResourceSharingTests)
+
+    add_executable(PalworldEditorRemotePalboxTests
+        tests/remote_palbox_tests.cpp
+    )
+    target_include_directories(PalworldEditorRemotePalboxTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorRemotePalboxTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorRemotePalboxTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.RemotePalbox
+        COMMAND PalworldEditorRemotePalboxTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
