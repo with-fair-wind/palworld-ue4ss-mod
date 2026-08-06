@@ -553,26 +553,19 @@ auto PalworldEditorMod::revive_team_pals() -> void {
 
     int revivedCount = 0;
     for (int slotIndex = 0; slotIndex < maxNum; ++slotIndex) {
-        // GetOtomoIndividualHandle(slotIndex) → Handle
-        auto* const getHandleFunction =
-            holder->GetFunctionByNameInChain(STR("GetOtomoIndividualHandle"));
+        // GetOtomoIndividualHandle(slotIndex) → Handle（用直接 struct，和 pal_game.hpp 一致）
+        auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr,
+            STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
         if (getHandleFunction == nullptr) {
             continue;
         }
-        pal_game::FunctionParams handleParams{getHandleFunction};
-        auto* const slotProp = CastField<FIntProperty>(
-            getHandleFunction->FindProperty(FName(STR("SlotIndex"), FNAME_Find)));
-        if (slotProp != nullptr) {
-            slotProp->SetPropertyValueInContainer(handleParams.data(), slotIndex);
-        }
-        holder->ProcessEvent(getHandleFunction, handleParams.data());
-        auto* const handleRetProp = CastField<FObjectPropertyBase>(
-            getHandleFunction->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
-        auto* const handle =
-            handleRetProp != nullptr
-                ? handleRetProp->GetObjectPropertyValue(
-                      handleRetProp->ContainerPtrToValuePtr<void>(handleParams.data()))
-                : nullptr;
+        struct GetHandleParams {
+            int32_t SlotIndex{};
+            UObject* ReturnValue{};
+        } handleParams{.SlotIndex = slotIndex};
+        holder->ProcessEvent(getHandleFunction, &handleParams);
+        auto* const handle = handleParams.ReturnValue;
         if (!pal_game::is_valid(handle)) {
             Output::send<LogLevel::Warning>(STR("PalworldEditor: revive: slot {} handle null\n"),
                                             slotIndex);
