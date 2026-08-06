@@ -29,6 +29,7 @@ add_library(${TARGET} SHARED
     src/pal_stats/pal_stats.cpp
     src/pal_stats/stat_ui.cpp
     src/pal_remote_palbox/remote_palbox_runtime.cpp
+    src/pal_remote_palbox/remote_palbox_ui.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)

@@ -28,6 +28,7 @@
 #include <items/item_catalog.hpp>
 #include <pal_identity/pal_identity.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
+#include <pal_remote_palbox/remote_palbox_runtime.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <pal_stats/pal_stats.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
@@ -223,6 +224,7 @@ private:
 
     /** @brief 渲染同公会跨据点制作/建造材料共享开关与运行状态。 */
     static void render_base_resource_sharing(PalworldEditorMod* self);
+    static void render_remote_palbox(PalworldEditorMod* self);
 
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
@@ -303,6 +305,8 @@ private:
     /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
     std::atomic<bool> wantProbeObject_{false};
 
+    /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
+    pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;
     /** @brief 游戏线程拥有的跨据点资源反射桥；GUI 只读取其值快照。 */
     base_resource_sharing::PalBaseResourceBridge baseResourceBridge_;
     /** @brief GUI/启动阶段提交给游戏线程的资源共享偏好。 */
