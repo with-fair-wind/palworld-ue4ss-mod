@@ -377,7 +377,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     const bool refreshRequested = skillCatalogRefreshScheduler_.should_refresh(
         manualRefreshRequested, catalogReady,
         skill_editor::SkillCatalogRefreshScheduler::clock::now(),
-        [] { return pal_game::is_valid(pal_game::get_main_container()); });
+        [worldContextReady] { return worldContextReady; });
     if (refreshRequested) {
         refresh_skill_catalog_on_game_thread();
     }
