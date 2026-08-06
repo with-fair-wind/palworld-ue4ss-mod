@@ -110,6 +110,13 @@ auto PalworldEditorMod::on_unreal_init() -> void {
         skillSnapshotDirty_ = true;
         publish_skill_snapshot_if_dirty();
     }
+
+    // 远程终端配置：mods/<ModName>/remote_palbox.ini（缺失时回退默认值）。
+    const auto modsDirectory = UE4SSProgram::get_program().get_mods_directory();
+    const auto iniPath = (std::filesystem::path(modsDirectory) / std::filesystem::path(ModName) /
+                          L"remote_palbox.ini")
+                             .wstring();
+    remotePalboxRuntime_.load_config(text_encoding::to_utf8(iniPath));
 }
 
 auto PalworldEditorMod::on_update() -> void {}
@@ -136,6 +143,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     process_grapple_work(deltaSeconds);
     baseResourceBridge_.ensure_hooks_registered();
     baseResourceBridge_.tick(deltaSeconds);
+    remotePalboxRuntime_.tick(deltaSeconds, worldSession_);
 
     if (wantProbeObject_.exchange(false)) {
         if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
@@ -645,6 +653,7 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
                                std::memory_order_release);
     baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
+    remotePalboxRuntime_.begin_world_transition();
     worldSession_.begin_transition();
     statWritesDisabledForWorld_ = false;
     workSuitabilityWritesDisabledForWorld_ = false;
@@ -721,6 +730,7 @@ auto PalworldEditorMod::finish_world_transition() -> void {
         worldSession_.begin_transition();
     }
     worldSession_.finish_transition();
+    remotePalboxRuntime_.finish_world_transition();
     baseResourceBridge_.on_world_ready(worldSession_.generation());
     itemCatalogScanScheduler_.begin_world(worldSession_.generation());
     want_read_.store(true);

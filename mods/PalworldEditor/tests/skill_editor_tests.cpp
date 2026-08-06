@@ -354,41 +354,39 @@ void test_internal_active_skill_filter() {
     CHECK(skill_editor::is_internal_active_skill_id("Unique_MoonQueen_GYM_Act"));
     CHECK(skill_editor::is_internal_active_skill_id("RaidCutter"));
     CHECK(skill_editor::is_internal_active_skill_id("Unique_LilyQueen_LilyHealing_Boss"));
+    // #10 起物种专属（Unique_ 前缀）技能整体视为内部/不可用。
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_Boar_Tackle"));
     CHECK(!skill_editor::is_internal_active_skill_id("SelfDestruct"));
     CHECK(!skill_editor::is_internal_active_skill_id("MudShot"));
-    CHECK(!skill_editor::is_internal_active_skill_id("Unique_Boar_Tackle"));
 
     constexpr std::array definitions{
         skill_editor::ActiveSkillDefinition{.value = 1, .id = "Human_Punch"},
         skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
         skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
     };
+    // 本地化名为空 = 未翻译/内部技能（#11 起直接跳过，不再回退 Raw ID）。
     const auto options = skill_editor::make_active_skill_options(
         definitions, [](const auto&) { return std::string{}; });
-    CHECK(options.size() == 2);
-    CHECK(options[0].id == "Unique_Boar_Tackle");
-    CHECK(options[1].id == "MudShot");
+    CHECK(options.empty());
 }
 
 void test_active_skill_options_use_runtime_localization_with_raw_id_fallback() {
     constexpr std::array definitions{
-        skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
+        skill_editor::ActiveSkillDefinition{.value = 15, .id = "PowerShot"},
         skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
     };
 
     const auto options = skill_editor::make_active_skill_options(
         definitions, [](const skill_editor::ActiveSkillDefinition& definition) {
-            return definition.value == 15 ? std::string{"野猪突进"} : std::string{};
+            return definition.value == 15 ? std::string{"重击弹"} : std::string{};
         });
 
-    CHECK(options.size() == 2);
-    CHECK(options[0].id == "Unique_Boar_Tackle");
-    CHECK(options[0].localizedName == "野猪突进");
+    // 空本地化名（MudShot）被跳过；仅保留有非 ASCII 本地化名的技能。
+    CHECK(options.size() == 1);
+    CHECK(options[0].id == "PowerShot");
+    CHECK(options[0].localizedName == "重击弹");
     CHECK(options[0].activeValue == std::optional<std::uint16_t>{std::uint16_t{15}});
-    CHECK(skill_editor::skill_label(options[0]) == "野猪突进 [Unique_Boar_Tackle]");
-    CHECK(options[1].id == "MudShot");
-    CHECK(options[1].localizedName.empty());
-    CHECK(skill_editor::skill_label(options[1]) == "MudShot");
+    CHECK(skill_editor::skill_label(options[0]) == "重击弹 [PowerShot]");
 }
 
 void test_skill_catalog_refresh_merges_sections_independently() {
