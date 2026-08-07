@@ -64,6 +64,8 @@ private:
     static constexpr std::size_t kPassiveMetadataBatchSize = 8;
     /** @brief 每个 EngineTick 被动技能分类反射的软时间预算。 */
     static constexpr auto kPassiveMetadataBudget = std::chrono::microseconds{500};
+    /** @brief 开启物品堆叠无上限时写入 MaxStackCount 的目标值。 */
+    static constexpr int32_t kUnlimitedStackCount{99999};
 
     /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
     static auto unregister_callback(Hook::GlobalCallbackId& callbackId) -> void;
@@ -88,6 +90,12 @@ private:
 
     /** @brief 遍历队伍槽位，复活所有处于死亡/濒死状态的帕鲁。 */
     auto revive_team_pals() -> void;
+
+    /** @brief 遍历所有 PalStaticItemData，开启/关闭 MaxStackCount 无上限。 */
+    auto apply_stack_limit_change(bool unlimited) -> void;
+
+    /** @brief 恢复 MaxStackCount 原值并清空缓存。 */
+    auto restore_stack_limits() -> void;
 
     /**
      * @brief 在关闭开关或切图前恢复全部活动爪钩覆盖。
@@ -170,6 +178,9 @@ private:
                                     const std::unordered_set<std::string>& excludedIds,
                                     char* search, std::size_t searchSize,
                                     std::optional<skill_editor::SkillOption>& selected) -> bool;
+
+    /** @brief 渲染物品堆叠无上限开关；切换时向游戏线程提交一次进程内请求。 */
+    static void render_stack_unlimited(PalworldEditorMod* self);
 
     /** @brief 渲染物品 Raw ID 与数量输入，并提交给予物品请求。 */
     static void render_give_items(PalworldEditorMod* self);
@@ -299,6 +310,10 @@ private:
     std::atomic<bool> want_read_{false};
     /** @brief 请求游戏线程在下一次更新中输出 UObject 诊断信息。 */
     std::atomic<bool> want_discover_{false};
+    /** @brief GUI 线程提交的物品堆叠无上限偏好（true=开启无上限）。 */
+    std::atomic<bool> requestedStackUnlimited_{false};
+    /** @brief 通知 EngineTick 消费最新的堆叠无上限偏好。 */
+    std::atomic<bool> stackSettingDirty_{false};
     /** @brief GUI 线程提交、game_thread_tick 消费的一次性复活请求。 */
     std::atomic<bool> wantReviveTeam_{false};
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
@@ -383,6 +398,8 @@ private:
     skill_editor::PassiveSkillClassificationJob passiveClassificationJob_;
     /** @brief mod 生命周期内成功读取的被动技能分类纯值缓存。 */
     std::unordered_map<std::string, skill_editor::PassiveSkillMetadata> passiveSkillMetadataCache_;
+    /** @brief 开启堆叠无上限时缓存的原始 MaxStackCount（键=物品 ID FName 字符串）。 */
+    std::unordered_map<std::string, int32_t> originalStackLimits_;
     /** @brief GUI 可无锁读取的当前分类完成数。 */
     std::atomic<std::size_t> passiveClassificationCompleted_{0};
     /** @brief GUI 可无锁读取的当前分类总数。 */

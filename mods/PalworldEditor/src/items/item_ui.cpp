@@ -105,3 +105,13 @@ void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
         }
     }
 }
+
+void PalworldEditorMod::render_stack_unlimited(PalworldEditorMod* self) {
+    editor_ui::section_header("物品堆叠");
+    bool unlimited = self->requestedStackUnlimited_.load(std::memory_order_acquire);
+    if (ImGui::Checkbox("物品堆叠无上限", &unlimited)) {
+        self->requestedStackUnlimited_.store(unlimited, std::memory_order_release);
+        self->stackSettingDirty_.store(true, std::memory_order_release);
+    }
+    ImGui::TextDisabled("仅本次游戏进程有效；关闭开关或切换世界后恢复原值。");
+}

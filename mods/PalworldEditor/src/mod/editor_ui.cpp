@@ -87,6 +87,7 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
     }
     if (ImGui::BeginTabBar("##editor_tabs", ImGuiTabBarFlags_None)) {
         if (ImGui::BeginTabItem("物品")) {
+            render_stack_unlimited(self);
             render_give_items(self);
             render_item_browser(self);
             render_inventory(self);

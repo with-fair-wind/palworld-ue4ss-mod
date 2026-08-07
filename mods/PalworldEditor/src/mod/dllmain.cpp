@@ -424,6 +424,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         revive_team_pals();
     }
 
+    // Item stack limit
+    if (stackSettingDirty_.exchange(false)) {
+        apply_stack_limit_change(requestedStackUnlimited_.load(std::memory_order_acquire));
+    }
+
     // Discover
     if (want_discover_.exchange(false)) {
         pal_game::discover_objects();
@@ -621,6 +626,94 @@ auto PalworldEditorMod::revive_team_pals() -> void {
     skillSnapshotDirty_ = true;
 }
 
+namespace {
+/// 解析一个 PalStaticItemData UObject 的物品 ID 与 MaxStackCount 写入点。
+/// @return 第二项为空时表示该对象不是可处理的物品静态数据。
+[[nodiscard]] auto item_stack_target(UObject* obj) -> std::pair<std::string, int32_t*> {
+    UClass* cls = obj->GetClassPrivate();
+    if (cls == nullptr) {
+        return {};
+    }
+    const std::wstring name = cls->GetName();
+    if (name.find(L"PalStaticItemData") != 0) {
+        return {};
+    }
+    if (name.find(L"Table") != std::wstring::npos || name.find(L"Asset") != std::wstring::npos ||
+        name.find(L"Manager") != std::wstring::npos || name.find(L"Struct") != std::wstring::npos ||
+        name.find(L"AndNum") != std::wstring::npos || name.find(L"RowName") != std::wstring::npos) {
+        return {};
+    }
+    auto* idProperty = obj->GetPropertyByNameInChain(STR("ID"));
+    auto* idFname =
+        idProperty == nullptr ? nullptr : idProperty->ContainerPtrToValuePtr<FName>(obj);
+    if (idFname == nullptr || idFname->ToString().empty()) {
+        return {};
+    }
+    auto* maxProp = CastField<FIntProperty>(obj->GetPropertyByNameInChain(STR("MaxStackCount")));
+    if (maxProp == nullptr) {
+        return {};
+    }
+    return {text_encoding::to_utf8(idFname->ToString()),
+            maxProp->ContainerPtrToValuePtr<int32_t>(obj)};
+}
+}  // namespace
+
+auto PalworldEditorMod::apply_stack_limit_change(const bool unlimited) -> void {
+    if (!unlimited) {
+        restore_stack_limits();
+        return;
+    }
+
+    int32_t matched{};
+    int32_t changed{};
+    UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
+        const auto [id, maxValue] = item_stack_target(obj);
+        if (maxValue == nullptr) {
+            return LoopAction::Continue;
+        }
+        // 仅在首次开启时快照原值，避免重复开启把已写入的无上限值当作原值缓存。
+        originalStackLimits_.try_emplace(id, *maxValue);
+        if (*maxValue != kUnlimitedStackCount) {
+            *maxValue = kUnlimitedStackCount;
+            ++changed;
+        }
+        ++matched;
+        return LoopAction::Continue;
+    });
+    Output::send<LogLevel::Warning>(
+        STR("PalworldEditor stack-unlimited ON: matched={}, changed={}, cached={}\n"), matched,
+        changed, static_cast<int32_t>(originalStackLimits_.size()));
+}
+
+auto PalworldEditorMod::restore_stack_limits() -> void {
+    if (originalStackLimits_.empty()) {
+        return;
+    }
+
+    int32_t matched{};
+    int32_t restored{};
+    UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
+        const auto [id, maxValue] = item_stack_target(obj);
+        if (maxValue == nullptr) {
+            return LoopAction::Continue;
+        }
+        const auto found = originalStackLimits_.find(id);
+        if (found == originalStackLimits_.end()) {
+            return LoopAction::Continue;
+        }
+        if (*maxValue != found->second) {
+            *maxValue = found->second;
+            ++restored;
+        }
+        ++matched;
+        return LoopAction::Continue;
+    });
+    Output::send<LogLevel::Warning>(
+        STR("PalworldEditor stack-unlimited restored: matched={}, restored={}\n"), matched,
+        restored);
+    originalStackLimits_.clear();
+}
+
 auto PalworldEditorMod::process_grapple_work(const float deltaSeconds) -> void {
     if (!worldLifecycleCallbacksReady_.load(std::memory_order_acquire)) {
         grappleRuntimePhase_.store(grappling_hook::CooldownRuntimePhase::waitingForWorld,
@@ -735,6 +828,10 @@ auto PalworldEditorMod::begin_world_transition() -> void {
         // 当前世界即将销毁，无法恢复的对象不会跨世界存活；清除旧路径但保留安全停用状态。
         grappleLedger_.complete_restore(true);
     }
+    // 物品静态数据是全局资产，切图可能重新加载；恢复原值并要求用户在新世界重新开启。
+    restore_stack_limits();
+    requestedStackUnlimited_.store(false);
+    stackSettingDirty_.store(false);
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
     grappleReadinessScheduler_.begin_world(nextWorldGeneration);
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
