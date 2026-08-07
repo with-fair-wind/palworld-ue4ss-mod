@@ -603,6 +603,12 @@ auto PalworldEditorMod::revive_team_pals() -> void {
         if (fullRecoveryFunction != nullptr) {
             parameter->ProcessEvent(fullRecoveryFunction, nullptr);
         }
+
+        // 触发存档参数复制，让游戏 Actor/客户端同步复活状态
+        auto* const onRepFunction = parameter->GetFunctionByNameInChain(STR("OnRep_SaveParameter"));
+        if (onRepFunction != nullptr && onRepFunction->GetParmsSize() == 0) {
+            parameter->ProcessEvent(onRepFunction, nullptr);
+        }
         ++revivedCount;
     }
 
