@@ -498,6 +498,15 @@ void PalworldEditorMod::render_pal_editor(PalworldEditorMod* self) {
         self->wantRefreshSkillCatalog_.store(true);
     }
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(pending || !lifecycleReady);
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("复活队伍帕鲁")) {
+            self->wantReviveTeam_.store(true, std::memory_order_release);
+        }
+    }
+    ImGui::EndDisabled();
 
     if (snapshot.targetSelected) {
         ImGui::TextColored(ImVec4(0.4F, 1.0F, 0.4F, 1.0F), "当前已选择帕鲁：%s",
