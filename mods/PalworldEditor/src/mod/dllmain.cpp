@@ -534,7 +534,8 @@ auto PalworldEditorMod::set_grapple_runtime_status(std::string status) -> void {
 }
 
 auto PalworldEditorMod::revive_team_pals() -> void {
-    auto* const holder = UObjectGlobals::FindFirstOf(STR("PalOtomoHolderComponentBase"));
+    // 必须解析本地玩家自己的 Holder：FindFirstOf 会命中 CDO/非玩家实例（槽位全空）。
+    auto* const holder = pal_game::resolve_local_otomo_holder().holder;
     if (!pal_game::is_valid(holder)) {
         skillRuntimeSnapshot_.lastResult = "复活失败：未找到队伍 Holder。";
         skillSnapshotDirty_ = true;
