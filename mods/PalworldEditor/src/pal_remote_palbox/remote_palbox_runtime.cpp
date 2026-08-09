@@ -303,6 +303,19 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return read_location(pawn, output);
 }
 
+/** @brief 本地玩家是否处于战斗模式（APalCharacter::bIsBattleMode 属性，游戏权威）。
+ *  @details Palworld 1.0 上 IsInCombat/IsInBattle 等 UFunction 名不存在；战斗模式由
+ *           APalCharacter 属性维护（受攻击/攻击后置真，脱离战斗复原），玩家 Pawn 直接继承。 */
+[[nodiscard]] auto player_in_battle_mode(UObject* controller) -> bool {
+    auto* const pawn = get_player_pawn(controller);
+    if (pawn == nullptr) {
+        return false;
+    }
+    auto* const property = pawn->GetPropertyByNameInChain(STR("bIsBattleMode"));
+    auto* const boolProperty = CastField<FBoolProperty>(property);
+    return boolProperty != nullptr && boolProperty->GetPropertyValueInContainer(pawn);
+}
+
 /** @brief 读取基地模型中心（UPalBaseCampModel 的 Transform.Translation）。
  *  @details 镜像 AnywherePalbox：基地模型自带 Transform，物理 Palbox actor 未流加载时
  *           也可用，无需走 FindConcreteModel（concrete model 是 UObject 非 Actor，
@@ -699,15 +712,9 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         note("骑乘中已禁用", true);
         return finish(RemotePalboxTriggerResult::blocked);
     }
-    if (config.disableDuringCombat) {
-        // 战斗检测函数在 dump 中未确认：依次探测候选名，全部不可用视为 false（fail-open）。
-        const bool inCombat = call_bool(playerState, STR("IsInCombat")).value_or(false) ||
-                              call_bool(playerState, STR("IsInBattle")).value_or(false) ||
-                              call_bool(controller, STR("IsInCombat")).value_or(false);
-        if (inCombat) {
-            note("战斗中已禁用", true);
-            return finish(RemotePalboxTriggerResult::blocked);
-        }
+    if (config.disableDuringCombat && player_in_battle_mode(controller)) {
+        note("战斗中已禁用", true);
+        return finish(RemotePalboxTriggerResult::blocked);
     }
     // 已有界面打开时拒绝：避免在已有菜单上叠出第二个帕鲁箱。
     if (palbox_menu_is_open(controller)) {
