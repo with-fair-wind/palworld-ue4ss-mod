@@ -19,6 +19,7 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace grappling_hook {
+using pal_game::find_object_by_full_name;
 namespace {
 /** @brief 无冷却使用的小正数，避免部分游戏路径把零解释为尚未初始化。 */
 inline constexpr float kNoCooldownSeconds = 0.1F;
@@ -53,17 +54,6 @@ struct CooldownWritePlan {
                                ? nullptr
                                : staticIdProperty->ContainerPtrToValuePtr<FName>(itemId);
     return staticId == nullptr ? std::string{} : text_encoding::to_utf8(staticId->ToString());
-}
-
-/** @brief 从完整对象名恢复 UObject；类名前缀存在时只传递后半对象路径。 */
-[[nodiscard]] auto find_object_by_full_name(const std::wstring& fullName) -> UObject* {
-    if (fullName.empty()) {
-        return nullptr;
-    }
-    const auto separator = fullName.find(L' ');
-    const auto objectPath =
-        separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
-    return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr, objectPath.c_str());
 }
 
 /** @brief 判断两个冷却浮点值是否可视为相等。 */

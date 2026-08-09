@@ -20,7 +20,9 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
 #include <UE4SSProgram.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/text_encoding.hpp>
@@ -110,6 +112,13 @@ auto PalworldEditorMod::on_unreal_init() -> void {
         skillSnapshotDirty_ = true;
         publish_skill_snapshot_if_dirty();
     }
+
+    // 远程终端配置：mods/<ModName>/remote_palbox.ini（缺失时回退默认值）。
+    const auto modsDirectory = UE4SSProgram::get_program().get_mods_directory();
+    const auto iniPath = (std::filesystem::path(modsDirectory) / std::filesystem::path(ModName) /
+                          L"remote_palbox.ini")
+                             .wstring();
+    remotePalboxRuntime_.load_config(text_encoding::to_utf8(iniPath));
 }
 
 auto PalworldEditorMod::on_update() -> void {}
@@ -136,6 +145,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     process_grapple_work(deltaSeconds);
     baseResourceBridge_.ensure_hooks_registered();
     baseResourceBridge_.tick(deltaSeconds);
+    remotePalboxRuntime_.tick(deltaSeconds, worldSession_);
 
     if (wantProbeObject_.exchange(false)) {
         if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
@@ -180,8 +190,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         want_read_.store(true);
     }
 
+    // 主菜单（无背包容器）时跳过物品扫描和背包读取，避免 fallback 日志噪音和无谓 ForEachUObject。
+    const auto worldContextReady = pal_game::is_valid(pal_game::get_main_container());
+
     // Read inventory
-    if (want_read_.exchange(false)) {
+    if (worldContextReady && want_read_.exchange(false)) {
         auto fresh = pal_game::read_inventory();
         const std::lock_guard lock(inv_mutex_);
         if (selected_ >= static_cast<int>(fresh.size())) {
@@ -193,10 +206,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     // Scan items. StaticItemDataMap may become ready after LoadMap, so fallback scans retry
     // with a bounded pure-value scheduler instead of probing UObject state every frame.
     const auto worldGeneration = worldSession_.generation();
-    if (want_scan_items_.exchange(false)) {
+    if (worldContextReady && want_scan_items_.exchange(false)) {
         itemCatalogScanScheduler_.request(worldGeneration);
     }
-    if (itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
+    if (worldContextReady &&
+        itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
         auto result = pal_game::scan_all_items();
         static_cast<void>(
             itemCatalogScanScheduler_.complete(worldGeneration, result.usedStaticItemDataMap));
@@ -373,7 +387,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     const bool refreshRequested = skillCatalogRefreshScheduler_.should_refresh(
         manualRefreshRequested, catalogReady,
         skill_editor::SkillCatalogRefreshScheduler::clock::now(),
-        [] { return pal_game::is_valid(pal_game::get_main_container()); });
+        [worldContextReady] { return worldContextReady; });
     if (refreshRequested) {
         refresh_skill_catalog_on_game_thread();
     }
@@ -412,6 +426,11 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         skillSnapshotDirty_ = true;
     }
     publish_skill_snapshot_if_dirty();
+
+    // Revive team pals
+    if (wantReviveTeam_.exchange(false)) {
+        revive_team_pals();
+    }
 
     // Discover
     if (want_discover_.exchange(false)) {
@@ -520,6 +539,95 @@ auto PalworldEditorMod::finish_passive_classification_on_game_thread() -> void {
 auto PalworldEditorMod::set_grapple_runtime_status(std::string status) -> void {
     const std::lock_guard lock(grappleStatusMutex_);
     grappleRuntimeStatus_ = std::move(status);
+}
+
+auto PalworldEditorMod::revive_team_pals() -> void {
+    // 必须解析本地玩家自己的 Holder：FindFirstOf 会命中 CDO/非玩家实例（槽位全空）。
+    auto* const holder = pal_game::resolve_local_otomo_holder().holder;
+    if (!pal_game::is_valid(holder)) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：未找到队伍 Holder。";
+        skillSnapshotDirty_ = true;
+        return;
+    }
+
+    const auto maxNum = pal_game::invoke<int>(holder, STR("GetMaxOtomoNum")).value_or(0);
+    if (maxNum <= 0 || maxNum > 20) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位数异常。";
+        skillSnapshotDirty_ = true;
+        return;
+    }
+
+    int revivedCount = 0;
+    for (int slotIndex = 0; slotIndex < maxNum; ++slotIndex) {
+        // GetOtomoIndividualHandle(slotIndex) → Handle（用直接 struct，和 pal_game.hpp 一致）
+        auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+            nullptr, nullptr,
+            STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
+        if (getHandleFunction == nullptr) {
+            continue;
+        }
+        struct GetHandleParams {
+            int32_t SlotIndex{};
+            UObject* ReturnValue{};
+        } handleParams{.SlotIndex = slotIndex};
+        holder->ProcessEvent(getHandleFunction, &handleParams);
+        auto* const handle = handleParams.ReturnValue;
+        if (!pal_game::is_valid(handle)) {
+            continue;
+        }
+
+        // Handle → TryGetIndividualParameter → Parameter
+        auto* const parameter =
+            pal_game::invoke<RC::Unreal::UObject*>(handle, STR("TryGetIndividualParameter"))
+                .value_or(nullptr);
+        if (!pal_game::is_valid(parameter)) {
+            continue;
+        }
+
+        // 检查 PhysicalHealth：Healthful=0, MinorInjury=1, Severe=2, Dying=3, DeadBody=4
+        // CloudCemetery=5。非 Healthful 都需要复活。
+        const auto physicalHealth =
+            pal_game::invoke<int>(parameter, STR("GetPhysicalHealth")).value_or(0);
+        if (physicalHealth <= 0) {
+            continue;  // 已经 Healthful，跳过
+        }
+        auto* const setHealthFunction =
+            parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
+        if (setHealthFunction == nullptr) {
+            continue;
+        }
+        pal_game::FunctionParams healthParams{setHealthFunction};
+        auto* const healthProp =
+            setHealthFunction->FindProperty(FName(STR("PhysicalHealth"), FNAME_Find));
+        if (auto* const enumProp = CastField<FEnumProperty>(healthProp)) {
+            enumProp->GetUnderlyingProperty()->SetIntPropertyValue(
+                enumProp->ContainerPtrToValuePtr<void>(healthParams.data()),
+                static_cast<int64_t>(0));
+        }
+        parameter->ProcessEvent(setHealthFunction, healthParams.data());
+
+        // 恢复 HP（SetPhysicalHealth 只改状态枚举，HP 仍为 0，需要 FullRecoveryHP 补满）
+        auto* const fullRecoveryFunction =
+            parameter->GetFunctionByNameInChain(STR("FullRecoveryHP"));
+        if (fullRecoveryFunction != nullptr) {
+            parameter->ProcessEvent(fullRecoveryFunction, nullptr);
+        }
+
+        // 触发存档参数复制，让游戏 Actor/客户端同步复活状态
+        auto* const onRepFunction = parameter->GetFunctionByNameInChain(STR("OnRep_SaveParameter"));
+        if (onRepFunction != nullptr && onRepFunction->GetParmsSize() == 0) {
+            parameter->ProcessEvent(onRepFunction, nullptr);
+        }
+        ++revivedCount;
+    }
+
+    if (revivedCount > 0) {
+        skillRuntimeSnapshot_.lastResult =
+            "复活了 " + std::to_string(revivedCount) + " 只队伍帕鲁。";
+    } else {
+        skillRuntimeSnapshot_.lastResult = "队伍中没有需要复活的帕鲁。";
+    }
+    skillSnapshotDirty_ = true;
 }
 
 auto PalworldEditorMod::process_grapple_work(const float deltaSeconds) -> void {
@@ -641,6 +749,7 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
                                std::memory_order_release);
     baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
+    remotePalboxRuntime_.begin_world_transition();
     worldSession_.begin_transition();
     statWritesDisabledForWorld_ = false;
     workSuitabilityWritesDisabledForWorld_ = false;
@@ -717,6 +826,7 @@ auto PalworldEditorMod::finish_world_transition() -> void {
         worldSession_.begin_transition();
     }
     worldSession_.finish_transition();
+    remotePalboxRuntime_.finish_world_transition();
     baseResourceBridge_.on_world_ready(worldSession_.generation());
     itemCatalogScanScheduler_.begin_world(worldSession_.generation());
     want_read_.store(true);

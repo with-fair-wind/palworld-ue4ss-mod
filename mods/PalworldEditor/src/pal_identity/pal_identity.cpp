@@ -3,11 +3,9 @@
  * @brief 实现 Alpha、Lucky 与觉醒的游戏线程反射事务。
  * @details 不缓存 UObject 或属性地址；只有显式选择/应用请求会进入本文件。
  */
-#include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/NameTypes.hpp>
@@ -21,33 +19,9 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace pal_identity {
+using pal_game::FunctionParams;
 namespace {
 inline constexpr std::string_view kBossPrefix{"BOSS_"};
-
-class FunctionParams final {
-public:
-    explicit FunctionParams(UFunction* function)
-        : function_{function}, storage_(static_cast<std::size_t>(function->GetParmsSize())) {
-        function_->InitializeStruct(storage_.data());
-    }
-
-    FunctionParams(const FunctionParams&) = delete;
-    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
-    FunctionParams(FunctionParams&&) = delete;
-    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
-
-    ~FunctionParams() {
-        function_->DestroyStruct(storage_.data());
-    }
-
-    [[nodiscard]] auto data() noexcept -> void* {
-        return storage_.data();
-    }
-
-private:
-    UFunction* function_{};
-    std::vector<std::byte> storage_;
-};
 
 struct SaveFields {
     void* saveParameter{};
@@ -93,36 +67,6 @@ struct SaveFields {
         .rare = rare,
         .awakening = awakening,
     };
-}
-
-[[nodiscard]] auto invoke_bool_return(UObject* object, const TCHAR* functionName)
-    -> std::optional<bool> {
-    auto* const function =
-        pal_game::is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;
-    auto* const result = function == nullptr ? nullptr
-                                             : CastField<FBoolProperty>(function->FindProperty(
-                                                   FName(STR("ReturnValue"), FNAME_Find)));
-    if (function == nullptr || result == nullptr) {
-        return std::nullopt;
-    }
-    FunctionParams params{function};
-    object->ProcessEvent(function, params.data());
-    return result->GetPropertyValueInContainer(params.data());
-}
-
-[[nodiscard]] auto invoke_name_return(UObject* object, const TCHAR* functionName)
-    -> std::optional<FName> {
-    auto* const function =
-        pal_game::is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;
-    auto* const result = function == nullptr ? nullptr
-                                             : CastField<FNameProperty>(function->FindProperty(
-                                                   FName(STR("ReturnValue"), FNAME_Find)));
-    if (function == nullptr || result == nullptr) {
-        return std::nullopt;
-    }
-    FunctionParams params{function};
-    object->ProcessEvent(function, params.data());
-    return result->GetPropertyValueInContainer(params.data());
 }
 
 [[nodiscard]] auto database_for(UObject* worldContext) -> UObject* {
@@ -274,9 +218,9 @@ auto PalIdentityGateway::read_identity(const PalIdentityTarget target, const boo
         fields->characterId->GetPropertyValueInContainer(fields->saveParameter);
     const bool rawRare = fields->rare->GetPropertyValueInContainer(fields->saveParameter);
     const bool rawAwakening = fields->awakening->GetPropertyValueInContainer(fields->saveParameter);
-    const auto getterCharacterId = invoke_name_return(pal, STR("GetCharacterID"));
-    const auto getterRare = invoke_bool_return(pal, STR("IsRarePal"));
-    const auto getterAwakening = invoke_bool_return(pal, STR("IsAwakening"));
+    const auto getterCharacterId = pal_game::invoke<FName>(pal, STR("GetCharacterID"));
+    const auto getterRare = pal_game::invoke<bool>(pal, STR("IsRarePal"));
+    const auto getterAwakening = pal_game::invoke<bool>(pal, STR("IsAwakening"));
     const auto currentBoss = database_bool(database, STR("GetIsBoss"), rawCharacterId);
     if (!getterCharacterId.has_value() || !getterRare.has_value() || !getterAwakening.has_value() ||
         !currentBoss.has_value() || *getterCharacterId != rawCharacterId ||

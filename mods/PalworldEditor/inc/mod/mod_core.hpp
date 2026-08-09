@@ -28,6 +28,7 @@
 #include <items/item_catalog.hpp>
 #include <pal_identity/pal_identity.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
+#include <pal_remote_palbox/remote_palbox_runtime.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <pal_stats/pal_stats.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
@@ -85,6 +86,9 @@ private:
      * @details 默认关闭、已应用和世界不可访问时立即返回，不扫描 UObject。
      */
     auto process_grapple_work(float deltaSeconds) -> void;
+
+    /** @brief 遍历队伍槽位，复活所有处于死亡/濒死状态的帕鲁。 */
+    auto revive_team_pals() -> void;
 
     /**
      * @brief 在关闭开关或切图前恢复全部活动爪钩覆盖。
@@ -223,6 +227,7 @@ private:
 
     /** @brief 渲染同公会跨据点制作/建造材料共享开关与运行状态。 */
     static void render_base_resource_sharing(PalworldEditorMod* self);
+    static void render_remote_palbox(PalworldEditorMod* self);
 
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
@@ -296,6 +301,8 @@ private:
     std::atomic<bool> want_read_{false};
     /** @brief 请求游戏线程在下一次更新中输出 UObject 诊断信息。 */
     std::atomic<bool> want_discover_{false};
+    /** @brief GUI 线程提交、game_thread_tick 消费的一次性复活请求。 */
+    std::atomic<bool> wantReviveTeam_{false};
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
     std::atomic<bool> want_scan_items_{false};
     /** @brief 主数据未就绪时按世界进行有界低频补全，不访问 Unreal。 */
@@ -303,6 +310,8 @@ private:
     /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
     std::atomic<bool> wantProbeObject_{false};
 
+    /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
+    pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;
     /** @brief 游戏线程拥有的跨据点资源反射桥；GUI 只读取其值快照。 */
     base_resource_sharing::PalBaseResourceBridge baseResourceBridge_;
     /** @brief GUI/启动阶段提交给游戏线程的资源共享偏好。 */
@@ -407,6 +416,8 @@ private:
     skill_editor::PassiveSkillPickerState passivePickerState_;
     /** @brief 主动技能下拉框当前选择的目录值；只由 GUI 线程访问。 */
     std::optional<skill_editor::SkillOption> activeChoice_;
+    /** @brief 主动技能目录的 Category 过滤；空值表示“全部”。 */
+    std::optional<skill_editor::ActiveSkillCategory> activeCategoryFilter_;
     /** @brief 词条预设下拉框当前选择的静态目录索引；只由 GUI 线程访问。 */
     std::optional<std::size_t> passivePresetIndex_;
     /** @brief GUI 上一次渲染的目标代数；变化时重置临时编辑状态。 */

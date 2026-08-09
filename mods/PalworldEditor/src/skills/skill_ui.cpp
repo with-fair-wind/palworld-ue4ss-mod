@@ -383,8 +383,38 @@ void PalworldEditorMod::render_active_skills(PalworldEditorMod* self,
     const bool replacing = slot < snapshot.state.activeSkills.size();
     ImGui::Text("为槽位 %d 选择主动技能：", self->activeEditSlot_ + 1);
     ImGui::BeginDisabled(mutationsDisabled || !snapshot.catalog.active.ready);
-    render_skill_picker("##active-picker", snapshot.catalog.active.skills, excluded,
-                        self->activeSearch_, sizeof(self->activeSearch_), self->activeChoice_);
+    if (ImGui::BeginCombo("类别##active-category",
+                          self->activeCategoryFilter_.has_value() ? "已选" : "全部")) {
+        if (ImGui::Selectable("全部", !self->activeCategoryFilter_.has_value())) {
+            self->activeCategoryFilter_.reset();
+        }
+        for (const auto cat :
+             {skill_editor::ActiveSkillCategory::Melee, skill_editor::ActiveSkillCategory::Shot,
+              skill_editor::ActiveSkillCategory::Support}) {
+            const bool isCurrent = self->activeCategoryFilter_ == cat;
+            if (ImGui::Selectable(cat == skill_editor::ActiveSkillCategory::Melee  ? "近战"
+                                  : cat == skill_editor::ActiveSkillCategory::Shot ? "射击"
+                                                                                   : "辅助",
+                                  isCurrent)) {
+                self->activeCategoryFilter_ = cat;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    std::vector<skill_editor::SkillOption> filteredActiveSkills;
+    if (self->activeCategoryFilter_.has_value()) {
+        filteredActiveSkills.reserve(snapshot.catalog.active.skills.size());
+        for (const auto& option : snapshot.catalog.active.skills) {
+            if (option.activeCategory == self->activeCategoryFilter_) {
+                filteredActiveSkills.push_back(option);
+            }
+        }
+    }
+    const auto& activeSkills = self->activeCategoryFilter_.has_value()
+                                   ? filteredActiveSkills
+                                   : snapshot.catalog.active.skills;
+    render_skill_picker("##active-picker", activeSkills, excluded, self->activeSearch_,
+                        sizeof(self->activeSearch_), self->activeChoice_);
     const bool canConfirm =
         self->activeChoice_.has_value() && self->activeChoice_->activeValue.has_value();
     ImGui::BeginDisabled(!canConfirm);
@@ -466,6 +496,15 @@ void PalworldEditorMod::render_pal_editor(PalworldEditorMod* self) {
     ImGui::BeginDisabled(pending || !snapshot.worldAccessible);
     if (ImGui::Button("刷新技能列表")) {
         self->wantRefreshSkillCatalog_.store(true);
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(pending || !lifecycleReady);
+    {
+        editor_ui::scoped_accent_button accent;
+        if (ImGui::Button("复活队伍帕鲁")) {
+            self->wantReviveTeam_.store(true, std::memory_order_release);
+        }
     }
     ImGui::EndDisabled();
 

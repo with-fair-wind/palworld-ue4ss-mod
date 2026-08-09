@@ -73,13 +73,21 @@ struct PassiveSkillMetadata {
     return PassiveSkillCategory::normal;
 }
 
+/** @brief 主动技能的战斗类型，值与 Palworld EPalWazaCategory 对齐。 */
+enum class ActiveSkillCategory : std::uint8_t {
+    Melee = 0,    ///< 近战
+    Shot = 1,     ///< 射击
+    Support = 2,  ///< 辅助
+};
+
 /**
  * @brief 表示一个可供技能编辑界面展示的技能。
  */
 struct SkillOption {
     std::string id;            /**< 技能的 Raw ID。 */
     std::string localizedName; /**< 当前游戏语言的展示名称；为空时界面回退到 `id`。 */
-    std::optional<std::uint16_t> activeValue; /**< 仅主动技能具有的 `EPalWazaID` 数值。 */
+    std::optional<std::uint16_t> activeValue;          /**< 仅主动技能具有的 `EPalWazaID` 数值。 */
+    std::optional<ActiveSkillCategory> activeCategory; /**< 仅主动技能具有的战斗类型。 */
     std::optional<PassiveSkillMetadata> passiveMetadata; /**< 仅被动技能具有的分类元数据。 */
 };
 
@@ -295,8 +303,8 @@ inline void apply_passive_metadata(
  * @brief Returns whether a stable active-skill Raw ID is clearly game-internal.
  */
 [[nodiscard]] inline auto is_internal_active_skill_id(const std::string_view id) noexcept -> bool {
-    return id.starts_with("Human_") || id.contains("_GYM_") || id.contains("Raid") ||
-           id.contains("Boss");
+    return id.starts_with("Human_") || id.starts_with("Unique_") || id.contains("_GYM_") ||
+           id.contains("Raid") || id.contains("Boss");
 }
 
 /**
@@ -317,9 +325,18 @@ template <typename Localizer>
             continue;
         }
 
+        std::string localizedName = localize(definition);
+        if (localizedName.empty()) {
+            continue;
+        }
+        // 过滤没有中文翻译的技能（纯 ASCII 名 = 可能废弃/内部，效果不正常）
+        if (std::ranges::all_of(localizedName,
+                                [](char c) { return static_cast<unsigned char>(c) < 128; })) {
+            continue;
+        }
         options.push_back({
             .id = std::string(definition.id),
-            .localizedName = localize(definition),
+            .localizedName = std::move(localizedName),
             .activeValue = definition.value,
         });
     }

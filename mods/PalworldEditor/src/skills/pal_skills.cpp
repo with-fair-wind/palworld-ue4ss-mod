@@ -15,8 +15,10 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
+#include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/text_encoding.hpp>
@@ -116,6 +118,40 @@ template <typename T>
     } params{.WorldContextObject = worldContext, .WazaId = id};
     utility->ProcessEvent(function, &params);
     return text_encoding::to_utf8(params.OutName.ToString());
+}
+
+[[nodiscard]] auto read_active_category(UObject* wazaDatabase, UFunction* findWazaFunction,
+                                        const std::uint16_t wazaValue)
+    -> std::optional<skill_editor::ActiveSkillCategory> {
+    if (wazaDatabase == nullptr || findWazaFunction == nullptr) {
+        return std::nullopt;
+    }
+    pal_game::FunctionParams params{findWazaFunction};
+    auto* const typeProp = findWazaFunction->FindProperty(FName(STR("Type"), FNAME_Find));
+    if (auto* const typeEnum = CastField<FEnumProperty>(typeProp)) {
+        typeEnum->GetUnderlyingProperty()->SetIntPropertyValue(
+            typeEnum->ContainerPtrToValuePtr<void>(params.data()), static_cast<int64_t>(wazaValue));
+    } else {
+        return std::nullopt;
+    }
+    wazaDatabase->ProcessEvent(findWazaFunction, params.data());
+    auto* const outDataProp = CastField<FStructProperty>(
+        findWazaFunction->FindProperty(FName(STR("OutData"), FNAME_Find)));
+    if (outDataProp == nullptr) {
+        return std::nullopt;
+    }
+    void* const outDataPtr = outDataProp->ContainerPtrToValuePtr<void>(params.data());
+    auto* const categoryProp = CastField<FEnumProperty>(
+        outDataProp->GetStruct()->FindProperty(FName(STR("Category"), FNAME_Find)));
+    if (categoryProp == nullptr) {
+        return std::nullopt;
+    }
+    const auto catValue = categoryProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(
+        categoryProp->ContainerPtrToValuePtr<void>(outDataPtr));
+    if (catValue >= 0 && catValue <= 2) {
+        return static_cast<skill_editor::ActiveSkillCategory>(catValue);
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -408,6 +444,32 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
             return active_localized_name(utility, activeNameFunction, worldContext,
                                          static_cast<EPalWazaID>(definition.value));
         });
+
+    // 读取每个主动技能的 Category（Melee/Shot/Support）。
+    auto* const getWazaDbFunction =
+        find_function<UFunction>(STR("/Script/Pal.PalUtility:GetWazaDatabase"));
+    UObject* wazaDatabase{};
+    if (utility != nullptr && getWazaDbFunction != nullptr) {
+        struct WazaDbParams {
+            UObject* WorldContextObject{};
+            UObject* ReturnValue{};
+        } dbParams{};
+        dbParams.WorldContextObject = worldContext;
+        utility->ProcessEvent(getWazaDbFunction, &dbParams);
+        wazaDatabase = dbParams.ReturnValue;
+    }
+    auto* const findWazaFunction =
+        pal_game::is_valid(wazaDatabase)
+            ? wazaDatabase->GetFunctionByNameInChain(STR("FindWazaForBP"))
+            : nullptr;
+    if (findWazaFunction != nullptr) {
+        for (auto& skill : catalog.active.skills) {
+            if (skill.activeValue.has_value()) {
+                skill.activeCategory =
+                    read_active_category(wazaDatabase, findWazaFunction, *skill.activeValue);
+            }
+        }
+    }
 
     const auto byLabel = [](const skill_editor::SkillOption& left,
                             const skill_editor::SkillOption& right) {

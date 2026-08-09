@@ -23,27 +23,12 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace pal_stats {
+using pal_game::FunctionParams;
 namespace {
 /** @brief 把目标句柄还原为非拥有帕鲁 UObject，失效时返回 `nullptr`。 */
 [[nodiscard]] auto to_pal(const PalStatTarget target) -> UObject* {
     auto* pal = reinterpret_cast<UObject*>(target);
     return pal_game::is_valid(pal) ? pal : nullptr;
-}
-
-/** @brief 调用无参、返回 `int32` 的 UFunction；目标或函数不可用时返回空。 */
-[[nodiscard]] auto invoke_int_return(UObject* object, const TCHAR* name) -> std::optional<int> {
-    if (!pal_game::is_valid(object)) {
-        return std::nullopt;
-    }
-    auto* const function = object->GetFunctionByNameInChain(name);
-    if (function == nullptr) {
-        return std::nullopt;
-    }
-    struct Params {
-        int32_t ReturnValue{};
-    } params;
-    object->ProcessEvent(function, &params);
-    return params.ReturnValue;
 }
 
 /** @brief 取得帕鲁 `SaveParameter` 结构体内存指针与其 `FStructProperty`；不可达时返回 `nullptr`。
@@ -114,32 +99,6 @@ namespace {
 auto write_byte(FByteProperty* property, void* saveParam, const int value) -> void {
     property->SetPropertyValueInContainer(saveParam, static_cast<std::uint8_t>(value));
 }
-
-/** @brief 一次动态 UFunction 参数缓冲区，负责初始化和析构非平凡属性。 */
-class FunctionParams final {
-public:
-    explicit FunctionParams(UFunction* function)
-        : function_{function}, storage_(static_cast<std::size_t>(function->GetParmsSize())) {
-        function_->InitializeStruct(storage_.data());
-    }
-
-    FunctionParams(const FunctionParams&) = delete;
-    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
-    FunctionParams(FunctionParams&&) = delete;
-    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
-
-    ~FunctionParams() {
-        function_->DestroyStruct(storage_.data());
-    }
-
-    [[nodiscard]] auto data() noexcept -> void* {
-        return storage_.data();
-    }
-
-private:
-    UFunction* function_{};
-    std::vector<std::byte> storage_;
-};
 
 struct RuntimeLimits {
     int condensationMaxStars{};
@@ -390,90 +349,6 @@ private:
 }
 
 /**
- * @brief 从数据库查询指定 CharacterID、Rank 和适应性类型的基础工作等级。
- * @details 先尝试带显式 Rank 参数的数据库函数，回退到不带 Rank 的查询。
- *          这样可以绕过 Parameter 端可能存在的缓存问题。
- */
-[[nodiscard]] auto work_suitability_from_database(const FName characterId, const int internalRank,
-                                                  const WorkSuitability suitability)
-    -> std::optional<int> {
-    auto* const db = database();
-    if (!pal_game::is_valid(db)) {
-        return std::nullopt;
-    }
-
-    // Read the database row directly using FindRowUnchecked.
-    auto* const getRowStruct = db->GetFunctionByNameInChain(STR("GetRowStruct"));
-    if (getRowStruct == nullptr) {
-        return std::nullopt;
-    }
-    // Call GetRowStruct() through ProcessEvent
-    struct RowStructParams {
-        void* ReturnValue{};
-    } rsParams;
-    db->ProcessEvent(getRowStruct, &rsParams);
-    auto* const rowStruct = static_cast<UScriptStruct*>(rsParams.ReturnValue);
-    if (rowStruct == nullptr) {
-        return std::nullopt;
-    }
-
-    auto* const findRowFunc = db->GetFunctionByNameInChain(STR("FindRowUnchecked"));
-    auto* const rowNameInput =
-        findRowFunc == nullptr ? nullptr
-                               : CastField<FNameProperty>(
-                                     findRowFunc->FindProperty(FName(STR("RowName"), FNAME_Find)));
-    auto* const rowOutput = findRowFunc == nullptr
-                                ? nullptr
-                                : CastField<FStructProperty>(findRowFunc->FindProperty(
-                                      FName(STR("ReturnValue"), FNAME_Find)));
-    if (findRowFunc == nullptr || rowNameInput == nullptr || rowOutput == nullptr) {
-        // Fallback: get row map and search manually
-        // (FindRowUnchecked signature doesn't match)
-        return std::nullopt;
-    }
-
-    FunctionParams fp{findRowFunc};
-    rowNameInput->SetPropertyValueInContainer(fp.data(), characterId);
-    db->ProcessEvent(findRowFunc, fp.data());
-    auto* const rowData = static_cast<uint8*>(rowOutput->ContainerPtrToValuePtr<void>(fp.data()));
-
-    if (rowData == nullptr) {
-        return std::nullopt;
-    }
-
-    // Try to read a work suitability field from the row.
-    // Common Palworld field name patterns per suitability type.
-    static constexpr const TCHAR* kFieldNames[] = {
-        STR("EmitFlame"),     STR("Watering"),        STR("Seeding"),  STR("GenerateElectricity"),
-        STR("Handcraft"),     STR("Collection"),      STR("Deforest"), STR("Mining"),
-        STR("OilExtraction"), STR("ProductMedicine"), STR("Cool"),     STR("Transport"),
-        STR("MonsterFarm"),
-    };
-    const auto suitIndex = static_cast<std::size_t>(suitability) - 1;
-    if (suitIndex >= 13)
-        return std::nullopt;
-
-    auto* const field =
-        CastField<FIntProperty>(rowStruct->FindProperty(FName(kFieldNames[suitIndex], FNAME_Find)));
-    if (field != nullptr) {
-        const int value = field->GetPropertyValueInContainer(rowData);
-        if (value >= 0 && value <= 100) {
-            // This is the RANK-1 base value. Apply rank multiplier.
-            // Palworld work suitability at rank N ≈ base * (1 + (N-1) * multiplier).
-            // The multiplier varies; for most species it's ~5% per rank.
-            // But since the game uses per-species tables, this is an approximation.
-            if (internalRank <= 1)
-                return value;
-            // Return at least the base; without per-rank data we cannot compute
-            // the exact yellow-bar value.
-            return value;
-        }
-    }
-
-    return std::nullopt;
-}
-
-/**
  * @brief 调用 `UpdateApplyDatabaseToIndividualParameter` 刷新数据库派生属性。
  * @details 浓缩升星后 SaveParameter.Rank 已更新，但工作适应性等由数据库 Rank 推导的字段
  *          可能仍缓存旧值。此函数触发数据库重新评估当前 Rank 对应的全部派生数据。
@@ -542,9 +417,9 @@ auto PalStatGateway::read_stats(const PalStatTarget target) -> PalStatSnapshot {
     if (pal == nullptr) {
         return snapshot;
     }
-    const auto level = invoke_int_return(pal, STR("GetLevel"));
-    const auto friendshipRank = invoke_int_return(pal, STR("GetFriendshipRank"));
-    const auto friendshipPoint = invoke_int_return(pal, STR("GetFriendshipPoint"));
+    const auto level = pal_game::invoke<int>(pal, STR("GetLevel"));
+    const auto friendshipRank = pal_game::invoke<int>(pal, STR("GetFriendshipRank"));
+    const auto friendshipPoint = pal_game::invoke<int>(pal, STR("GetFriendshipPoint"));
     const auto limits = runtime_limits(pal);
     if (!level.has_value() || !friendshipRank.has_value() || !friendshipPoint.has_value() ||
         !limits.has_value()) {

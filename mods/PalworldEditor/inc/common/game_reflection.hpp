@@ -7,6 +7,13 @@
  */
 #pragma once
 
+#include <cstddef>
+#include <optional>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+#include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/UObject.hpp>
 
 namespace pal_game {
@@ -25,46 +32,78 @@ inline auto is_valid(RC::Unreal::UObject* obj) -> bool {
 }
 
 /**
- * @brief 从对象实际类链调用一个无参数、返回 UObject 派生指针的函数。
+ * @brief 从对象实际类链调用一个无参数、返回指定类型的函数。
+ * @tparam T 返回值 C++ 类型（int/bool/FName/UObject* 等），须与 UFunction 的 ReturnValue
+ *           字段布局匹配。
  * @param[in] object 非拥有调用目标。
  * @param[in] functionName 要从实际类开始查找的函数名。
- * @return 有效返回对象；目标、函数或返回值不可用时返回 nullptr。
+ * @return 函数返回值；目标或函数不可用时返回 std::nullopt。指针返回值额外经 is_valid 校验。
  */
-[[nodiscard]] inline auto invoke_object_return(RC::Unreal::UObject* object,
-                                               const TCHAR* functionName) -> RC::Unreal::UObject* {
+template <typename T>
+[[nodiscard]] inline auto invoke(RC::Unreal::UObject* object, const TCHAR* functionName)
+    -> std::optional<T> {
     if (!is_valid(object)) {
-        return nullptr;
+        return std::nullopt;
     }
     auto* const function = object->GetFunctionByNameInChain(functionName);
     if (function == nullptr) {
-        return nullptr;
+        return std::nullopt;
     }
     struct Params {
-        RC::Unreal::UObject* ReturnValue{};
+        T ReturnValue{};
     } params;
     object->ProcessEvent(function, &params);
-    return is_valid(params.ReturnValue) ? params.ReturnValue : nullptr;
+    if constexpr (std::is_pointer_v<T>) {
+        return is_valid(params.ReturnValue) ? std::optional<T>{params.ReturnValue} : std::nullopt;
+    } else {
+        return params.ReturnValue;
+    }
 }
 
 /**
- * @brief 从对象实际类链调用一个无参数、返回 bool 的函数。
- * @param[in] object 非拥有调用目标。
- * @param[in] functionName 要从实际类开始查找的函数名。
- * @return 函数返回值；目标或函数不可用时返回 false。
+ * @brief RAII 包装 UFunction 参数缓冲区（构造时 InitializeStruct、析构时 DestroyStruct）。
+ * @details function 为 null 时为空操作；data() 返回的内存仅在本对象存活期间有效。
  */
-[[nodiscard]] inline auto invoke_bool_return(RC::Unreal::UObject* object, const TCHAR* functionName)
-    -> bool {
-    if (!is_valid(object)) {
-        return false;
+class FunctionParams final {
+public:
+    explicit FunctionParams(RC::Unreal::UFunction* function)
+        : function_{function},
+          storage_(function == nullptr ? 0U : static_cast<std::size_t>(function->GetParmsSize())) {
+        if (function_ != nullptr) {
+            function_->InitializeStruct(storage_.data());
+        }
     }
-    auto* const function = object->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
-        return false;
+
+    FunctionParams(const FunctionParams&) = delete;
+    auto operator=(const FunctionParams&) -> FunctionParams& = delete;
+    FunctionParams(FunctionParams&&) = delete;
+    auto operator=(FunctionParams&&) -> FunctionParams& = delete;
+
+    ~FunctionParams() {
+        if (function_ != nullptr) {
+            function_->DestroyStruct(storage_.data());
+        }
     }
-    struct Params {
-        bool ReturnValue{};
-    } params;
-    object->ProcessEvent(function, &params);
-    return params.ReturnValue;
+
+    [[nodiscard]] auto data() noexcept -> void* {
+        return storage_.data();
+    }
+
+private:
+    RC::Unreal::UFunction* function_{};
+    std::vector<std::byte> storage_;
+};
+
+/** @brief 从完整对象名恢复 UObject；类名前缀存在时只传递后半对象路径。 */
+[[nodiscard]] inline auto find_object_by_full_name(const std::wstring& fullName)
+    -> RC::Unreal::UObject* {
+    if (fullName.empty()) {
+        return nullptr;
+    }
+    const auto separator = fullName.find(L' ');
+    const auto objectPath =
+        separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
+    return RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(nullptr, nullptr,
+                                                                              objectPath.c_str());
 }
 }  // namespace pal_game
