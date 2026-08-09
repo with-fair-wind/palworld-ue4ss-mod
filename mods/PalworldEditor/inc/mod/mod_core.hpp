@@ -87,6 +87,9 @@ private:
      */
     auto process_grapple_work(float deltaSeconds) -> void;
 
+    /** @brief 遍历队伍槽位，复活所有处于死亡/濒死状态的帕鲁。 */
+    auto revive_team_pals() -> void;
+
     /**
      * @brief 在关闭开关或切图前恢复全部活动爪钩覆盖。
      * @param[in] reason 用于错误消息的生命周期阶段。
@@ -298,6 +301,8 @@ private:
     std::atomic<bool> want_read_{false};
     /** @brief 请求游戏线程在下一次更新中输出 UObject 诊断信息。 */
     std::atomic<bool> want_discover_{false};
+    /** @brief GUI 线程提交、game_thread_tick 消费的一次性复活请求。 */
+    std::atomic<bool> wantReviveTeam_{false};
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
     std::atomic<bool> want_scan_items_{false};
     /** @brief 主数据未就绪时按世界进行有界低频补全，不访问 Unreal。 */

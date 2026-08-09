@@ -350,14 +350,18 @@ void test_active_skill_definitions_are_unique_and_known_values_match() {
 }
 
 void test_internal_active_skill_filter() {
+    // 玩家动作与 GYM/Raid/Boss 内部技能一律隐藏。
     CHECK(skill_editor::is_internal_active_skill_id("Human_Punch"));
     CHECK(skill_editor::is_internal_active_skill_id("Unique_MoonQueen_GYM_Act"));
     CHECK(skill_editor::is_internal_active_skill_id("RaidCutter"));
     CHECK(skill_editor::is_internal_active_skill_id("Unique_LilyQueen_LilyHealing_Boss"));
-    // #10 起物种专属（Unique_ 前缀）技能整体视为内部/不可用。
-    CHECK(skill_editor::is_internal_active_skill_id("Unique_Boar_Tackle"));
+    // 通用可学习技能保留。
     CHECK(!skill_editor::is_internal_active_skill_id("SelfDestruct"));
     CHECK(!skill_editor::is_internal_active_skill_id("MudShot"));
+    // 物种专属主动技（Unique_<物种>_*）一律隐藏：跨物种装备会被游戏拒绝，
+    // 且对应物种天生自带，无需在本编辑器开放。
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_Boar_Tackle"));
+    CHECK(skill_editor::is_internal_active_skill_id("Unique_Anubis_GroundPunch"));
 
     constexpr std::array definitions{
         skill_editor::ActiveSkillDefinition{.value = 1, .id = "Human_Punch"},
@@ -366,27 +370,39 @@ void test_internal_active_skill_filter() {
     };
     // 本地化名为空 = 未翻译/内部技能（#11 起直接跳过，不再回退 Raw ID）。
     const auto options = skill_editor::make_active_skill_options(
-        definitions, [](const auto&) { return std::string{}; });
-    CHECK(options.empty());
+        definitions, [](const skill_editor::ActiveSkillDefinition& d) {
+            return d.value == 124 ? std::string{"泥浆射击"} : std::string{};
+        });
+    // Human_ 与 Unique_ 被内部过滤；通用技能还需带中文翻译才保留，故只剩 MudShot。
+    CHECK(options.size() == 1);
+    CHECK(options[0].id == "MudShot");
 }
 
-void test_active_skill_options_use_runtime_localization_with_raw_id_fallback() {
+void test_active_skill_options_localize_and_filter_untranslated() {
     constexpr std::array definitions{
-        skill_editor::ActiveSkillDefinition{.value = 15, .id = "PowerShot"},
-        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
+        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},   // 中文翻译 → 保留
+        skill_editor::ActiveSkillDefinition{.value = 40, .id = "FireBlast"},  // 无翻译 → 过滤
+        skill_editor::ActiveSkillDefinition{.value = 22, .id = "AirCanon"},  // 纯 ASCII 翻译 → 过滤
     };
 
     const auto options = skill_editor::make_active_skill_options(
         definitions, [](const skill_editor::ActiveSkillDefinition& definition) {
-            return definition.value == 15 ? std::string{"重击弹"} : std::string{};
+            switch (definition.value) {
+                case 124:
+                    return std::string{"泥浆射击"};  // 含中文 → 保留
+                case 22:
+                    return std::string{"AirCanon"};  // 纯 ASCII → 过滤
+                default:
+                    return std::string{};  // 空 → 过滤（FireBlast）
+            }
         });
 
-    // 空本地化名（MudShot）被跳过；仅保留有非 ASCII 本地化名的技能。
+    // 只有含中文翻译的 MudShot 保留；空翻译与纯 ASCII 翻译都被过滤。
     CHECK(options.size() == 1);
-    CHECK(options[0].id == "PowerShot");
-    CHECK(options[0].localizedName == "重击弹");
-    CHECK(options[0].activeValue == std::optional<std::uint16_t>{std::uint16_t{15}});
-    CHECK(skill_editor::skill_label(options[0]) == "重击弹 [PowerShot]");
+    CHECK(options[0].id == "MudShot");
+    CHECK(options[0].localizedName == "泥浆射击");
+    CHECK(options[0].activeValue == std::optional<std::uint16_t>{std::uint16_t{124}});
+    CHECK(skill_editor::skill_label(options[0]) == "泥浆射击 [MudShot]");
 }
 
 void test_skill_catalog_refresh_merges_sections_independently() {
@@ -1606,7 +1622,7 @@ auto main() -> int {
     test_passive_skill_preset_builds_one_world_bound_request();
     test_active_skill_definitions_are_unique_and_known_values_match();
     test_internal_active_skill_filter();
-    test_active_skill_options_use_runtime_localization_with_raw_id_fallback();
+    test_active_skill_options_localize_and_filter_untranslated();
     test_skill_catalog_refresh_merges_sections_independently();
     test_skill_catalog_first_partial_load_keeps_available_section();
     test_partial_catalog_is_not_ready_for_editing();
