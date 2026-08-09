@@ -15,6 +15,7 @@
 #include <base_resource_sharing/current_base_resolution.hpp>
 #include <base_resource_sharing/pal_base_resource_runtime.hpp>
 #include <common/game_reflection.hpp>
+#include <game/pal_base_camp_reflection.hpp>
 
 namespace base_resource_sharing::detail {
 using pal_game::find_object_by_full_name;
@@ -153,85 +154,16 @@ namespace {
            try_get_guid(guild, STR("GetId"), guildId);
 }
 
-[[nodiscard]] auto read_base_ids(UObject* manager, std::vector<FGuid>& output) -> bool {
-    output.clear();
-    auto* function =
-        manager == nullptr ? nullptr : manager->GetFunctionByNameInChain(STR("GetBaseCampIds"));
-    auto* arrayProperty =
-        function == nullptr
-            ? nullptr
-            : CastField<FArrayProperty>(function->FindProperty(FName(STR("OutIds"), FNAME_Find)));
-    auto* guidProperty =
-        arrayProperty == nullptr ? nullptr : CastField<FStructProperty>(arrayProperty->GetInner());
-    if (function == nullptr || arrayProperty == nullptr || guidProperty == nullptr) {
-        return false;
-    }
-
-    std::vector<std::byte> params(function->GetParmsSize());
-    arrayProperty->InitializeValue_InContainer(params.data());
-    struct ArrayGuard {
-        FArrayProperty* property{};
-        void* container{};
-        ~ArrayGuard() {
-            property->DestroyValue_InContainer(container);
-        }
-    } guard{.property = arrayProperty, .container = params.data()};
-
-    manager->ProcessEvent(function, params.data());
-    FScriptArrayHelper_InContainer values(arrayProperty, params.data());
-    output.reserve(static_cast<std::size_t>(std::max(values.Num(), 0)));
-    for (int32 index{}; index < values.Num(); ++index) {
-        FGuid id{};
-        guidProperty->CopyCompleteValue(&id, values.GetRawPtr(index));
-        if (to_key(id).valid()) {
-            output.push_back(id);
-        }
-    }
-    return true;
-}
-
-[[nodiscard]] auto try_get_base_model(UObject* manager, const FGuid& baseId, UObject*& model)
-    -> bool {
-    model = nullptr;
-    auto* function =
-        manager == nullptr ? nullptr : manager->GetFunctionByNameInChain(STR("TryGetModel"));
-    auto* idProperty = function == nullptr ? nullptr
-                                           : CastField<FStructProperty>(function->FindProperty(
-                                                 FName(STR("BaseCampId"), FNAME_Find)));
-    auto* modelProperty = function == nullptr
-                              ? nullptr
-                              : CastField<FObjectPropertyBase>(
-                                    function->FindProperty(FName(STR("OutModel"), FNAME_Find)));
-    auto* returnProperty =
-        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
-    if (function == nullptr || idProperty == nullptr || modelProperty == nullptr ||
-        returnProperty == nullptr) {
-        return false;
-    }
-
-    std::vector<std::byte> params(function->GetParmsSize());
-    idProperty->CopyCompleteValue(idProperty->ContainerPtrToValuePtr<void>(params.data()), &baseId);
-    manager->ProcessEvent(function, params.data());
-    model = modelProperty->GetObjectPropertyValue(
-        modelProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return returnProperty->GetPropertyValueInContainer(params.data()) && model != nullptr;
-}
-
 [[nodiscard]] auto find_concrete_model(UObject* manager, const GuidKey& ownerMapObjectId)
     -> UObject* {
     if (manager == nullptr || !ownerMapObjectId.valid()) {
         return nullptr;
     }
-    auto* function = manager->GetFunctionByNameInChain(STR("FindConcreteModel"));
-    if (function == nullptr) {
-        return nullptr;
-    }
-    struct Params {
-        FGuid InstanceId{};
-        UObject* ReturnValue{};
-    } params{.InstanceId = to_guid(ownerMapObjectId)};
-    manager->ProcessEvent(function, &params);
-    return params.ReturnValue;
+    UObject* concreteModel{};
+    const auto instanceId = to_guid(ownerMapObjectId);
+    return pal_base_camp_reflection::find_concrete_model(manager, instanceId, concreteModel)
+               ? concreteModel
+               : nullptr;
 }
 
 [[nodiscard]] auto try_get_container_info(FArrayProperty* arrayProperty, void* containerInfo,
@@ -569,17 +501,19 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
     auto* storageClass = UObjectGlobals::StaticFindObject<UClass*>(
         nullptr, nullptr, STR("/Script/Pal.PalBaseCampModuleItemStorage"));
     std::vector<FGuid> baseIds;
-    if (storageClass == nullptr || !read_base_ids(baseCampManager, baseIds)) {
+    if (storageClass == nullptr ||
+        !pal_base_camp_reflection::read_base_ids(baseCampManager, baseIds)) {
         result.error = "无法读取据点列表或据点仓储模块类型。";
         return result;
     }
+    std::erase_if(baseIds, [](const FGuid& id) { return !to_key(id).valid(); });
 
     std::vector<ContainerDescriptor> descriptors;
     std::set<GuidKey> catalogIds;
     for (const auto& baseId : baseIds) {
         UObject* baseModel{};
         FGuid ownerGuild{};
-        if (!try_get_base_model(baseCampManager, baseId, baseModel) ||
+        if (!pal_base_camp_reflection::try_get_base_model(baseCampManager, baseId, baseModel) ||
             !try_get_guid(baseModel, STR("GetGroupIdBelongTo"), ownerGuild)) {
             continue;
         }

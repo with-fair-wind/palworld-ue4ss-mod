@@ -106,6 +106,55 @@ struct LocalOtomoHolderResolution {
 }
 
 /**
+ * @brief 按队伍槽位读取个体 Handle，并在调用前验证运行时参数属性。
+ * @param[in] holder 当前帧解析到的本地队伍 Holder。
+ * @param[in] slotIndex 要查询的槽位索引。
+ * @param[out] handle 游戏返回的非拥有 Handle；空槽位时为 nullptr。
+ * @retval true 函数签名可验证且反射调用已经执行。
+ * @retval false 目标、槽位或函数参数元数据不符合预期，未执行调用。
+ */
+[[nodiscard]] inline auto try_get_otomo_individual_handle(UObject* holder, const int32 slotIndex,
+                                                          UObject*& handle) -> bool {
+    handle = nullptr;
+    if (!is_valid(holder) || slotIndex < 0) {
+        return false;
+    }
+
+    auto* const function = holder->GetFunctionByNameInChain(STR("GetOtomoIndividualHandle"));
+    auto* const slotProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FIntProperty>(function->FindProperty(FName(STR("SlotIndex"), FNAME_Find)));
+    auto* const returnProperty =
+        function == nullptr ? nullptr
+                            : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    std::size_t parameterCount{};
+    if (function != nullptr) {
+        for (auto* property :
+             TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
+            if (property->HasAnyPropertyFlags(CPF_Parm)) {
+                ++parameterCount;
+            }
+        }
+    }
+    if (parameterCount != 2 || slotProperty == nullptr || returnProperty == nullptr ||
+        !slotProperty->HasAnyPropertyFlags(CPF_Parm) ||
+        slotProperty->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm) ||
+        !returnProperty->HasAnyPropertyFlags(CPF_Parm) ||
+        !returnProperty->HasAnyPropertyFlags(CPF_ReturnParm)) {
+        return false;
+    }
+
+    FunctionParams params{function};
+    slotProperty->SetPropertyValueInContainer(params.data(), slotIndex);
+    holder->ProcessEvent(function, params.data());
+    auto* const result = returnProperty->GetObjectPropertyValue(
+        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
+    handle = is_valid(result) ? result : nullptr;
+    return true;
+}
+
+/**
  * @brief 当前待出战帕鲁的运行时解析结果。
  */
 struct SelectedPalTarget {
@@ -173,18 +222,10 @@ struct SelectedPalTarget {
         return failure(selectedSlotUnavailable);
     }
 
-    auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
-    if (getHandleFunction == nullptr) {
+    UObject* handle{};
+    if (!try_get_otomo_individual_handle(holder, getSelectedParams.ReturnValue, handle)) {
         return failure(getHandleFunctionUnavailable);
     }
-    /** @brief `PalOtomoHolderComponentBase:GetOtomoIndividualHandle` 的反射参数布局。 */
-    struct GetHandleParams {
-        int32_t SlotIndex{};    /**< 要解析的当前选中槽位。 */
-        UObject* ReturnValue{}; /**< 游戏写回的非拥有个体 handle。 */
-    } getHandleParams{.SlotIndex = getSelectedParams.ReturnValue};
-    holder->ProcessEvent(getHandleFunction, &getHandleParams);
-    auto* const handle = getHandleParams.ReturnValue;
     if (!is_valid(handle)) {
         return failure(handleUnavailable);
     }

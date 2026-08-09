@@ -30,6 +30,7 @@
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
+#include <game/pal_base_camp_reflection.hpp>
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
 #include <windows.h>
 
@@ -41,6 +42,13 @@ namespace {
 
 /** @brief 连续触发超时的次数上限；达到后停用域。 */
 inline constexpr std::uint64_t kMaxConsecutiveTimeouts = 5;
+
+/** @brief 选择策略输入与打开终端所需 GUID 的单一候选记录。 */
+struct ResolvedBaseCampCandidate {
+    BaseCampCandidate selection;
+    FGuid baseId;
+    FGuid ownerMapObjectId;
+};
 
 /** @brief 单次触发允许的软耗时上限；超过仅记录日志。 */
 inline constexpr auto kTriggerTimeBudget = std::chrono::milliseconds(2);
@@ -122,61 +130,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     }
     target->ProcessEvent(function, params.data());
     return returnProperty->GetPropertyValueInContainer(params.data());
-}
-
-/** @brief 从 PalBaseCampManager 枚举本地玩家的基地 ID（镜像资源分享 read_base_ids）。 */
-[[nodiscard]] auto read_base_ids(UObject* manager, std::vector<FGuid>& output) -> bool {
-    output.clear();
-    auto* function =
-        manager == nullptr ? nullptr : manager->GetFunctionByNameInChain(STR("GetBaseCampIds"));
-    auto* arrayProperty =
-        function == nullptr
-            ? nullptr
-            : CastField<FArrayProperty>(function->FindProperty(FName(STR("OutIds"), FNAME_Find)));
-    auto* guidProperty =
-        arrayProperty == nullptr ? nullptr : CastField<FStructProperty>(arrayProperty->GetInner());
-    if (function == nullptr || arrayProperty == nullptr || guidProperty == nullptr) {
-        return false;
-    }
-
-    pal_game::FunctionParams params{function};
-    manager->ProcessEvent(function, params.data());
-    FScriptArrayHelper_InContainer values(arrayProperty, params.data());
-    output.reserve(static_cast<std::size_t>(std::max(values.Num(), 0)));
-    for (int32 index{}; index < values.Num(); ++index) {
-        FGuid id{};
-        guidProperty->CopyCompleteValue(&id, values.GetRawPtr(index));
-        output.push_back(id);
-    }
-    return true;
-}
-
-/** @brief 按基地 ID 取 PalBaseCampModel（镜像资源分享 try_get_base_model）。 */
-[[nodiscard]] auto try_get_base_model(UObject* manager, const FGuid& baseId, UObject*& model)
-    -> bool {
-    model = nullptr;
-    auto* function =
-        manager == nullptr ? nullptr : manager->GetFunctionByNameInChain(STR("TryGetModel"));
-    auto* idProperty = function == nullptr ? nullptr
-                                           : CastField<FStructProperty>(function->FindProperty(
-                                                 FName(STR("BaseCampId"), FNAME_Find)));
-    auto* modelProperty = function == nullptr
-                              ? nullptr
-                              : CastField<FObjectPropertyBase>(
-                                    function->FindProperty(FName(STR("OutModel"), FNAME_Find)));
-    auto* returnProperty =
-        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
-    if (function == nullptr || idProperty == nullptr || modelProperty == nullptr ||
-        returnProperty == nullptr) {
-        return false;
-    }
-
-    pal_game::FunctionParams params{function};
-    idProperty->CopyCompleteValue(idProperty->ContainerPtrToValuePtr<void>(params.data()), &baseId);
-    manager->ProcessEvent(function, params.data());
-    model = modelProperty->GetObjectPropertyValue(
-        modelProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return returnProperty->GetPropertyValueInContainer(params.data()) && model != nullptr;
 }
 
 /** @brief 从模型 getter 读取 FGuid 字段。 */
@@ -340,32 +293,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         }
     }
     return false;
-}
-
-/** @brief 按实例 ID 取地图对象具体模型（PalMapObjectManager:FindConcreteModel）。 */
-[[nodiscard]] auto find_concrete_model(UObject* mapObjectManager, const FGuid& instanceId,
-                                       UObject*& concreteModel) -> bool {
-    concreteModel = nullptr;
-    auto* function = pal_game::is_valid(mapObjectManager)
-                         ? mapObjectManager->GetFunctionByNameInChain(STR("FindConcreteModel"))
-                         : nullptr;
-    auto* input = function == nullptr ? nullptr
-                                      : CastField<FStructProperty>(function->FindProperty(
-                                            FName(STR("InstanceId"), FNAME_Find)));
-    if (function == nullptr || input == nullptr) {
-        return false;
-    }
-    pal_game::FunctionParams params{function};
-    input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(params.data()), &instanceId);
-    mapObjectManager->ProcessEvent(function, params.data());
-    auto* const returnProperty = CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return false;
-    }
-    auto* const result = returnProperty->GetObjectPropertyValue(
-        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-    concreteModel = pal_game::is_valid(result) ? result : nullptr;
-    return concreteModel != nullptr;
 }
 
 /** @brief 读取终端具体模型自带的界面类（UPalMapObjectBaseCampPoint::PalBoxWiget）。
@@ -715,7 +642,8 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
 
     auto* const manager = find_singleton(STR("PalBaseCampManager"));
     std::vector<FGuid> baseIds;
-    if (manager == nullptr || !read_base_ids(manager, baseIds) || baseIds.empty()) {
+    if (manager == nullptr || !pal_base_camp_reflection::read_base_ids(manager, baseIds) ||
+        baseIds.empty()) {
         note("没有可用的已拥有基地", true);
         return finish(RemotePalboxTriggerResult::noBase);
     }
@@ -726,16 +654,11 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     float worldAreaRange{};
     const bool haveWorldAreaRange =
         config.onlyInsideBaseCircle && read_world_build_area_range(worldContext, worldAreaRange);
-    std::vector<BaseCampCandidate> candidates;
+    std::vector<ResolvedBaseCampCandidate> candidates;
     candidates.reserve(baseIds.size());
-    // 候选列表可能跳过解析失败的基地，索引与 baseIds 不对齐；用并行表保留来源 GUID。
-    std::vector<FGuid> candidateBaseIds;
-    candidateBaseIds.reserve(baseIds.size());
-    std::vector<FGuid> candidateOwnerMapObjectIds;
-    candidateOwnerMapObjectIds.reserve(baseIds.size());
     for (const auto& baseId : baseIds) {
         UObject* model{};
-        if (!try_get_base_model(manager, baseId, model)) {
+        if (!pal_base_camp_reflection::try_get_base_model(manager, baseId, model)) {
             continue;
         }
         FGuid ownerMapObjectId{};
@@ -767,22 +690,29 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
                 haveCenter && havePlayerLocation && haveAreaRange &&
                 distanceSquared <= static_cast<double>(areaRange) * static_cast<double>(areaRange);
         }
-        candidates.push_back({.playerInside = playerInside, .distanceSquared = distanceSquared});
-        candidateBaseIds.push_back(baseId);
-        candidateOwnerMapObjectIds.push_back(ownerMapObjectId);
+        candidates.push_back({
+            .selection = {.playerInside = playerInside, .distanceSquared = distanceSquared},
+            .baseId = baseId,
+            .ownerMapObjectId = ownerMapObjectId,
+        });
     }
-    const auto pick = select_remote_base_camp(candidates);
+    std::vector<BaseCampCandidate> selectionCandidates;
+    selectionCandidates.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        selectionCandidates.push_back(candidate.selection);
+    }
+    const auto pick = select_remote_base_camp(selectionCandidates);
     if (!pick.has_value()) {
         note("没有可用的已拥有基地", true);
         return finish(RemotePalboxTriggerResult::noBase);
     }
-    if (config.onlyInsideBaseCircle && !candidates[*pick].playerInside) {
+    if (config.onlyInsideBaseCircle && !candidates[*pick].selection.playerInside) {
         // 与配置项"仅基地圈内可用"语义一致：圈外不打开任何基地的终端。
         note("仅基地圈内可用，请站到基地圈内再使用", true);
         return finish(RemotePalboxTriggerResult::blocked);
     }
-    const auto& selectedBase = candidateBaseIds[*pick];
-    const auto& ownerMapObjectId = candidateOwnerMapObjectIds[*pick];
+    const auto& selectedBase = candidates[*pick].baseId;
+    const auto& ownerMapObjectId = candidates[*pick].ownerMapObjectId;
 
     // 界面类解析优先级：缓存路径（跨世界保留）→ 终端模型自带的 PalBoxWiget →
     // 按资产路径主动加载。任一路径得到 UClass* 后仅在本次触发内使用，跨帧只保留路径字符串。
@@ -793,7 +723,8 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     }
     if (widgetClass == nullptr && mapObjectManager != nullptr) {
         UObject* terminalConcrete{};
-        if (find_concrete_model(mapObjectManager, ownerMapObjectId, terminalConcrete) &&
+        if (pal_base_camp_reflection::find_concrete_model(mapObjectManager, ownerMapObjectId,
+                                                          terminalConcrete) &&
             read_terminal_widget_class(terminalConcrete, widgetClass)) {
             widgetPath_ = text_encoding::to_utf8(std::wstring{widgetClass->GetPathName()});
         }

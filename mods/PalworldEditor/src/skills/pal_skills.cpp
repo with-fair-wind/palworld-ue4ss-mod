@@ -23,6 +23,7 @@
 #include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/Property/FEnumProperty.hpp>
+#include <Unreal/Property/FTextProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/text_encoding.hpp>
@@ -39,6 +40,32 @@ namespace {
  * @details 枚举成员来自生成的纯 C++ 定义表，本地类型只用于匹配反射函数的 16 位参数布局。
  */
 enum class EPalWazaID : std::uint16_t {};
+
+[[nodiscard]] auto has_exact_parameter_count(UFunction* function, const std::size_t expected)
+    -> bool {
+    if (function == nullptr) {
+        return false;
+    }
+    std::size_t count{};
+    for (auto* property :
+         TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
+        if (property->HasAnyPropertyFlags(CPF_Parm)) {
+            ++count;
+        }
+    }
+    return count == expected;
+}
+
+[[nodiscard]] auto is_input_parameter(FProperty* property) -> bool {
+    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
+           !property->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm);
+}
+
+[[nodiscard]] auto is_output_parameter(FProperty* property) -> bool {
+    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
+           property->HasAnyPropertyFlags(CPF_OutParm) &&
+           !property->HasAnyPropertyFlags(CPF_ReturnParm);
+}
 
 /**
  * @brief 把整数目标句柄还原为当前有效的帕鲁 UObject。
@@ -85,18 +112,30 @@ template <typename T>
  */
 [[nodiscard]] auto passive_localized_name(UObject* utility, UFunction* function,
                                           UObject* worldContext, const FName& id) -> std::string {
-    if (utility == nullptr || function == nullptr || worldContext == nullptr) {
+    auto* const contextProperty = function == nullptr
+                                      ? nullptr
+                                      : CastField<FObjectPropertyBase>(function->FindProperty(
+                                            FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const idProperty = function == nullptr ? nullptr
+                                                 : CastField<FNameProperty>(function->FindProperty(
+                                                       FName(STR("PassiveSkillId"), FNAME_Find)));
+    auto* const outNameProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FTextProperty>(function->FindProperty(FName(STR("outName"), FNAME_Find)));
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !has_exact_parameter_count(function, 3) || !is_input_parameter(contextProperty) ||
+        !is_input_parameter(idProperty) || !is_output_parameter(outNameProperty)) {
         return {};
     }
 
-    /** @brief `PalUIUtility:GetPassiveSkillName` 的反射参数布局。 */
-    struct Params {
-        UObject* WorldContextObject; /**< 非拥有世界上下文对象。 */
-        FName PassiveSkillId;        /**< 要查询的被动技能 Raw ID。 */
-        FText OutName;               /**< 游戏函数写回的本地化名称。 */
-    } params{.WorldContextObject = worldContext, .PassiveSkillId = id};
-    utility->ProcessEvent(function, &params);
-    return text_encoding::to_utf8(params.OutName.ToString());
+    pal_game::FunctionParams params{function};
+    contextProperty->SetObjectPropertyValue(
+        contextProperty->ContainerPtrToValuePtr<void>(params.data()), worldContext);
+    idProperty->SetPropertyValueInContainer(params.data(), id);
+    utility->ProcessEvent(function, params.data());
+    return text_encoding::to_utf8(
+        outNameProperty->GetPropertyValueInContainer(params.data()).ToString());
 }
 
 /**
@@ -110,18 +149,61 @@ template <typename T>
 [[nodiscard]] auto active_localized_name(UObject* utility, UFunction* function,
                                          UObject* worldContext, const EPalWazaID id)
     -> std::string {
-    if (utility == nullptr || function == nullptr || worldContext == nullptr) {
+    auto* const contextProperty = function == nullptr
+                                      ? nullptr
+                                      : CastField<FObjectPropertyBase>(function->FindProperty(
+                                            FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const idProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FEnumProperty>(function->FindProperty(FName(STR("WazaID"), FNAME_Find)));
+    auto* const idUnderlying =
+        idProperty == nullptr ? nullptr : idProperty->GetUnderlyingProperty();
+    auto* const outNameProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FTextProperty>(function->FindProperty(FName(STR("outName"), FNAME_Find)));
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !has_exact_parameter_count(function, 3) || !is_input_parameter(contextProperty) ||
+        !is_input_parameter(idProperty) || idUnderlying == nullptr || !idUnderlying->IsInteger() ||
+        static_cast<std::size_t>(idUnderlying->GetElementSize()) != sizeof(EPalWazaID) ||
+        !is_output_parameter(outNameProperty)) {
         return {};
     }
 
-    /** @brief `PalUIUtility:GetWazaName` 的反射参数布局。 */
-    struct Params {
-        UObject* WorldContextObject; /**< 非拥有世界上下文对象。 */
-        EPalWazaID WazaId;           /**< 要查询的主动技能枚举值。 */
-        FText OutName;               /**< 游戏函数写回的本地化名称。 */
-    } params{.WorldContextObject = worldContext, .WazaId = id};
-    utility->ProcessEvent(function, &params);
-    return text_encoding::to_utf8(params.OutName.ToString());
+    pal_game::FunctionParams params{function};
+    contextProperty->SetObjectPropertyValue(
+        contextProperty->ContainerPtrToValuePtr<void>(params.data()), worldContext);
+    idUnderlying->SetIntPropertyValue(idProperty->ContainerPtrToValuePtr<void>(params.data()),
+                                      static_cast<std::uint64_t>(static_cast<std::uint16_t>(id)));
+    utility->ProcessEvent(function, params.data());
+    return text_encoding::to_utf8(
+        outNameProperty->GetPropertyValueInContainer(params.data()).ToString());
+}
+
+[[nodiscard]] auto get_waza_database(UObject* utility, UFunction* function, UObject* worldContext)
+    -> UObject* {
+    auto* const contextProperty = function == nullptr
+                                      ? nullptr
+                                      : CastField<FObjectPropertyBase>(function->FindProperty(
+                                            FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const returnProperty =
+        function == nullptr ? nullptr
+                            : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !has_exact_parameter_count(function, 2) || !is_input_parameter(contextProperty) ||
+        returnProperty == nullptr || !returnProperty->HasAnyPropertyFlags(CPF_Parm) ||
+        !returnProperty->HasAnyPropertyFlags(CPF_ReturnParm)) {
+        return nullptr;
+    }
+
+    pal_game::FunctionParams params{function};
+    contextProperty->SetObjectPropertyValue(
+        contextProperty->ContainerPtrToValuePtr<void>(params.data()), worldContext);
+    utility->ProcessEvent(function, params.data());
+    auto* const result = returnProperty->GetObjectPropertyValue(
+        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
+    return pal_game::is_valid(result) ? result : nullptr;
 }
 
 [[nodiscard]] auto read_active_category(UObject* wazaDatabase, UFunction* findWazaFunction,
@@ -452,50 +534,55 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target)
     return result;
 }
 
-/**
- * @details 使用与 UHT 声明一致的 `AddSkill`/`OverrideSkill` 参数布局发起反射调用；
- *          完整调用契约见头文件中的成员声明。
- */
+/** @details 运行时验证两个 FName 输入属性；OverrideSkill 明确传 NAME_None。 */
 auto PalSkillGateway::add_passive(const skill_editor::SkillTarget target, const std::string_view id)
     -> bool {
     auto* pal = to_pal(target);
     auto* function = find_function<UFunction>(
         STR("/Script/Pal.PalIndividualCharacterParameter:AddPassiveSkill"));
-    if (pal == nullptr || function == nullptr || id.empty()) {
+    auto* const addProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FNameProperty>(function->FindProperty(FName(STR("AddSkill"), FNAME_Find)));
+    auto* const overrideProperty =
+        function == nullptr ? nullptr
+                            : CastField<FNameProperty>(
+                                  function->FindProperty(FName(STR("OverrideSkill"), FNAME_Find)));
+    if (pal == nullptr || id.empty() || !has_exact_parameter_count(function, 2) ||
+        !is_input_parameter(addProperty) || !is_input_parameter(overrideProperty)) {
         return false;
     }
 
-    /** @brief `AddPassiveSkill` 的反射参数布局。 */
-    struct Params {
-        FName AddSkill;      /**< 要添加的被动技能 Raw ID。 */
-        FName OverrideSkill; /**< 游戏可能写回的覆盖技能 ID；调用方不依赖该值。 */
-    } params;
     const auto wide = text_encoding::widen_ascii(id);
-    params.AddSkill = FName(wide.c_str());
-    pal->ProcessEvent(function, &params);
+    const FName addSkill{wide.c_str()};
+    const FName overrideSkill{};
+    pal_game::FunctionParams params{function};
+    addProperty->SetPropertyValueInContainer(params.data(), addSkill);
+    overrideProperty->SetPropertyValueInContainer(params.data(), overrideSkill);
+    pal->ProcessEvent(function, params.data());
     return true;
 }
 
-/**
- * @details 使用与 UHT 声明一致的 `SkillId` 参数布局发起反射调用；
- *          完整调用契约见头文件中的成员声明。
- */
+/** @details 运行时验证 SkillId 为唯一的 FName 输入参数后再调用。 */
 auto PalSkillGateway::remove_passive(const skill_editor::SkillTarget target,
                                      const std::string_view id) -> bool {
     auto* pal = to_pal(target);
     auto* function = find_function<UFunction>(
         STR("/Script/Pal.PalIndividualCharacterParameter:RemovePassiveSkill"));
-    if (pal == nullptr || function == nullptr || id.empty()) {
+    auto* const idProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FNameProperty>(function->FindProperty(FName(STR("SkillId"), FNAME_Find)));
+    if (pal == nullptr || id.empty() || !has_exact_parameter_count(function, 1) ||
+        !is_input_parameter(idProperty)) {
         return false;
     }
 
-    /** @brief `RemovePassiveSkill` 的反射参数布局。 */
-    struct Params {
-        FName SkillId; /**< 要移除的被动技能 Raw ID。 */
-    } params;
     const auto wide = text_encoding::widen_ascii(id);
-    params.SkillId = FName(wide.c_str());
-    pal->ProcessEvent(function, &params);
+    const FName skillId{wide.c_str()};
+    pal_game::FunctionParams params{function};
+    idProperty->SetPropertyValueInContainer(params.data(), skillId);
+    pal->ProcessEvent(function, params.data());
     return true;
 }
 
@@ -771,16 +858,7 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
         nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
     auto* const getWazaDbFunction =
         find_function<UFunction>(STR("/Script/Pal.PalUtility:GetWazaDatabase"));
-    UObject* wazaDatabase{};
-    if (palUtility != nullptr && getWazaDbFunction != nullptr && worldContext != nullptr) {
-        struct WazaDbParams {
-            UObject* WorldContextObject{};
-            UObject* ReturnValue{};
-        } dbParams{};
-        dbParams.WorldContextObject = worldContext;
-        palUtility->ProcessEvent(getWazaDbFunction, &dbParams);
-        wazaDatabase = dbParams.ReturnValue;
-    }
+    auto* const wazaDatabase = get_waza_database(palUtility, getWazaDbFunction, worldContext);
     auto* const findWazaFunction =
         pal_game::is_valid(wazaDatabase)
             ? wazaDatabase->GetFunctionByNameInChain(STR("FindWazaForBP"))
