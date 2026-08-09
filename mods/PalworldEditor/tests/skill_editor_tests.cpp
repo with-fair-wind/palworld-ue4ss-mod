@@ -144,6 +144,23 @@ void test_passive_filter_views_preserve_catalog_objects_and_order() {
     CHECK(visible.front() == &skills[1]);
 }
 
+void test_active_filter_views_preserve_catalog_objects_and_order() {
+    using enum skill_editor::ActiveSkillCategory;
+
+    const std::vector<skill_editor::SkillOption> skills{
+        {.id = "Melee", .localizedName = "近战技能", .activeCategory = Melee},
+        {.id = "Shot", .localizedName = "远程射击", .activeCategory = Shot},
+        {.id = "ShotExcluded", .localizedName = "远程射击二", .activeCategory = Shot},
+        {.id = "Unknown", .localizedName = "远程未知"},
+    };
+
+    const auto visible = skill_editor::filter_active_skill_views(
+        skills, Shot, "远程", std::unordered_set<std::string>{"ShotExcluded"});
+
+    CHECK(visible.size() == 1);
+    CHECK(visible.front() == &skills[1]);
+}
+
 void test_passive_picker_category_change_clears_only_selection() {
     skill_editor::PassiveSkillPickerState state{
         .category = std::nullopt,
@@ -378,31 +395,45 @@ void test_internal_active_skill_filter() {
     CHECK(options[0].id == "MudShot");
 }
 
-void test_active_skill_options_localize_and_filter_untranslated() {
+void test_active_skill_options_preserve_current_language_names() {
     constexpr std::array definitions{
-        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},   // 中文翻译 → 保留
-        skill_editor::ActiveSkillDefinition{.value = 40, .id = "FireBlast"},  // 无翻译 → 过滤
-        skill_editor::ActiveSkillDefinition{.value = 22, .id = "AirCanon"},  // 纯 ASCII 翻译 → 过滤
+        skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},   // 中文名称
+        skill_editor::ActiveSkillDefinition{.value = 40, .id = "FireBlast"},  // 无名称 → 过滤
+        skill_editor::ActiveSkillDefinition{.value = 22, .id = "AirCanon"},   // 英文名称
     };
 
     const auto options = skill_editor::make_active_skill_options(
         definitions, [](const skill_editor::ActiveSkillDefinition& definition) {
             switch (definition.value) {
                 case 124:
-                    return std::string{"泥浆射击"};  // 含中文 → 保留
+                    return std::string{"泥浆射击"};
                 case 22:
-                    return std::string{"AirCanon"};  // 纯 ASCII → 过滤
+                    return std::string{"Air Cannon"};
                 default:
-                    return std::string{};  // 空 → 过滤（FireBlast）
+                    return std::string{};
             }
         });
 
-    // 只有含中文翻译的 MudShot 保留；空翻译与纯 ASCII 翻译都被过滤。
-    CHECK(options.size() == 1);
+    // 当前游戏语言可能是英语；只过滤真正缺少名称的条目。
+    CHECK(options.size() == 2);
     CHECK(options[0].id == "MudShot");
     CHECK(options[0].localizedName == "泥浆射击");
     CHECK(options[0].activeValue == std::optional<std::uint16_t>{std::uint16_t{124}});
     CHECK(skill_editor::skill_label(options[0]) == "泥浆射击 [MudShot]");
+    CHECK(options[1].id == "AirCanon");
+    CHECK(options[1].localizedName == "Air Cannon");
+}
+
+void test_active_category_requires_successful_lookup_and_known_value() {
+    CHECK(!skill_editor::active_skill_category_from_lookup(false, 0).has_value());
+    CHECK(skill_editor::active_skill_category_from_lookup(true, 0) ==
+          skill_editor::ActiveSkillCategory::Melee);
+    CHECK(skill_editor::active_skill_category_from_lookup(true, 1) ==
+          skill_editor::ActiveSkillCategory::Shot);
+    CHECK(skill_editor::active_skill_category_from_lookup(true, 2) ==
+          skill_editor::ActiveSkillCategory::Support);
+    CHECK(!skill_editor::active_skill_category_from_lookup(true, -1).has_value());
+    CHECK(!skill_editor::active_skill_category_from_lookup(true, 3).has_value());
 }
 
 void test_skill_catalog_refresh_merges_sections_independently() {
@@ -629,10 +660,13 @@ void test_item_catalog_deduplicates_indexes_and_sorts() {
 class FakeSkillGateway final : public skill_editor::ISkillGateway {
 public:
     bool valid{true};
+    bool passiveReadable{true};
+    bool activeReadable{true};
     skill_editor::SkillState state;
     std::deque<bool> addOutcomes;
     std::deque<bool> removeOutcomes;
-    std::deque<bool> rewriteOutcomes;
+    std::deque<std::pair<bool, bool>> readOutcomes;
+    std::deque<skill_editor::ActiveWriteStatus> rewriteStatuses;
     std::deque<std::optional<std::vector<skill_editor::ActiveSkill>>> rewriteStates;
     std::vector<std::string> calls;
 
@@ -640,9 +674,19 @@ public:
         return valid;
     }
 
-    auto read_state(const skill_editor::SkillTarget) -> skill_editor::SkillState override {
+    auto read_state(const skill_editor::SkillTarget)
+        -> skill_editor::SkillStateReadResult override {
         calls.emplace_back("read");
-        return state;
+        if (!readOutcomes.empty()) {
+            passiveReadable = readOutcomes.front().first;
+            activeReadable = readOutcomes.front().second;
+            readOutcomes.pop_front();
+        }
+        return {
+            .state = state,
+            .passiveReadable = passiveReadable,
+            .activeReadable = activeReadable,
+        };
     }
 
     auto add_passive(const skill_editor::SkillTarget, const std::string_view id) -> bool override {
@@ -665,19 +709,29 @@ public:
     }
 
     auto rewrite_active(const skill_editor::SkillTarget,
-                        const std::span<const skill_editor::ActiveSkill> skills) -> bool override {
+                        const std::span<const skill_editor::ActiveSkill> skills)
+        -> skill_editor::ActiveWriteResult override {
         calls.emplace_back("rewrite");
-        const bool succeeds = pop_or_default(rewriteOutcomes, true);
+        const auto status =
+            pop_or_default(rewriteStatuses, skill_editor::ActiveWriteStatus::succeeded);
         if (!rewriteStates.empty()) {
             auto replacement = std::move(rewriteStates.front());
             rewriteStates.pop_front();
             if (replacement.has_value()) {
                 state.activeSkills = std::move(*replacement);
             }
-        } else if (succeeds) {
+        } else if (status == skill_editor::ActiveWriteStatus::succeeded) {
             state.activeSkills.assign(skills.begin(), skills.end());
         }
-        return succeeds;
+        return {
+            .status = status,
+            .readback =
+                {
+                    .state = state,
+                    .passiveReadable = passiveReadable,
+                    .activeReadable = activeReadable,
+                },
+        };
     }
 
 private:
@@ -686,6 +740,17 @@ private:
             return fallback;
         }
         const bool result = values.front();
+        values.pop_front();
+        return result;
+    }
+
+    static auto pop_or_default(std::deque<skill_editor::ActiveWriteStatus>& values,
+                               const skill_editor::ActiveWriteStatus fallback)
+        -> skill_editor::ActiveWriteStatus {
+        if (values.empty()) {
+            return fallback;
+        }
+        const auto result = values.front();
         values.pop_front();
         return result;
     }
@@ -732,6 +797,30 @@ void test_passive_edits_validate_target_and_limits() {
     CHECK(result.status == skill_editor::SkillEditStatus::rejected);
 }
 
+void test_skill_edits_fail_closed_when_requested_state_is_unreadable() {
+    FakeSkillGateway passiveGateway;
+    passiveGateway.passiveReadable = false;
+
+    auto result = skill_editor::execute_skill_edit(
+        passiveGateway,
+        passive_request(skill_editor::SkillEditOperation::add, {}, "Passive_Swift"));
+    CHECK(result.status == skill_editor::SkillEditStatus::failed);
+    CHECK(passiveGateway.calls == std::vector<std::string>({"read"}));
+
+    FakeSkillGateway activeGateway;
+    activeGateway.activeReadable = false;
+    result = skill_editor::execute_skill_edit(
+        activeGateway, {
+                           .target = 0x1234,
+                           .kind = skill_editor::SkillKind::active,
+                           .operation = skill_editor::SkillEditOperation::add,
+                           .activeSlot = 0,
+                           .newActiveSkill = {{1, "FireBall"}},
+                       });
+    CHECK(result.status == skill_editor::SkillEditStatus::failed);
+    CHECK(activeGateway.calls == std::vector<std::string>({"read"}));
+}
+
 void test_passive_add_remove_and_replace_reread_state() {
     FakeSkillGateway gateway;
     gateway.state.passiveIds = {"A", "B"};
@@ -751,6 +840,19 @@ void test_passive_add_remove_and_replace_reread_state() {
     CHECK(result.status == skill_editor::SkillEditStatus::succeeded);
     CHECK(!std::ranges::contains(result.state.passiveIds, "A"));
     CHECK(std::ranges::contains(result.state.passiveIds, "D"));
+}
+
+void test_passive_post_write_read_failure_does_not_report_empty_state_as_success() {
+    FakeSkillGateway gateway;
+    gateway.state.passiveIds = {"A"};
+    gateway.readOutcomes = {{true, true}, {false, true}};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, passive_request(skill_editor::SkillEditOperation::add, {}, "B"));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::failed);
+    CHECK(result.state.passiveIds == std::vector<std::string>({"A"}));
+    CHECK(gateway.calls == std::vector<std::string>({"read", "add:B", "read"}));
 }
 
 void test_passive_replace_rolls_back_on_failure() {
@@ -934,8 +1036,8 @@ void test_active_edit_rolls_back_complete_original_sequence() {
     const std::vector<skill_editor::ActiveSkill> original{
         {1, "FireBall"}, {2, "WaterGun"}, {3, "WindCutter"}};
     gateway.state.activeSkills = original;
+    gateway.rewriteStatuses = {skill_editor::ActiveWriteStatus::rolledBack};
     gateway.rewriteStates = {
-        std::vector<skill_editor::ActiveSkill>{{9, "Wrong"}},
         original,
     };
 
@@ -943,17 +1045,33 @@ void test_active_edit_rolls_back_complete_original_sequence() {
         gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
     CHECK(result.status == skill_editor::SkillEditStatus::rolledBack);
     CHECK(result.state.activeSkills == original);
+    CHECK(std::ranges::count(gateway.calls, "rewrite") == 1);
 
     gateway.state.activeSkills = original;
+    gateway.calls.clear();
+    gateway.rewriteStatuses = {skill_editor::ActiveWriteStatus::rollbackFailed};
     gateway.rewriteStates = {
         std::vector<skill_editor::ActiveSkill>{{9, "Wrong"}},
-        std::nullopt,
     };
-    gateway.rewriteOutcomes = {true, false};
     result = skill_editor::execute_skill_edit(
         gateway, active_request(skill_editor::SkillEditOperation::replace, 1, {{4, "IceMissile"}}));
     CHECK(result.status == skill_editor::SkillEditStatus::rollbackFailed);
     CHECK(result.state.activeSkills == std::vector<skill_editor::ActiveSkill>({{9, "Wrong"}}));
+    CHECK(std::ranges::count(gateway.calls, "rewrite") == 1);
+}
+
+void test_active_edit_never_reports_success_when_gateway_rejects_write() {
+    FakeSkillGateway gateway;
+    const std::vector<skill_editor::ActiveSkill> original{{1, "FireBall"}};
+    gateway.state.activeSkills = original;
+    gateway.rewriteStatuses = {skill_editor::ActiveWriteStatus::preflightFailed};
+
+    const auto result = skill_editor::execute_skill_edit(
+        gateway, active_request(skill_editor::SkillEditOperation::add, 1, {{2, "WaterGun"}}));
+
+    CHECK(result.status == skill_editor::SkillEditStatus::failed);
+    CHECK(result.state.activeSkills == original);
+    CHECK(std::ranges::count(gateway.calls, "rewrite") == 1);
 }
 
 void test_skill_edit_queue_is_fifo() {
@@ -1610,6 +1728,7 @@ auto main() -> int {
     test_passive_skill_categories_follow_runtime_metadata();
     test_passive_filter_combines_category_exclusion_and_search();
     test_passive_filter_views_preserve_catalog_objects_and_order();
+    test_active_filter_views_preserve_catalog_objects_and_order();
     test_passive_picker_category_change_clears_only_selection();
     test_passive_classification_job_reuses_success_cache_and_retries_unknowns();
     test_passive_classification_job_honors_batch_limit_and_reports_failure();
@@ -1622,7 +1741,8 @@ auto main() -> int {
     test_passive_skill_preset_builds_one_world_bound_request();
     test_active_skill_definitions_are_unique_and_known_values_match();
     test_internal_active_skill_filter();
-    test_active_skill_options_localize_and_filter_untranslated();
+    test_active_skill_options_preserve_current_language_names();
+    test_active_category_requires_successful_lookup_and_known_value();
     test_skill_catalog_refresh_merges_sections_independently();
     test_skill_catalog_first_partial_load_keeps_available_section();
     test_partial_catalog_is_not_ready_for_editing();
@@ -1635,7 +1755,9 @@ auto main() -> int {
     test_item_catalog_scan_scheduler_is_bounded_and_world_scoped();
     test_item_catalog_deduplicates_indexes_and_sorts();
     test_passive_edits_validate_target_and_limits();
+    test_skill_edits_fail_closed_when_requested_state_is_unreadable();
     test_passive_add_remove_and_replace_reread_state();
+    test_passive_post_write_read_failure_does_not_report_empty_state_as_success();
     test_passive_replace_rolls_back_on_failure();
     test_passive_set_rejects_invalid_definitions_before_writing();
     test_matching_passive_set_is_zero_write();
@@ -1646,6 +1768,7 @@ auto main() -> int {
     test_active_edits_validate_three_compact_slots();
     test_active_add_replace_and_remove_preserve_order();
     test_active_edit_rolls_back_complete_original_sequence();
+    test_active_edit_never_reports_success_when_gateway_rejects_write();
     test_skill_edit_queue_is_fifo();
     test_skill_edit_queue_can_discard_all_pending_requests();
     test_pal_resolution_decision_has_zero_idle_work_after_selection();

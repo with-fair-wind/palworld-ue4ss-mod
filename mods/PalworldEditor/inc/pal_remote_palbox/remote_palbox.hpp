@@ -9,7 +9,6 @@
 #include <cstddef>
 #include <optional>
 #include <span>
-#include <string>
 
 namespace pal_remote_palbox {
 
@@ -79,7 +78,6 @@ private:
 
 /** @brief 基地选择候选：运行时解析后交给纯值选择器。 */
 struct BaseCampCandidate {
-    std::string id;           /**< 基地 ID 的字符串表示。 */
     bool playerInside{};      /**< 玩家是否位于该基地圈内。 */
     double distanceSquared{}; /**< 玩家到基地中心的平方距离（兜底排序用）。 */
 };

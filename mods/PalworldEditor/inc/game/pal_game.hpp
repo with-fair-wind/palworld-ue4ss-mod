@@ -21,6 +21,8 @@
 #include <Unreal/FString.hpp>
 #include <Unreal/FText.hpp>
 #include <Unreal/NameTypes.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
+#include <Unreal/Property/FTextProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
@@ -106,6 +108,55 @@ struct LocalOtomoHolderResolution {
 }
 
 /**
+ * @brief 按队伍槽位读取个体 Handle，并在调用前验证运行时参数属性。
+ * @param[in] holder 当前帧解析到的本地队伍 Holder。
+ * @param[in] slotIndex 要查询的槽位索引。
+ * @param[out] handle 游戏返回的非拥有 Handle；空槽位时为 nullptr。
+ * @retval true 函数签名可验证且反射调用已经执行。
+ * @retval false 目标、槽位或函数参数元数据不符合预期，未执行调用。
+ */
+[[nodiscard]] inline auto try_get_otomo_individual_handle(UObject* holder, const int32 slotIndex,
+                                                          UObject*& handle) -> bool {
+    handle = nullptr;
+    if (!is_valid(holder) || slotIndex < 0) {
+        return false;
+    }
+
+    auto* const function = holder->GetFunctionByNameInChain(STR("GetOtomoIndividualHandle"));
+    auto* const slotProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FIntProperty>(function->FindProperty(FName(STR("SlotIndex"), FNAME_Find)));
+    auto* const returnProperty =
+        function == nullptr ? nullptr
+                            : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    std::size_t parameterCount{};
+    if (function != nullptr) {
+        for (auto* property :
+             TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
+            if (property->HasAnyPropertyFlags(CPF_Parm)) {
+                ++parameterCount;
+            }
+        }
+    }
+    if (parameterCount != 2 || slotProperty == nullptr || returnProperty == nullptr ||
+        !slotProperty->HasAnyPropertyFlags(CPF_Parm) ||
+        slotProperty->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm) ||
+        !returnProperty->HasAnyPropertyFlags(CPF_Parm) ||
+        !returnProperty->HasAnyPropertyFlags(CPF_ReturnParm)) {
+        return false;
+    }
+
+    FunctionParams params{function};
+    slotProperty->SetPropertyValueInContainer(params.data(), slotIndex);
+    holder->ProcessEvent(function, params.data());
+    auto* const result = returnProperty->GetObjectPropertyValue(
+        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
+    handle = is_valid(result) ? result : nullptr;
+    return true;
+}
+
+/**
  * @brief 当前待出战帕鲁的运行时解析结果。
  */
 struct SelectedPalTarget {
@@ -160,31 +211,18 @@ struct SelectedPalTarget {
         return failure(holderResolution.status);
     }
 
-    auto* const getSelectedFunction = holder->GetFunctionByNameInChain(STR("GetSelectedOtomoID"));
-    if (getSelectedFunction == nullptr) {
+    const auto selectedSlot = invoke<int32>(holder, STR("GetSelectedOtomoID"));
+    if (!selectedSlot.has_value()) {
         return failure(getSelectedFunctionUnavailable);
     }
-    /** @brief `PalOtomoHolderComponentBase:GetSelectedOtomoID` 的返回参数布局。 */
-    struct GetSelectedParams {
-        int32_t ReturnValue{-1}; /**< 游戏写回的当前选中 Otomo 槽位索引。 */
-    } getSelectedParams;
-    holder->ProcessEvent(getSelectedFunction, &getSelectedParams);
-    if (getSelectedParams.ReturnValue < 0) {
+    if (*selectedSlot < 0) {
         return failure(selectedSlotUnavailable);
     }
 
-    auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
-    if (getHandleFunction == nullptr) {
+    UObject* handle{};
+    if (!try_get_otomo_individual_handle(holder, *selectedSlot, handle)) {
         return failure(getHandleFunctionUnavailable);
     }
-    /** @brief `PalOtomoHolderComponentBase:GetOtomoIndividualHandle` 的反射参数布局。 */
-    struct GetHandleParams {
-        int32_t SlotIndex{};    /**< 要解析的当前选中槽位。 */
-        UObject* ReturnValue{}; /**< 游戏写回的非拥有个体 handle。 */
-    } getHandleParams{.SlotIndex = getSelectedParams.ReturnValue};
-    holder->ProcessEvent(getHandleFunction, &getHandleParams);
-    auto* const handle = getHandleParams.ReturnValue;
     if (!is_valid(handle)) {
         return failure(handleUnavailable);
     }
@@ -194,32 +232,31 @@ struct SelectedPalTarget {
     auto* const spawnedHandleResult =
         getSpawnedHandleFunction == nullptr
             ? nullptr
-            : CastField<FObjectPropertyBase>(
-                  getSpawnedHandleFunction->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+            : CastField<FObjectPropertyBase>(getSpawnedHandleFunction->GetReturnProperty());
     UObject* spawnedHandle{};
-    const bool spawnStateKnown = spawnedHandleResult != nullptr;
+    const bool spawnStateKnown = has_exact_parameter_count(getSpawnedHandleFunction, 1) &&
+                                 is_return_parameter(spawnedHandleResult);
     if (spawnStateKnown) {
-        std::vector<std::byte> params(
-            static_cast<std::size_t>(getSpawnedHandleFunction->GetParmsSize()));
-        getSpawnedHandleFunction->InitializeStruct(params.data());
+        FunctionParams params{getSpawnedHandleFunction};
         holder->ProcessEvent(getSpawnedHandleFunction, params.data());
         spawnedHandle = spawnedHandleResult->GetObjectPropertyValue(
             spawnedHandleResult->ContainerPtrToValuePtr<void>(params.data()));
-        getSpawnedHandleFunction->DestroyStruct(params.data());
     }
 
-    auto* const getParameterFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr,
-        STR("/Script/Pal.PalIndividualCharacterHandle:TryGetIndividualParameter"));
-    if (getParameterFunction == nullptr) {
+    auto* const getParameterFunction =
+        handle->GetFunctionByNameInChain(STR("TryGetIndividualParameter"));
+    auto* const parameterResult =
+        getParameterFunction == nullptr
+            ? nullptr
+            : CastField<FObjectPropertyBase>(getParameterFunction->GetReturnProperty());
+    if (!has_exact_parameter_count(getParameterFunction, 1) ||
+        !is_return_parameter(parameterResult)) {
         return failure(getParameterFunctionUnavailable);
     }
-    /** @brief `PalIndividualCharacterHandle:TryGetIndividualParameter` 的返回参数布局。 */
-    struct GetParameterParams {
-        UObject* ReturnValue{}; /**< 游戏写回的非拥有个体参数对象。 */
-    } getParameterParams;
-    handle->ProcessEvent(getParameterFunction, &getParameterParams);
-    auto* const parameter = getParameterParams.ReturnValue;
+    FunctionParams parameterParams{getParameterFunction};
+    handle->ProcessEvent(getParameterFunction, parameterParams.data());
+    auto* const parameter = parameterResult->GetObjectPropertyValue(
+        parameterResult->ContainerPtrToValuePtr<void>(parameterParams.data()));
     if (!is_valid(parameter)) {
         return failure(parameterUnavailable);
     }
@@ -230,37 +267,34 @@ struct SelectedPalTarget {
         return failure(parameterClassUnavailable);
     }
 
-    auto* const getPalIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetPalId"));
-    if (getPalIdFunction == nullptr) {
+    auto* const getPalIdFunction = parameter->GetFunctionByNameInChain(STR("GetPalId"));
+    auto* const palIdResult =
+        getPalIdFunction == nullptr
+            ? nullptr
+            : CastField<FStructProperty>(getPalIdFunction->GetReturnProperty());
+    auto* const instanceIdProperty =
+        palIdResult == nullptr || palIdResult->GetStruct() == nullptr
+            ? nullptr
+            : CastField<FStructProperty>(
+                  palIdResult->GetStruct()->FindProperty(FName(STR("InstanceId"), FNAME_Find)));
+    if (!has_exact_parameter_count(getPalIdFunction, 1) || !is_return_parameter(palIdResult) ||
+        instanceIdProperty == nullptr || instanceIdProperty->GetElementSize() != sizeof(FGuid)) {
         return failure(getPalIdFunctionUnavailable);
     }
-    /** @brief 与 Palworld `FPalInstanceID` 的 UHT 字段顺序一致的返回值布局。 */
-    struct PalInstanceId {
-        FGuid PlayerUId;   /**< 帕鲁所属玩家的 GUID。 */
-        FGuid InstanceId;  /**< 唯一标识该帕鲁个体的 GUID。 */
-        FString DebugName; /**< 游戏内部调试名称；本 mod 不使用。 */
-    };
-    /** @brief `PalIndividualCharacterParameter:GetPalId` 的反射返回布局。 */
-    struct GetPalIdParams {
-        PalInstanceId ReturnValue; /**< 游戏写回的完整个体 ID。 */
-    } getPalIdParams;
-    parameter->ProcessEvent(getPalIdFunction, &getPalIdParams);
-    const auto& instanceId = getPalIdParams.ReturnValue.InstanceId;
+    FunctionParams palIdParams{getPalIdFunction};
+    parameter->ProcessEvent(getPalIdFunction, palIdParams.data());
+    auto* const palId = palIdResult->ContainerPtrToValuePtr<void>(palIdParams.data());
+    FGuid instanceId{};
+    instanceIdProperty->CopyCompleteValue(&instanceId,
+                                          instanceIdProperty->ContainerPtrToValuePtr<void>(palId));
     if (!instanceId.is_valid()) {
         return failure(individualIdUnavailable);
     }
 
-    auto* const getCharacterIdFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalIndividualCharacterParameter:GetCharacterID"));
-    if (getCharacterIdFunction == nullptr) {
+    const auto characterId = invoke<FName>(parameter, STR("GetCharacterID"));
+    if (!characterId.has_value()) {
         return failure(getCharacterIdFunctionUnavailable);
     }
-    /** @brief `PalIndividualCharacterParameter:GetCharacterID` 的返回参数布局。 */
-    struct GetCharacterIdParams {
-        FName ReturnValue; /**< 游戏写回的帕鲁 CharacterID。 */
-    } getCharacterIdParams;
-    parameter->ProcessEvent(getCharacterIdFunction, &getCharacterIdParams);
 
     return {
         .parameter = parameter,
@@ -272,7 +306,7 @@ struct SelectedPalTarget {
                     {
                         .instanceId = {instanceId.A, instanceId.B, instanceId.C, instanceId.D},
                     },
-                .name = text_encoding::to_utf8(getCharacterIdParams.ReturnValue.ToString()),
+                .name = text_encoding::to_utf8(characterId->ToString()),
             },
         .status = success,
         .holderCandidateCount = holderResolution.candidateCount,
@@ -313,15 +347,27 @@ inline auto get_main_container() -> UObject* {
     if (fn == nullptr) {
         return nullptr;
     }
-    /** @brief `TryGetContainerFromInventoryType` 的反射参数布局。 */
-    struct {
-        uint8_t Type; /**< `EPalPlayerInventoryType` 数值；0 表示 Common。 */
-        UObject* Out; /**< 游戏写回的非拥有容器指针。 */
-        bool Ret;     /**< 游戏函数写回的成功标志；当前实现以 `Out` 为准。 */
-    } p{};
-    p.Type = 0;  // EPalPlayerInventoryType::Common
-    inv->ProcessEvent(fn, &p);
-    return p.Out;
+    auto* const type =
+        CastField<FEnumProperty>(fn->FindProperty(FName(STR("inventoryType"), FNAME_Find)));
+    auto* const typeUnderlying = type == nullptr ? nullptr : type->GetUnderlyingProperty();
+    auto* const output =
+        CastField<FObjectPropertyBase>(fn->FindProperty(FName(STR("OutContainer"), FNAME_Find)));
+    auto* const result = CastField<FBoolProperty>(fn->GetReturnProperty());
+    if (!has_exact_parameter_count(fn, 3) || !is_input_parameter(type) ||
+        typeUnderlying == nullptr || !typeUnderlying->IsInteger() || !is_output_parameter(output) ||
+        !is_return_parameter(result)) {
+        return nullptr;
+    }
+    FunctionParams params{fn};
+    typeUnderlying->SetIntPropertyValue(type->ContainerPtrToValuePtr<void>(params.data()),
+                                        std::uint64_t{0});
+    inv->ProcessEvent(fn, params.data());
+    if (!result->GetPropertyValueInContainer(params.data())) {
+        return nullptr;
+    }
+    auto* const container =
+        output->GetObjectPropertyValue(output->ContainerPtrToValuePtr<void>(params.data()));
+    return is_valid(container) ? container : nullptr;
 }
 
 /**
@@ -332,17 +378,7 @@ inline auto get_main_container() -> UObject* {
  * @warning 只能在游戏线程调用。
  */
 inline auto container_num(UObject* container) -> int32_t {
-    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Num"));
-    if (fn == nullptr || container == nullptr) {
-        return 0;
-    }
-    /** @brief `PalItemContainer:Num` 的返回参数布局。 */
-    struct {
-        int32_t Ret; /**< 游戏函数写回的槽位数量。 */
-    } n{};
-    container->ProcessEvent(fn, &n);
-    return n.Ret;
+    return invoke<int32>(container, STR("Num")).value_or(0);
 }
 
 /**
@@ -354,19 +390,27 @@ inline auto container_num(UObject* container) -> int32_t {
  * @warning 只能在游戏线程调用。
  */
 inline auto container_get(UObject* container, int32_t index) -> UObject* {
-    UFunction* fn = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr, STR("/Script/Pal.PalItemContainer:Get"));
-    if (fn == nullptr || container == nullptr) {
+    if (!is_valid(container) || index < 0) {
         return nullptr;
     }
-    /** @brief `PalItemContainer:Get` 的反射参数布局。 */
-    struct {
-        int32_t Index; /**< 传入游戏函数的槽位索引。 */
-        UObject* Slot; /**< 游戏函数写回的非拥有槽位指针。 */
-    } gp{};
-    gp.Index = index;
-    container->ProcessEvent(fn, &gp);
-    return gp.Slot;
+    auto* const function = container->GetFunctionByNameInChain(STR("Get"));
+    auto* const input =
+        function == nullptr
+            ? nullptr
+            : CastField<FIntProperty>(function->FindProperty(FName(STR("Index"), FNAME_Find)));
+    auto* const result = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!has_exact_parameter_count(function, 2) || !is_input_parameter(input) ||
+        !is_return_parameter(result)) {
+        return nullptr;
+    }
+    FunctionParams params{function};
+    input->SetPropertyValueInContainer(params.data(), index);
+    container->ProcessEvent(function, params.data());
+    auto* const slot =
+        result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
+    return is_valid(slot) ? slot : nullptr;
 }
 
 /**
@@ -470,24 +514,39 @@ inline auto give_items(const std::string& itemId, int32 count) -> void {
         return;
     }
     const std::wstring wide = text_encoding::widen_ascii(itemId);
-    /** @brief `AddItem_ServerInternal` 的反射参数布局。 */
-    struct {
-        FName StaticItemId;   /**< 要添加的物品 Raw ID。 */
-        int32_t Count;        /**< 要添加的物品数量。 */
-        bool IsAssignPassive; /**< 是否为生成物品分配随机被动；本 mod 固定为 `false`。 */
-        float LogDelay;       /**< 游戏通知延迟；本 mod 固定为 0。 */
-        bool bNotifyLog;      /**< 是否显示游戏内获得日志；本 mod 固定为 `false`。 */
-        int32_t Result;       /**< 游戏函数写回的添加结果枚举数值。 */
-    } params{};
-    params.StaticItemId = FName(wide.c_str());
-    params.Count = count;
-    params.IsAssignPassive = false;
-    params.LogDelay = 0.0F;
-    params.bNotifyLog = false;
-    inventory->ProcessEvent(fn, &params);
+    auto* const id =
+        CastField<FNameProperty>(fn->FindProperty(FName(STR("StaticItemId"), FNAME_Find)));
+    auto* const itemCount =
+        CastField<FIntProperty>(fn->FindProperty(FName(STR("Count"), FNAME_Find)));
+    auto* const assignPassive =
+        CastField<FBoolProperty>(fn->FindProperty(FName(STR("IsAssignPassive"), FNAME_Find)));
+    auto* const logDelay =
+        CastField<FFloatProperty>(fn->FindProperty(FName(STR("LogDelay"), FNAME_Find)));
+    auto* const notifyLog =
+        CastField<FBoolProperty>(fn->FindProperty(FName(STR("bNotifyLog"), FNAME_Find)));
+    auto* const result = CastField<FEnumProperty>(fn->GetReturnProperty());
+    auto* const resultUnderlying = result == nullptr ? nullptr : result->GetUnderlyingProperty();
+    if (!has_exact_parameter_count(fn, 6) || !is_input_parameter(id) ||
+        !is_input_parameter(itemCount) || !is_input_parameter(assignPassive) ||
+        !is_input_parameter(logDelay) || !is_input_parameter(notifyLog) ||
+        !is_return_parameter(result) || resultUnderlying == nullptr ||
+        !resultUnderlying->IsInteger()) {
+        Output::send<LogLevel::Warning>(
+            STR("give_items: AddItem_ServerInternal signature unavailable\n"));
+        return;
+    }
+    FunctionParams params{fn};
+    id->SetPropertyValueInContainer(params.data(), FName(wide.c_str()));
+    itemCount->SetPropertyValueInContainer(params.data(), count);
+    assignPassive->SetPropertyValueInContainer(params.data(), false);
+    logDelay->SetPropertyValueInContainer(params.data(), 0.0F);
+    notifyLog->SetPropertyValueInContainer(params.data(), false);
+    inventory->ProcessEvent(fn, params.data());
+    const auto operationResult = resultUnderlying->GetUnsignedIntPropertyValue(
+        result->ContainerPtrToValuePtr<void>(params.data()));
     Output::send<LogLevel::Warning>(
-        STR("give_items: AddItem_ServerInternal('{}', x{}) -> result={}\n"), wide, params.Count,
-        params.Result);
+        STR("give_items: AddItem_ServerInternal('{}', x{}) -> result={}\n"), wide, count,
+        operationResult);
 }
 
 /**
@@ -517,17 +576,28 @@ inline auto get_ui_utility() -> UObject* {
  */
 inline auto localized_item_name(UObject* utility, UFunction* function, UObject* worldContext,
                                 const FName& id) -> std::string {
-    if (utility == nullptr || function == nullptr || worldContext == nullptr) {
+    auto* const context = function == nullptr
+                              ? nullptr
+                              : CastField<FObjectPropertyBase>(function->FindProperty(
+                                    FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const itemId = function == nullptr ? nullptr
+                                             : CastField<FNameProperty>(function->FindProperty(
+                                                   FName(STR("StaticItemId"), FNAME_Find)));
+    auto* const name =
+        function == nullptr
+            ? nullptr
+            : CastField<FTextProperty>(function->FindProperty(FName(STR("outName"), FNAME_Find)));
+    if (!is_valid(utility) || !is_valid(worldContext) || !has_exact_parameter_count(function, 3) ||
+        !is_input_parameter(context) || !is_input_parameter(itemId) || !is_output_parameter(name)) {
         return {};
     }
-    /** @brief `PalUIUtility:GetItemName` 的反射参数布局。 */
-    struct Params {
-        UObject* WorldContextObject; /**< 非拥有世界上下文对象。 */
-        FName StaticItemId;          /**< 要查询的物品 Raw ID。 */
-        FText OutName;               /**< 游戏函数写回的本地化名称。 */
-    } params{.WorldContextObject = worldContext, .StaticItemId = id};
-    utility->ProcessEvent(function, &params);
-    return text_encoding::to_utf8(params.OutName.ToString());
+    FunctionParams params{function};
+    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
+                                    worldContext);
+    itemId->SetPropertyValueInContainer(params.data(), id);
+    utility->ProcessEvent(function, params.data());
+    const auto* const localized = name->ContainerPtrToValuePtr<FText>(params.data());
+    return localized == nullptr ? std::string{} : text_encoding::to_utf8(localized->ToString());
 }
 
 /**
@@ -548,12 +618,19 @@ inline auto localized_item_name(UObject* utility, UFunction* function, UObject* 
         return nullptr;
     }
 
-    struct Params {
-        UObject* WorldContextObject{};
-        UObject* ReturnValue{};
-    } params{.WorldContextObject = worldContext};
-    utility->ProcessEvent(function, &params);
-    auto* manager = params.ReturnValue;
+    auto* const context = CastField<FObjectPropertyBase>(
+        function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const result = CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!has_exact_parameter_count(function, 2) || !is_input_parameter(context) ||
+        !is_return_parameter(result)) {
+        return nullptr;
+    }
+    FunctionParams params{function};
+    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
+                                    worldContext);
+    utility->ProcessEvent(function, params.data());
+    auto* manager =
+        result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
     if (!is_valid(manager)) {
         return nullptr;
     }

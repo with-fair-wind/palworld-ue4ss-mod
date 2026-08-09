@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(${TARGET} SHARED
     src/mod/dllmain.cpp
     src/mod/editor_ui.cpp
+    src/game/pal_base_camp_reflection.cpp
     src/items/item_ui.cpp
     src/skills/pal_skills.cpp
     src/skills/skill_ui.cpp
@@ -30,6 +31,7 @@ add_library(${TARGET} SHARED
     src/pal_stats/stat_ui.cpp
     src/pal_remote_palbox/remote_palbox_runtime.cpp
     src/pal_remote_palbox/remote_palbox_ui.cpp
+    src/pal_revive/pal_revive.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)

@@ -27,6 +27,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/text_encoding.hpp>
 #include <mod/mod_core.hpp>
+#include <pal_revive/pal_revive.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
 
 using namespace RC;
@@ -128,6 +129,15 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         return;
     }
 
+    process_runtime_services(deltaSeconds);
+    const auto worldContextReady = process_inventory_requests(deltaSeconds);
+    process_pal_edit_requests();
+    process_initialization_tasks(worldContextReady);
+    process_utility_requests();
+    publish_runtime_state();
+}
+
+auto PalworldEditorMod::process_runtime_services(const float deltaSeconds) -> void {
     if (baseSharingSettingDirty_.exchange(false)) {
         baseResourceBridge_.set_enabled(requestedBaseSharingEnabled_.load());
     }
@@ -153,7 +163,9 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
             Output::send<LogLevel::Verbose>(STR("Object Name: {}\n"), object->GetFullName());
         }
     }
+}
 
+auto PalworldEditorMod::process_inventory_requests(const float deltaSeconds) -> bool {
     // Give items
     std::string item;
     int count = 0;
@@ -220,6 +232,10 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         }
     }
 
+    return worldContextReady;
+}
+
+auto PalworldEditorMod::process_pal_edit_requests() -> void {
     std::optional<skill_editor::WorldBoundRequest> selectionRequest;
     {
         const std::lock_guard lock(selectionRequestMutex_);
@@ -279,14 +295,20 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     if (selectionRequested) {
         if (resolvedPal.has_value() && resolution.resolved &&
             selectedTarget_.confirm(resolution.observation) && worldSession_.confirm_target()) {
-            skillRuntimeSnapshot_.state = skillGateway_.read_state(
+            auto skillRead = skillGateway_.read_state(
                 reinterpret_cast<skill_editor::SkillTarget>(resolvedPal->parameter));
+            skillRuntimeSnapshot_.state = std::move(skillRead.state);
             skillRuntimeSnapshot_.palStat = statGateway_.read_stats(
                 reinterpret_cast<pal_stats::PalStatTarget>(resolvedPal->parameter));
             skillRuntimeSnapshot_.palIdentity = identityGateway_.read_identity(
                 reinterpret_cast<pal_identity::PalIdentityTarget>(resolvedPal->parameter),
                 resolvedPal->spawnStateKnown, resolvedPal->selectedIsSpawned);
-            skillRuntimeSnapshot_.lastResult.clear();
+            if (!skillRead.passiveReadable || !skillRead.activeReadable) {
+                skillRuntimeSnapshot_.lastResult =
+                    "技能读取不完整：当前不可安全编辑未成功读取的技能分区。";
+            } else {
+                skillRuntimeSnapshot_.lastResult.clear();
+            }
         } else {
             skillRuntimeSnapshot_.palStat = {};
             skillRuntimeSnapshot_.palIdentity = {};
@@ -380,7 +402,9 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         }
         skillSnapshotDirty_ = true;
     }
+}
 
+auto PalworldEditorMod::process_initialization_tasks(const bool worldContextReady) -> void {
     const bool manualRefreshRequested = wantRefreshSkillCatalog_.exchange(false);
     const bool catalogReady =
         skill_editor::catalog_is_ready_for_editing(skillRuntimeSnapshot_.catalog);
@@ -392,7 +416,10 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         refresh_skill_catalog_on_game_thread();
     }
     advance_passive_classification_on_game_thread();
+}
 
+auto PalworldEditorMod::publish_runtime_state() -> void {
+    const auto& resolution = targetResolutionState_.current();
     const auto update_runtime_value = [this](auto& current, auto next) {
         if (current != next) {
             current = std::move(next);
@@ -426,7 +453,9 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         skillSnapshotDirty_ = true;
     }
     publish_skill_snapshot_if_dirty();
+}
 
+auto PalworldEditorMod::process_utility_requests() -> void {
     // Revive team pals
     if (wantReviveTeam_.exchange(false)) {
         revive_team_pals();
@@ -542,88 +571,36 @@ auto PalworldEditorMod::set_grapple_runtime_status(std::string status) -> void {
 }
 
 auto PalworldEditorMod::revive_team_pals() -> void {
-    // 必须解析本地玩家自己的 Holder：FindFirstOf 会命中 CDO/非玩家实例（槽位全空）。
-    auto* const holder = pal_game::resolve_local_otomo_holder().holder;
-    if (!pal_game::is_valid(holder)) {
-        skillRuntimeSnapshot_.lastResult = "复活失败：未找到队伍 Holder。";
-        skillSnapshotDirty_ = true;
-        return;
+    const auto result = pal_revive::revive_team_pals();
+    switch (result.error) {
+        case pal_revive::TeamReviveError::holderUnavailable:
+            skillRuntimeSnapshot_.lastResult = "复活失败：未找到队伍 Holder。";
+            skillSnapshotDirty_ = true;
+            return;
+        case pal_revive::TeamReviveError::invalidSlotCount:
+            skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位数异常。";
+            skillSnapshotDirty_ = true;
+            return;
+        case pal_revive::TeamReviveError::handleInterfaceUnavailable:
+            skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位接口不可用。";
+            skillSnapshotDirty_ = true;
+            return;
+        case pal_revive::TeamReviveError::none:
+            break;
     }
 
-    const auto maxNum = pal_game::invoke<int>(holder, STR("GetMaxOtomoNum")).value_or(0);
-    if (maxNum <= 0 || maxNum > 20) {
-        skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位数异常。";
-        skillSnapshotDirty_ = true;
-        return;
-    }
-
-    int revivedCount = 0;
-    for (int slotIndex = 0; slotIndex < maxNum; ++slotIndex) {
-        // GetOtomoIndividualHandle(slotIndex) → Handle（用直接 struct，和 pal_game.hpp 一致）
-        auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-            nullptr, nullptr,
-            STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
-        if (getHandleFunction == nullptr) {
-            continue;
-        }
-        struct GetHandleParams {
-            int32_t SlotIndex{};
-            UObject* ReturnValue{};
-        } handleParams{.SlotIndex = slotIndex};
-        holder->ProcessEvent(getHandleFunction, &handleParams);
-        auto* const handle = handleParams.ReturnValue;
-        if (!pal_game::is_valid(handle)) {
-            continue;
-        }
-
-        // Handle → TryGetIndividualParameter → Parameter
-        auto* const parameter =
-            pal_game::invoke<RC::Unreal::UObject*>(handle, STR("TryGetIndividualParameter"))
-                .value_or(nullptr);
-        if (!pal_game::is_valid(parameter)) {
-            continue;
-        }
-
-        // 检查 PhysicalHealth：Healthful=0, MinorInjury=1, Severe=2, Dying=3, DeadBody=4
-        // CloudCemetery=5。非 Healthful 都需要复活。
-        const auto physicalHealth =
-            pal_game::invoke<int>(parameter, STR("GetPhysicalHealth")).value_or(0);
-        if (physicalHealth <= 0) {
-            continue;  // 已经 Healthful，跳过
-        }
-        auto* const setHealthFunction =
-            parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
-        if (setHealthFunction == nullptr) {
-            continue;
-        }
-        pal_game::FunctionParams healthParams{setHealthFunction};
-        auto* const healthProp =
-            setHealthFunction->FindProperty(FName(STR("PhysicalHealth"), FNAME_Find));
-        if (auto* const enumProp = CastField<FEnumProperty>(healthProp)) {
-            enumProp->GetUnderlyingProperty()->SetIntPropertyValue(
-                enumProp->ContainerPtrToValuePtr<void>(healthParams.data()),
-                static_cast<int64_t>(0));
-        }
-        parameter->ProcessEvent(setHealthFunction, healthParams.data());
-
-        // 恢复 HP（SetPhysicalHealth 只改状态枚举，HP 仍为 0，需要 FullRecoveryHP 补满）
-        auto* const fullRecoveryFunction =
-            parameter->GetFunctionByNameInChain(STR("FullRecoveryHP"));
-        if (fullRecoveryFunction != nullptr) {
-            parameter->ProcessEvent(fullRecoveryFunction, nullptr);
-        }
-
-        // 触发存档参数复制，让游戏 Actor/客户端同步复活状态
-        auto* const onRepFunction = parameter->GetFunctionByNameInChain(STR("OnRep_SaveParameter"));
-        if (onRepFunction != nullptr && onRepFunction->GetParmsSize() == 0) {
-            parameter->ProcessEvent(onRepFunction, nullptr);
-        }
-        ++revivedCount;
-    }
-
-    if (revivedCount > 0) {
+    if (result.rollbackFailed) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：写后校验失败且无法完整回滚；本次操作已停止。";
+    } else if (result.revivedCount > 0 && result.failedCount > 0) {
+        skillRuntimeSnapshot_.lastResult = "复活了 " + std::to_string(result.revivedCount) +
+                                           " 只队伍帕鲁，另有 " +
+                                           std::to_string(result.failedCount) + " 只未能安全修改。";
+    } else if (result.revivedCount > 0) {
         skillRuntimeSnapshot_.lastResult =
-            "复活了 " + std::to_string(revivedCount) + " 只队伍帕鲁。";
+            "复活了 " + std::to_string(result.revivedCount) + " 只队伍帕鲁。";
+    } else if (result.failedCount > 0) {
+        skillRuntimeSnapshot_.lastResult =
+            "复活失败：有 " + std::to_string(result.failedCount) + " 只帕鲁无法安全修改。";
     } else {
         skillRuntimeSnapshot_.lastResult = "队伍中没有需要复活的帕鲁。";
     }
