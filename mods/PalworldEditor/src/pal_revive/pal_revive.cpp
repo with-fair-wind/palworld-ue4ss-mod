@@ -4,7 +4,6 @@
  */
 #include <cstdint>
 #include <optional>
-#include <utility>
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/Property/FEnumProperty.hpp>
@@ -41,47 +40,6 @@ enum class ReviveAttemptStatus : std::uint8_t {
     rollbackFailed,
 };
 
-[[nodiscard]] auto read_no_param_int(UObject* object, const TCHAR* functionName)
-    -> std::optional<int32> {
-    auto* const function = pal_game::is_valid(object)
-                               ? object->GetFunctionByNameInChain(functionName)
-                               : nullptr;
-    auto* const returnProperty =
-        function == nullptr ? nullptr : CastField<FIntProperty>(function->GetReturnProperty());
-    if (returnProperty == nullptr ||
-        std::cmp_not_equal(function->GetParmsSize(), returnProperty->GetElementSize()) ||
-        !returnProperty->HasAnyPropertyFlags(CPF_Parm) ||
-        !returnProperty->HasAnyPropertyFlags(CPF_ReturnParm)) {
-        return std::nullopt;
-    }
-
-    pal_game::FunctionParams params{function};
-    object->ProcessEvent(function, params.data());
-    return returnProperty->GetPropertyValueInContainer(params.data());
-}
-
-[[nodiscard]] auto read_no_param_object(UObject* object, const TCHAR* functionName)
-    -> UObject* {
-    auto* const function = pal_game::is_valid(object)
-                               ? object->GetFunctionByNameInChain(functionName)
-                               : nullptr;
-    auto* const returnProperty = function == nullptr
-                                     ? nullptr
-                                     : CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (returnProperty == nullptr ||
-        std::cmp_not_equal(function->GetParmsSize(), returnProperty->GetElementSize()) ||
-        !returnProperty->HasAnyPropertyFlags(CPF_Parm) ||
-        !returnProperty->HasAnyPropertyFlags(CPF_ReturnParm)) {
-        return nullptr;
-    }
-
-    pal_game::FunctionParams params{function};
-    object->ProcessEvent(function, params.data());
-    auto* const result = returnProperty->GetObjectPropertyValue(
-        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(result) ? result : nullptr;
-}
-
 [[nodiscard]] auto prepare_revive_access(UObject* parameter) -> std::optional<ReviveAccess> {
     if (!pal_game::is_valid(parameter)) {
         return std::nullopt;
@@ -92,11 +50,10 @@ enum class ReviveAttemptStatus : std::uint8_t {
     auto* const saveStruct = saveProperty == nullptr ? nullptr : saveProperty->GetStruct().Get();
     void* const saveParameter =
         saveProperty == nullptr ? nullptr : saveProperty->ContainerPtrToValuePtr<void>(parameter);
-    auto* const physicalHealth =
-        saveStruct == nullptr
-            ? nullptr
-            : CastField<FEnumProperty>(
-                  saveStruct->FindProperty(FName(STR("PhysicalHealth"), FNAME_Find)));
+    auto* const physicalHealth = saveStruct == nullptr
+                                     ? nullptr
+                                     : CastField<FEnumProperty>(saveStruct->FindProperty(
+                                           FName(STR("PhysicalHealth"), FNAME_Find)));
     auto* const physicalHealthUnderlying =
         physicalHealth == nullptr ? nullptr : physicalHealth->GetUnderlyingProperty();
     auto* const hpProperty =
@@ -114,10 +71,9 @@ enum class ReviveAttemptStatus : std::uint8_t {
 
     auto* const setPhysicalHealth = parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
     auto* const setPhysicalHealthInput =
-        setPhysicalHealth == nullptr
-            ? nullptr
-            : CastField<FEnumProperty>(
-                  setPhysicalHealth->FindProperty(FName(STR("PhysicalHealth"), FNAME_Find)));
+        setPhysicalHealth == nullptr ? nullptr
+                                     : CastField<FEnumProperty>(setPhysicalHealth->FindProperty(
+                                           FName(STR("PhysicalHealth"), FNAME_Find)));
     auto* const setPhysicalHealthInputUnderlying =
         setPhysicalHealthInput == nullptr ? nullptr
                                           : setPhysicalHealthInput->GetUnderlyingProperty();
@@ -130,10 +86,12 @@ enum class ReviveAttemptStatus : std::uint8_t {
         hp == nullptr || hpValue == nullptr || setPhysicalHealth == nullptr ||
         setPhysicalHealthInput == nullptr || setPhysicalHealthInputUnderlying == nullptr ||
         !setPhysicalHealthInputUnderlying->IsInteger() ||
-        !setPhysicalHealthInput->HasAnyPropertyFlags(CPF_Parm) ||
-        setPhysicalHealthInput->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm) ||
-        fullRecoveryHp == nullptr || fullRecoveryHp->GetParmsSize() != 0 ||
-        onRepSaveParameter == nullptr || onRepSaveParameter->GetParmsSize() != 0) {
+        !pal_game::has_exact_parameter_count(setPhysicalHealth, 1) ||
+        !pal_game::is_input_parameter(setPhysicalHealthInput) ||
+        !pal_game::has_exact_parameter_count(fullRecoveryHp, 0) ||
+        fullRecoveryHp->GetReturnProperty() != nullptr ||
+        !pal_game::has_exact_parameter_count(onRepSaveParameter, 0) ||
+        onRepSaveParameter->GetReturnProperty() != nullptr) {
         return std::nullopt;
     }
 
@@ -159,8 +117,8 @@ enum class ReviveAttemptStatus : std::uint8_t {
     };
 }
 
-auto set_physical_health(UObject* parameter, const ReviveAccess& access,
-                         const std::int64_t value) -> void {
+auto set_physical_health(UObject* parameter, const ReviveAccess& access, const std::int64_t value)
+    -> void {
     pal_game::FunctionParams params{access.setPhysicalHealth};
     access.setPhysicalHealthInputUnderlying->SetIntPropertyValue(
         access.setPhysicalHealthInput->ContainerPtrToValuePtr<void>(params.data()), value);
@@ -232,7 +190,7 @@ auto revive_team_pals() -> TeamReviveResult {
         return result;
     }
 
-    const auto maxNum = read_no_param_int(holder, STR("GetMaxOtomoNum")).value_or(0);
+    const auto maxNum = pal_game::invoke<int32>(holder, STR("GetMaxOtomoNum")).value_or(0);
     if (maxNum <= 0 || maxNum > 20) {
         result.error = TeamReviveError::invalidSlotCount;
         return result;
@@ -248,7 +206,8 @@ auto revive_team_pals() -> TeamReviveResult {
             continue;
         }
 
-        auto* const parameter = read_no_param_object(handle, STR("TryGetIndividualParameter"));
+        auto* const parameter =
+            pal_game::invoke<UObject*>(handle, STR("TryGetIndividualParameter")).value_or(nullptr);
         if (!pal_game::is_valid(parameter)) {
             continue;
         }

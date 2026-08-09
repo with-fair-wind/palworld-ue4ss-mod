@@ -47,15 +47,22 @@ namespace {
     value = false;
     auto* utility = pal_utility();
     auto* function = utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
+    auto* const context = function == nullptr
+                              ? nullptr
+                              : CastField<FObjectPropertyBase>(function->FindProperty(
+                                    FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const result =
+        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) ||
+        !pal_game::is_input_parameter(context) || !pal_game::is_return_parameter(result)) {
         return false;
     }
-    struct Params {
-        UObject* WorldContextObject{};
-        bool ReturnValue{};
-    } params{.WorldContextObject = worldContext};
-    utility->ProcessEvent(function, &params);
-    value = params.ReturnValue;
+    FunctionParams params{function};
+    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
+                                    worldContext);
+    utility->ProcessEvent(function, params.data());
+    value = result->GetPropertyValueInContainer(params.data());
     return true;
 }
 
@@ -64,51 +71,62 @@ namespace {
     value = nullptr;
     auto* utility = pal_utility();
     auto* function = utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
+    auto* const context = function == nullptr
+                              ? nullptr
+                              : CastField<FObjectPropertyBase>(function->FindProperty(
+                                    FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const result = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) ||
+        !pal_game::is_input_parameter(context) || !pal_game::is_return_parameter(result)) {
         return false;
     }
-    struct Params {
-        UObject* WorldContextObject{};
-        UObject* ReturnValue{};
-    } params{.WorldContextObject = worldContext};
-    utility->ProcessEvent(function, &params);
-    value = params.ReturnValue;
-    return value != nullptr;
+    FunctionParams params{function};
+    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
+                                    worldContext);
+    utility->ProcessEvent(function, params.data());
+    value = result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
+    return pal_game::is_valid(value);
 }
 
 [[nodiscard]] auto try_get_guid(UObject* target, const CharType* functionName, FGuid& output)
     -> bool {
-    if (target == nullptr) {
+    if (!pal_game::is_valid(target)) {
         return false;
     }
     auto* function = target->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
+    auto* const result =
+        function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(result) || result->GetElementSize() != sizeof(FGuid)) {
         return false;
     }
-    struct Params {
-        FGuid ReturnValue{};
-    } params;
-    target->ProcessEvent(function, &params);
-    output = params.ReturnValue;
+    FunctionParams params{function};
+    target->ProcessEvent(function, params.data());
+    result->CopyCompleteValue(&output, result->ContainerPtrToValuePtr<void>(params.data()));
     return to_key(output).valid();
 }
 
 [[nodiscard]] auto try_get_object(UObject* target, const CharType* functionName, UObject*& output)
     -> bool {
     output = nullptr;
-    if (target == nullptr) {
+    if (!pal_game::is_valid(target)) {
         return false;
     }
     auto* function = target->GetFunctionByNameInChain(functionName);
-    if (function == nullptr) {
+    auto* const result = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(result)) {
         return false;
     }
-    struct Params {
-        UObject* ReturnValue{};
-    } params;
-    target->ProcessEvent(function, &params);
-    output = params.ReturnValue;
-    return output != nullptr;
+    FunctionParams params{function};
+    target->ProcessEvent(function, params.data());
+    output = result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
+    return pal_game::is_valid(output);
 }
 
 [[nodiscard]] auto read_object_property(UObject* object, const CharType* propertyName) -> UObject* {
@@ -128,17 +146,29 @@ namespace {
     auto* function = utility == nullptr
                          ? nullptr
                          : utility->GetFunctionByNameInChain(STR("GetGuildByPlayerUId"));
-    if (function == nullptr) {
+    auto* const context = function == nullptr
+                              ? nullptr
+                              : CastField<FObjectPropertyBase>(function->FindProperty(
+                                    FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const player = function == nullptr ? nullptr
+                                             : CastField<FStructProperty>(function->FindProperty(
+                                                   FName(STR("PlayerUId"), FNAME_Find)));
+    auto* const result = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(context) || !pal_game::is_input_parameter(player) ||
+        player->GetElementSize() != sizeof(FGuid) || !pal_game::is_return_parameter(result)) {
         return false;
     }
-    struct Params {
-        UObject* WorldContextObject{};
-        FGuid PlayerUId{};
-        UObject* ReturnValue{};
-    } params{.WorldContextObject = worldContext, .PlayerUId = playerId};
-    utility->ProcessEvent(function, &params);
-    guild = params.ReturnValue;
-    return guild != nullptr;
+    FunctionParams params{function};
+    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
+                                    worldContext);
+    player->CopyCompleteValue(player->ContainerPtrToValuePtr<void>(params.data()), &playerId);
+    utility->ProcessEvent(function, params.data());
+    guild = result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
+    return pal_game::is_valid(guild);
 }
 
 [[nodiscard]] auto try_resolve_local_guild(UObject* worldContext, FGuid& guildId) -> bool {
@@ -289,10 +319,12 @@ namespace {
 }
 
 auto notify_array_changed(UObject* object, const CharType* functionName) -> void {
-    if (object == nullptr) {
+    if (!pal_game::is_valid(object)) {
         return;
     }
-    if (auto* function = object->GetFunctionByNameInChain(functionName); function != nullptr) {
+    if (auto* function = object->GetFunctionByNameInChain(functionName);
+        pal_game::has_exact_parameter_count(function, 0) &&
+        function->GetReturnProperty() == nullptr) {
         object->ProcessEvent(function, nullptr);
     }
 }
@@ -834,8 +866,10 @@ namespace {
         function == nullptr ? nullptr
                             : CastField<FObjectPropertyBase>(
                                   function->FindProperty(FName(STR("ConcreteModel"), FNAME_Find)));
-    if (function == nullptr || concreteProperty == nullptr || concreteModel == nullptr ||
-        !concreteProperty->HasAnyPropertyFlags(CPF_Parm)) {
+    if (!pal_game::is_valid(module) || !pal_game::is_valid(concreteModel) ||
+        !pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(concreteProperty) ||
+        function->GetReturnProperty() != nullptr) {
         return false;
     }
     FunctionParams params{function};
@@ -1032,8 +1066,9 @@ auto notify_building_inventory_changed(UObject* buildModel, UObject* worldContex
         function == nullptr ? nullptr
                             : CastField<FObjectPropertyBase>(
                                   function->FindProperty(FName(STR("Container"), FNAME_Find)));
-    if (function == nullptr || containerProperty == nullptr ||
-        !containerProperty->HasAnyPropertyFlags(CPF_Parm)) {
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(containerProperty) ||
+        function->GetReturnProperty() != nullptr) {
         error = "建造模型缺少 OnUpdateInventory(Container) 接口。";
         return false;
     }

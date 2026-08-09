@@ -41,32 +41,6 @@ namespace {
  */
 enum class EPalWazaID : std::uint16_t {};
 
-[[nodiscard]] auto has_exact_parameter_count(UFunction* function, const std::size_t expected)
-    -> bool {
-    if (function == nullptr) {
-        return false;
-    }
-    std::size_t count{};
-    for (auto* property :
-         TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
-        if (property->HasAnyPropertyFlags(CPF_Parm)) {
-            ++count;
-        }
-    }
-    return count == expected;
-}
-
-[[nodiscard]] auto is_input_parameter(FProperty* property) -> bool {
-    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
-           !property->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm);
-}
-
-[[nodiscard]] auto is_output_parameter(FProperty* property) -> bool {
-    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
-           property->HasAnyPropertyFlags(CPF_OutParm) &&
-           !property->HasAnyPropertyFlags(CPF_ReturnParm);
-}
-
 /**
  * @brief 把整数目标句柄还原为当前有效的帕鲁 UObject。
  * @param[in] target 由非拥有 UObject 指针编码的技能目标。
@@ -124,8 +98,10 @@ template <typename T>
             ? nullptr
             : CastField<FTextProperty>(function->FindProperty(FName(STR("outName"), FNAME_Find)));
     if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !has_exact_parameter_count(function, 3) || !is_input_parameter(contextProperty) ||
-        !is_input_parameter(idProperty) || !is_output_parameter(outNameProperty)) {
+        !pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(contextProperty) ||
+        !pal_game::is_input_parameter(idProperty) ||
+        !pal_game::is_output_parameter(outNameProperty)) {
         return {};
     }
 
@@ -164,10 +140,12 @@ template <typename T>
             ? nullptr
             : CastField<FTextProperty>(function->FindProperty(FName(STR("outName"), FNAME_Find)));
     if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !has_exact_parameter_count(function, 3) || !is_input_parameter(contextProperty) ||
-        !is_input_parameter(idProperty) || idUnderlying == nullptr || !idUnderlying->IsInteger() ||
+        !pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(contextProperty) ||
+        !pal_game::is_input_parameter(idProperty) || idUnderlying == nullptr ||
+        !idUnderlying->IsInteger() ||
         static_cast<std::size_t>(idUnderlying->GetElementSize()) != sizeof(EPalWazaID) ||
-        !is_output_parameter(outNameProperty)) {
+        !pal_game::is_output_parameter(outNameProperty)) {
         return {};
     }
 
@@ -191,9 +169,9 @@ template <typename T>
         function == nullptr ? nullptr
                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
     if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !has_exact_parameter_count(function, 2) || !is_input_parameter(contextProperty) ||
-        returnProperty == nullptr || !returnProperty->HasAnyPropertyFlags(CPF_Parm) ||
-        !returnProperty->HasAnyPropertyFlags(CPF_ReturnParm)) {
+        !pal_game::has_exact_parameter_count(function, 2) ||
+        !pal_game::is_input_parameter(contextProperty) ||
+        !pal_game::is_return_parameter(returnProperty)) {
         return nullptr;
     }
 
@@ -225,8 +203,11 @@ template <typename T>
                                          FName(STR("Category"), FNAME_Find)));
     auto* const categoryUnderlying =
         categoryProp == nullptr ? nullptr : categoryProp->GetUnderlyingProperty();
-    if (typeUnderlying == nullptr || returnProperty == nullptr || outDataProp == nullptr ||
-        categoryUnderlying == nullptr) {
+    if (!pal_game::has_exact_parameter_count(findWazaFunction, 3) ||
+        !pal_game::is_input_parameter(typeEnum) || typeUnderlying == nullptr ||
+        !typeUnderlying->IsInteger() || !pal_game::is_output_parameter(outDataProp) ||
+        !pal_game::is_return_parameter(returnProperty) || categoryUnderlying == nullptr ||
+        !categoryUnderlying->IsInteger()) {
         return std::nullopt;
     }
 
@@ -273,11 +254,10 @@ struct ActiveWriteFunctions {
             ? nullptr
             : CastField<FEnumProperty>(add->FindProperty(FName(STR("WazaId"), FNAME_Find)));
     auto* const underlying = wazaId == nullptr ? nullptr : wazaId->GetUnderlyingProperty();
-    if (clear == nullptr || clear->GetParmsSize() != 0 || clear->GetReturnProperty() != nullptr ||
-        add == nullptr || add->GetReturnProperty() != nullptr || wazaId == nullptr ||
-        !wazaId->HasAnyPropertyFlags(CPF_Parm) ||
-        wazaId->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm) || underlying == nullptr ||
-        !underlying->IsInteger() || add->GetParmsSize() != wazaId->GetElementSize()) {
+    if (!pal_game::has_exact_parameter_count(clear, 0) || clear->GetReturnProperty() != nullptr ||
+        !pal_game::has_exact_parameter_count(add, 1) || add->GetReturnProperty() != nullptr ||
+        !pal_game::is_input_parameter(wazaId) || underlying == nullptr ||
+        !underlying->IsInteger()) {
         return std::nullopt;
     }
     return ActiveWriteFunctions{
@@ -422,8 +402,9 @@ struct ActiveWriteFunctions {
 
 [[nodiscard]] auto notify_mastered_waza_changed(UObject* pal, const MasteredWazaAccess& access)
     -> bool {
-    if (!pal_game::is_valid(pal) || access.onRepSaveParameter == nullptr ||
-        access.onRepSaveParameter->GetParmsSize() != 0) {
+    if (!pal_game::is_valid(pal) ||
+        !pal_game::has_exact_parameter_count(access.onRepSaveParameter, 0) ||
+        access.onRepSaveParameter->GetReturnProperty() != nullptr) {
         return false;
     }
     pal->ProcessEvent(access.onRepSaveParameter, nullptr);
@@ -468,7 +449,8 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target)
             : CastField<FArrayProperty>(passiveFunction->GetReturnProperty());
     auto* const passiveElement =
         passiveArray == nullptr ? nullptr : CastField<FNameProperty>(passiveArray->GetInner());
-    if (passiveFunction != nullptr && passiveArray != nullptr && passiveElement != nullptr &&
+    if (pal_game::has_exact_parameter_count(passiveFunction, 1) &&
+        pal_game::is_return_parameter(passiveArray) && passiveElement != nullptr &&
         !(!!(passiveArray->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator))) {
         pal_game::FunctionParams params{passiveFunction};
         pal->ProcessEvent(passiveFunction, params.data());
@@ -495,8 +477,9 @@ auto PalSkillGateway::read_state(const skill_editor::SkillTarget target)
     auto* const activeUnderlying =
         activeElement == nullptr ? nullptr : activeElement->GetUnderlyingProperty();
     pal = to_pal(target);
-    if (pal != nullptr && activeFunction != nullptr && activeArray != nullptr &&
-        activeElement != nullptr && activeUnderlying != nullptr && activeUnderlying->IsInteger() &&
+    if (pal != nullptr && pal_game::has_exact_parameter_count(activeFunction, 1) &&
+        pal_game::is_return_parameter(activeArray) && activeElement != nullptr &&
+        activeUnderlying != nullptr && activeUnderlying->IsInteger() &&
         !(!!(activeArray->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator))) {
         pal_game::FunctionParams params{activeFunction};
         pal->ProcessEvent(activeFunction, params.data());
@@ -548,8 +531,9 @@ auto PalSkillGateway::add_passive(const skill_editor::SkillTarget target, const 
         function == nullptr ? nullptr
                             : CastField<FNameProperty>(
                                   function->FindProperty(FName(STR("OverrideSkill"), FNAME_Find)));
-    if (pal == nullptr || id.empty() || !has_exact_parameter_count(function, 2) ||
-        !is_input_parameter(addProperty) || !is_input_parameter(overrideProperty)) {
+    if (pal == nullptr || id.empty() || !pal_game::has_exact_parameter_count(function, 2) ||
+        !pal_game::is_input_parameter(addProperty) ||
+        !pal_game::is_input_parameter(overrideProperty)) {
         return false;
     }
 
@@ -573,8 +557,8 @@ auto PalSkillGateway::remove_passive(const skill_editor::SkillTarget target,
         function == nullptr
             ? nullptr
             : CastField<FNameProperty>(function->FindProperty(FName(STR("SkillId"), FNAME_Find)));
-    if (pal == nullptr || id.empty() || !has_exact_parameter_count(function, 1) ||
-        !is_input_parameter(idProperty)) {
+    if (pal == nullptr || id.empty() || !pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(idProperty)) {
         return false;
     }
 
@@ -759,6 +743,11 @@ auto PalSkillGateway::load_passive_skill_metadata_batch(
         result.error = "FPalPassiveSkillDatabaseRow.Rank is unavailable";
     } else if (worldTreeProperty == nullptr) {
         result.error = "FPalPassiveSkillDatabaseRow.AddWorldTreePal is unavailable";
+    } else if (!pal_game::has_exact_parameter_count(function, 3) ||
+               !pal_game::is_input_parameter(skillNameProperty) ||
+               !pal_game::is_output_parameter(outSkillDataProperty) ||
+               !pal_game::is_return_parameter(returnProperty)) {
+        result.error = "GetSkillData signature does not match Palworld 1.0 metadata";
     }
     if (!result.error.empty()) {
         finish();
@@ -769,17 +758,7 @@ auto PalSkillGateway::load_passive_skill_metadata_batch(
     result.entries.reserve(count);
     for (std::size_t index = 0; index < count; ++index) {
         {
-            std::vector<std::byte> params(static_cast<std::size_t>(function->GetParmsSize()));
-            function->InitializeStruct(params.data());
-            struct ParamsGuard {
-                UFunction* function{}; /**< 非拥有的当前调用函数。 */
-                void* params{};        /**< 当前调用动态参数缓冲区。 */
-
-                /** @brief 销毁参数缓冲区内由 Unreal 初始化的字段。 */
-                ~ParamsGuard() {
-                    function->DestroyStruct(params);
-                }
-            } guard{.function = function, .params = params.data()};
+            pal_game::FunctionParams params{function};
 
             const auto wide = text_encoding::widen_ascii(ids[index]);
             const FName skillName(wide.c_str());
@@ -828,15 +807,27 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     auto* const manager = UObjectGlobals::FindFirstOf(STR("PalPassiveSkillManager"));
     auto* const passiveListFunction = find_function<UFunction>(
         STR("/Script/Pal.PalPassiveSkillManager:GetPalAssignablePassiveIDs"));
-    if (manager != nullptr && passiveListFunction != nullptr) {
-        /** @brief `GetPalAssignablePassiveIDs` 的反射输出布局。 */
-        struct Params {
-            TArray<FName> List; /**< 游戏写回的可分配被动技能 Raw ID 数组。 */
-        } params;
-        manager->ProcessEvent(passiveListFunction, &params);
-        catalog.passive.skills.reserve(static_cast<std::size_t>(std::max(params.List.Num(), 0)));
-        for (int32 index = 0; index < params.List.Num(); ++index) {
-            const auto& id = params.List[index];
+    auto* const passiveList = passiveListFunction == nullptr
+                                  ? nullptr
+                                  : CastField<FArrayProperty>(passiveListFunction->FindProperty(
+                                        FName(STR("List"), FNAME_Find)));
+    auto* const passiveId =
+        passiveList == nullptr ? nullptr : CastField<FNameProperty>(passiveList->GetInner());
+    if (pal_game::is_valid(manager) &&
+        pal_game::has_exact_parameter_count(passiveListFunction, 1) &&
+        pal_game::is_output_parameter(passiveList) && passiveId != nullptr) {
+        pal_game::FunctionParams params{passiveListFunction};
+        manager->ProcessEvent(passiveListFunction, params.data());
+        FScriptArrayHelper_InContainer values{passiveList, params.data()};
+        const int32 skillCount = values.Num();
+        if (skillCount < 0 || skillCount > 10'000) {
+            catalog.passive.error = "GetPalAssignablePassiveIDs returned an invalid array size";
+        } else {
+            catalog.passive.skills.reserve(static_cast<std::size_t>(skillCount));
+        }
+        for (int32 index = 0; index < skillCount && catalog.passive.error.empty(); ++index) {
+            FName id{};
+            passiveId->CopyCompleteValue(&id, values.GetRawPtr(index));
             catalog.passive.skills.push_back({.id = text_encoding::to_utf8(id.ToString()),
                                               .localizedName = passive_localized_name(
                                                   utility, passiveNameFunction, worldContext, id)});
@@ -879,7 +870,9 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
     };
 
     if (catalog.passive.skills.empty()) {
-        catalog.passive.error = "Unable to load Pal-assignable passive skills";
+        if (catalog.passive.error.empty()) {
+            catalog.passive.error = "Unable to load Pal-assignable passive skills";
+        }
     } else {
         std::ranges::sort(catalog.passive.skills, byLabel);
         catalog.passive.ready = true;

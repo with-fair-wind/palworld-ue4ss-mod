@@ -78,7 +78,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     auto* output = function == nullptr ? nullptr
                                        : CastField<FObjectPropertyBase>(function->FindProperty(
                                              FName(STR("ReturnValue"), FNAME_Find)));
-    if (utility == nullptr || function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return nullptr;
     }
     pal_game::FunctionParams params{function};
@@ -103,7 +105,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     auto* output = function == nullptr ? nullptr
                                        : CastField<FObjectPropertyBase>(function->FindProperty(
                                              FName(STR("ReturnValue"), FNAME_Find)));
-    if (utility == nullptr || function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return nullptr;
     }
     pal_game::FunctionParams params{function};
@@ -118,18 +122,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *  @note 不能以 GetParmsSize()!=0 判定“有入参”：UFunction::ParmsSize 包含返回值槽位，
  *        任何带返回值的无参函数都 >0。这里只按函数名调用已知的无参函数。 */
 [[nodiscard]] auto call_bool(UObject* target, const wchar_t* functionName) -> std::optional<bool> {
-    auto* function =
-        pal_game::is_valid(target) ? target->GetFunctionByNameInChain(functionName) : nullptr;
-    if (function == nullptr) {
-        return std::nullopt;
-    }
-    pal_game::FunctionParams params{function};
-    auto* const returnProperty = CastField<FBoolProperty>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return std::nullopt;
-    }
-    target->ProcessEvent(function, params.data());
-    return returnProperty->GetPropertyValueInContainer(params.data());
+    return pal_game::invoke<bool>(target, functionName);
 }
 
 /** @brief 从模型 getter 读取 FGuid 字段。 */
@@ -138,7 +131,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         pal_game::is_valid(model) ? model->GetFunctionByNameInChain(getterName) : nullptr;
     auto* returnProperty =
         function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
-    if (function == nullptr || returnProperty == nullptr) {
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(returnProperty) ||
+        returnProperty->GetElementSize() != sizeof(FGuid)) {
         return false;
     }
     pal_game::FunctionParams params{function};
@@ -181,14 +176,15 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     for (const wchar_t* functionName : {L"K2_GetActorLocation", L"GetActorLocation"}) {
         auto* function =
             pal_game::is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;
-        if (function == nullptr) {
+        auto* const returnProperty =
+            function == nullptr ? nullptr
+                                : CastField<FStructProperty>(function->GetReturnProperty());
+        if (!pal_game::has_exact_parameter_count(function, 1) ||
+            !pal_game::is_return_parameter(returnProperty) ||
+            returnProperty->GetElementSize() != sizeof(FVector)) {
             continue;
         }
         pal_game::FunctionParams params{function};
-        auto* const returnProperty = CastField<FStructProperty>(function->GetReturnProperty());
-        if (returnProperty == nullptr) {
-            continue;
-        }
         object->ProcessEvent(function, params.data());
         returnProperty->CopyCompleteValue(
             &output, returnProperty->ContainerPtrToValuePtr<void>(params.data()));
@@ -215,19 +211,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         }
     }
     // 2) GetPawn() UFunction
-    auto* const function = controller->GetFunctionByNameInChain(STR("GetPawn"));
-    if (function == nullptr) {
-        return nullptr;
-    }
-    pal_game::FunctionParams params{function};
-    auto* const returnProperty = CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return nullptr;
-    }
-    controller->ProcessEvent(function, params.data());
-    auto* const pawnValue = returnProperty->GetObjectPropertyValue(
-        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(pawnValue) ? pawnValue : nullptr;
+    return pal_game::invoke<UObject*>(controller, STR("GetPawn")).value_or(nullptr);
 }
 
 /** @brief 玩家当前位置（Pawn → K2_GetActorLocation）。 */
@@ -278,7 +262,8 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         auto* const function = model->GetFunctionByNameInChain(STR("GetTransform"));
         if (function != nullptr) {
             auto* const returnProperty = CastField<FStructProperty>(function->GetReturnProperty());
-            if (returnProperty != nullptr) {
+            if (pal_game::has_exact_parameter_count(function, 1) &&
+                pal_game::is_return_parameter(returnProperty)) {
                 pal_game::FunctionParams params{function};
                 model->ProcessEvent(function, params.data());
                 return readTranslation(returnProperty,
@@ -337,20 +322,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *  @details 与 AnywherePalbox 一致：函数不可用的元素不视为打开（由调用方跳过）。
  *  @note 不能以 GetParmsSize()!=0 判定“有入参”，见 call_bool 说明。 */
 [[nodiscard]] auto widget_is_in_viewport(UObject* widget) -> std::optional<bool> {
-    if (!pal_game::is_valid(widget)) {
-        return std::nullopt;
-    }
-    auto* const function = widget->GetFunctionByNameInChain(STR("IsInViewport"));
-    if (function == nullptr) {
-        return std::nullopt;
-    }
-    pal_game::FunctionParams params{function};
-    auto* const returnProperty = CastField<FBoolProperty>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return std::nullopt;
-    }
-    widget->ProcessEvent(function, params.data());
-    return returnProperty->GetPropertyValueInContainer(params.data());
+    return pal_game::invoke<bool>(widget, STR("IsInViewport"));
 }
 
 /** @brief 读取 ESlateVisibility 数值（GetVisibility 返回值）；不可用时返回 nullopt。
@@ -360,11 +332,12 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         return std::nullopt;
     }
     auto* const function = widget->GetFunctionByNameInChain(STR("GetVisibility"));
-    if (function == nullptr) {
+    auto* const returnProperty = function == nullptr ? nullptr : function->GetReturnProperty();
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(returnProperty)) {
         return std::nullopt;
     }
     pal_game::FunctionParams params{function};
-    auto* const returnProperty = function->GetReturnProperty();
     if (auto* const enumProperty = CastField<FEnumProperty>(returnProperty);
         enumProperty != nullptr) {
         auto* const underlying = CastField<FByteProperty>(enumProperty->GetUnderlyingProperty());
@@ -389,21 +362,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *           全部元素都无法检查时 fail-closed 拦截；空数组不拦截。 */
 [[nodiscard]] auto palbox_menu_is_open(UObject* controller) -> bool {
     auto* hud = [&]() -> UObject* {
-        auto* function = pal_game::is_valid(controller)
-                             ? controller->GetFunctionByNameInChain(STR("GetHUD"))
-                             : nullptr;
-        if (function != nullptr) {
-            pal_game::FunctionParams params{function};
-            auto* const returnProperty =
-                CastField<FObjectPropertyBase>(function->GetReturnProperty());
-            if (returnProperty != nullptr) {
-                controller->ProcessEvent(function, params.data());
-                auto* const value = returnProperty->GetObjectPropertyValue(
-                    returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-                if (pal_game::is_valid(value)) {
-                    return value;
-                }
-            }
+        if (auto* const value =
+                pal_game::invoke<UObject*>(controller, STR("GetHUD")).value_or(nullptr)) {
+            return value;
         }
         auto* const property = pal_game::is_valid(controller)
                                    ? controller->GetPropertyByNameInChain(STR("MyHUD"))

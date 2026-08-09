@@ -19,8 +19,7 @@ namespace pal_base_camp_reflection {
                                  std::vector<RC::Unreal::FGuid>& output) -> bool;
 
 /** @brief 调用 PalBaseCampManager:TryGetModel。 */
-[[nodiscard]] auto try_get_base_model(RC::Unreal::UObject* manager,
-                                      const RC::Unreal::FGuid& baseId,
+[[nodiscard]] auto try_get_base_model(RC::Unreal::UObject* manager, const RC::Unreal::FGuid& baseId,
                                       RC::Unreal::UObject*& model) -> bool;
 
 /** @brief 调用 PalMapObjectManager:FindConcreteModel。 */
