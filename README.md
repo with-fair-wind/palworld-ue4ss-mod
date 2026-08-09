@@ -34,6 +34,22 @@ cmake --build --preset ninja-msvc-x64 --target deploy      # 部署到游戏（�
 进入游戏后：UE4SS GUI → `PalworldEditor` 页签 → 浮动窗口。详细操作方式见下文架构/已知限制，
 完整验证清单见 `AGENTS.md`。
 
+### VS Code 附加调试
+
+仓库提供 `.vscode` 配置，需要安装推荐的 CMake Tools、clangd 和 Microsoft C/C++ 扩展。先从
+VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSVC 环境，然后按以下顺序操作：
+
+1. 游戏退出时运行任务 `CMake: deploy PalworldEditor`，确保部署的 `main.dll` 与
+   `build/Game__Shipping__Win64/bin/PalworldEditor.pdb` 来自同一次构建；
+2. 启动 Palworld，等待 UE4SS 输出 `PalworldEditor loaded`；
+3. 在 VS Code 的“运行和调试”中选择 `Attach to Palworld (MSVC)`，按 F5，然后选择
+   `Palworld-Win64-Shipping.exe`（不同发行渠道名称可能略有差异）；
+4. 在 `mods/PalworldEditor/src/` 中设置断点。调试器会从构建输出目录加载 PDB，无需把 PDB 复制到
+   游戏目录。
+
+当前 triplet 使用 `/Zi /O2`：附加、调用栈和源码断点可用，但优化可能导致部分局部变量不可见、语句
+断点移动或被内联。游戏运行时会锁定已部署的 `main.dll`，修改代码后需退出游戏再重新部署。
+
 ## 架构
 
 ### 通用架构（与 Palworld 无关的部分）

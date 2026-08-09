@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Attach to Palworld (MSVC)",
+            "type": "cppvsdbg",
+            "request": "attach",
+            "processId": "${command:pickProcess}",
+            "symbolSearchPath": "${workspaceFolder}\\build\\Game__Shipping__Win64\\bin",
+            "requireExactSource": true,
+            "logging": {
+                "engineLogging": false,
+                "exceptions": true,
+                "moduleLoad": true,
+                "programOutput": true
+            }
+        }
+    ]
+}
