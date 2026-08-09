@@ -368,6 +368,7 @@ void test_internal_active_skill_filter() {
         skill_editor::ActiveSkillDefinition{.value = 15, .id = "Unique_Boar_Tackle"},
         skill_editor::ActiveSkillDefinition{.value = 124, .id = "MudShot"},
     };
+    // 本地化名为空 = 未翻译/内部技能（#11 起直接跳过，不再回退 Raw ID）。
     const auto options = skill_editor::make_active_skill_options(
         definitions, [](const skill_editor::ActiveSkillDefinition& d) {
             return d.value == 124 ? std::string{"泥浆射击"} : std::string{};

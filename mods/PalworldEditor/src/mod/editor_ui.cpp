@@ -98,6 +98,7 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
         }
         if (ImGui::BeginTabItem("据点")) {
             render_base_resource_sharing(self);
+            render_remote_palbox(self);
             render_grapple_no_cooldown(self);
             ImGui::EndTabItem();
         }
