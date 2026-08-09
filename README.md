@@ -64,8 +64,8 @@ cmake --build --preset ninja-msvc-x64 --target deploy      # 部署到游戏（�
 ## 已知限制
 
 - 直接写 `StackCount` 绕过游戏复制/通知逻辑：单机可用，多人不可靠；
-- 技能编辑与资源共享仅支持单人/本地房主；
-- 修理材料共享不可用；爪钩与资源共享开关每次启动默认关闭，不持久化；
+- 技能编辑与制作/建造材料共享仅支持单人/本地房主；制作/建造共享可用，修理材料共享仍不可用（尚未验证安全的修理入口）；
+- 爪钩与资源共享开关每次启动默认关闭，不持久化；
 - 不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时启用；
 - 依赖 Palworld 1.0 的 UFunction 参数布局与 UHT dump；游戏更新后需重新生成技能定义表。
 
