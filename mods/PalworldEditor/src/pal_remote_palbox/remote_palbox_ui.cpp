@@ -4,7 +4,6 @@
  * @details 只在 GUI 线程调用；所有修改经 RemotePalboxRuntime::set_config /
  *          request_open（内部加锁），不直接访问 Unreal 对象。
  */
-#include <optional>
 #include <string>
 
 #include <imgui.h>
@@ -137,20 +136,16 @@ auto render_hotkey_capture(pal_remote_palbox::RemotePalboxRuntime& runtime,
 }  // namespace
 
 void PalworldEditorMod::render_remote_palbox(PalworldEditorMod* self) {
-    Output::send<LogLevel::Warning>(STR("PalworldEditor: RP render enter\n"));
     auto& runtime = self->remotePalboxRuntime_;
     if (!ImGui::CollapsingHeader("远程终端")) {
         return;
     }
-    Output::send<LogLevel::Warning>(STR("PalworldEditor: RP header open\n"));
 
     const auto snapshot = runtime.snapshot();
-    Output::send<LogLevel::Warning>(STR("PalworldEditor: RP snapshot ok\n"));
     const bool hotkeyChanged = render_hotkey_capture(runtime, snapshot.config);
     if (hotkeyChanged) {
         return;  // 下一帧快照已更新
     }
-    Output::send<LogLevel::Warning>(STR("PalworldEditor: RP hotkey ok\n"));
 
     ImGui::Separator();
     bool dirty = false;
@@ -174,15 +169,14 @@ void PalworldEditorMod::render_remote_palbox(PalworldEditorMod* self) {
     if (dirty) {
         runtime.set_config(config);
     }
-    Output::send<LogLevel::Warning>(STR("PalworldEditor: RP toggles ok\n"));
 
     ImGui::Separator();
     if (ImGui::Button("立即打开终端（测试）")) {
         runtime.request_open();
     }
     ImGui::SameLine();
-    ImGui::Text("成功 %s / 失败 %s", std::to_string(snapshot.openCount).c_str(),
-                std::to_string(snapshot.failCount).c_str());
+    ImGui::Text("成功 %llu / 失败 %llu", static_cast<unsigned long long>(snapshot.openCount),
+                static_cast<unsigned long long>(snapshot.failCount));
 
     if (snapshot.domainDisabled) {
         ImGui::TextColored(ImVec4{1.0F, 0.4F, 0.4F, 1.0F}, "远程终端已停用（本世界）");

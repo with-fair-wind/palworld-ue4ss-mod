@@ -48,7 +48,7 @@ public:
 
     /**
      * @brief 更新配置并写回 ini（GUI 线程调用）。
-     * @note 键位变化会重置按键状态机。
+     * @note 配置变化由下一帧 tick 在游戏线程重置按键状态机。
      */
     auto set_config(RemotePalboxConfig config) -> void;
 
@@ -72,23 +72,26 @@ public:
     [[nodiscard]] auto snapshot() const -> RemotePalboxSnapshot;
 
 private:
-    /** @brief 在 tick 内执行一次完整触发管线并返回结果。 */
-    auto execute_trigger() -> RemotePalboxTriggerResult;
+    /** @brief 在 tick 内执行一次完整触发管线并返回结果；config 为 tick 内加锁拷贝的快照。 */
+    auto execute_trigger(const RemotePalboxConfig& config) -> RemotePalboxTriggerResult;
 
     /** @brief 探测关键反射点；任一不可用返回 false 并停用域。 */
     auto probe_domain() -> bool;
 
     auto set_disabled(const std::string& message) -> void;
-    auto note(const std::string& message) -> void;
+
+    /** @brief 记录界面最近消息；isFailure 为真时累计失败计数（仅真实触发失败计）。 */
+    auto note(const std::string& message, bool isFailure) -> void;
 
     RemotePalboxConfig config_{kDefaultRemotePalboxConfig};
     HotkeyEdgeTrigger trigger_;
     std::string iniPath_;
     std::atomic<bool> requestedOpen_{false};
+    /** @brief GUI 写入配置后置位；下一帧 tick 在游戏线程重置按键状态机。 */
+    std::atomic<bool> configDirty_{false};
     bool domainDisabled_{};
     bool domainProbed_{};
-    std::string widgetPath_;    /**< WBP_PalBox_C 的完整路径；跨世界保留。 */
-    bool widgetPathResolved_{}; /**< 已尝试过一次类定位。 */
+    std::string widgetPath_; /**< 终端界面类的完整路径；跨世界保留。 */
     std::string lastMessage_;
     std::uint64_t openCount_{};
     std::uint64_t failCount_{};
