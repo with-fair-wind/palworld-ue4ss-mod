@@ -77,24 +77,24 @@ auto PalworldEditorMod::passive_category_color(const skill_editor::PassiveSkillC
     return {1.0F, 1.0F, 1.0F, 1.0F};
 }
 
-auto PalworldEditorMod::render_skill_picker(const char* id,
-                                            const std::vector<skill_editor::SkillOption>& options,
-                                            const std::unordered_set<std::string>& excludedIds,
-                                            char* search, const std::size_t searchSize,
-                                            std::optional<skill_editor::SkillOption>& selected)
-    -> bool {
+auto PalworldEditorMod::render_skill_picker(
+    const char* id, const std::vector<skill_editor::SkillOption>& options,
+    const std::optional<skill_editor::ActiveSkillCategory> category,
+    const std::unordered_set<std::string>& excludedIds, char* search, const std::size_t searchSize,
+    std::optional<skill_editor::SkillOption>& selected) -> bool {
     const std::string preview =
         selected.has_value() ? skill_editor::skill_label(*selected) : "请选择技能";
     bool changed = false;
     if (ImGui::BeginCombo(id, preview.c_str())) {
         ImGui::SetNextItemWidth(340.0F);
         ImGui::InputText("搜索##skill-search", search, searchSize);
-        const auto visible = skill_editor::filter_skills(options, search, excludedIds);
-        for (const auto& option : visible) {
-            const auto label = skill_editor::skill_label(option);
-            const bool isSelected = selected.has_value() && selected->id == option.id;
+        const auto visible =
+            skill_editor::filter_active_skill_views(options, category, search, excludedIds);
+        for (const auto* const option : visible) {
+            const auto label = skill_editor::skill_label(*option);
+            const bool isSelected = selected.has_value() && selected->id == option->id;
             if (ImGui::Selectable(label.c_str(), isSelected)) {
-                selected = option;
+                selected = *option;
                 changed = true;
             }
         }
@@ -401,19 +401,8 @@ void PalworldEditorMod::render_active_skills(PalworldEditorMod* self,
         }
         ImGui::EndCombo();
     }
-    std::vector<skill_editor::SkillOption> filteredActiveSkills;
-    if (self->activeCategoryFilter_.has_value()) {
-        filteredActiveSkills.reserve(snapshot.catalog.active.skills.size());
-        for (const auto& option : snapshot.catalog.active.skills) {
-            if (option.activeCategory == self->activeCategoryFilter_) {
-                filteredActiveSkills.push_back(option);
-            }
-        }
-    }
-    const auto& activeSkills = self->activeCategoryFilter_.has_value()
-                                   ? filteredActiveSkills
-                                   : snapshot.catalog.active.skills;
-    render_skill_picker("##active-picker", activeSkills, excluded, self->activeSearch_,
+    render_skill_picker("##active-picker", snapshot.catalog.active.skills,
+                        self->activeCategoryFilter_, excluded, self->activeSearch_,
                         sizeof(self->activeSearch_), self->activeChoice_);
     const bool canConfirm =
         self->activeChoice_.has_value() && self->activeChoice_->activeValue.has_value();

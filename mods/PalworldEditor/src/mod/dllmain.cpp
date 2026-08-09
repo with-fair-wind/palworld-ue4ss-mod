@@ -32,6 +32,172 @@
 using namespace RC;
 using namespace RC::Unreal;
 
+namespace {
+struct ReviveAccess {
+    void* saveParameter{};
+    FEnumProperty* physicalHealth{};
+    FNumericProperty* physicalHealthUnderlying{};
+    void* hp{};
+    FInt64Property* hpValue{};
+    UFunction* setPhysicalHealth{};
+    FEnumProperty* setPhysicalHealthInput{};
+    FNumericProperty* setPhysicalHealthInputUnderlying{};
+    UFunction* fullRecoveryHp{};
+    UFunction* onRepSaveParameter{};
+};
+
+struct ReviveState {
+    int64_t physicalHealth{};
+    int64_t hpValue{};
+};
+
+enum class ReviveAttemptStatus {
+    succeeded,
+    preflightFailed,
+    rolledBack,
+    rollbackFailed,
+};
+
+[[nodiscard]] auto prepare_revive_access(UObject* parameter) -> std::optional<ReviveAccess> {
+    if (!pal_game::is_valid(parameter)) {
+        return std::nullopt;
+    }
+
+    auto* const saveProperty =
+        CastField<FStructProperty>(parameter->GetPropertyByNameInChain(STR("SaveParameter")));
+    auto* const saveStruct = saveProperty == nullptr ? nullptr : saveProperty->GetStruct().Get();
+    void* const saveParameter =
+        saveProperty == nullptr ? nullptr : saveProperty->ContainerPtrToValuePtr<void>(parameter);
+    auto* const physicalHealth = saveStruct == nullptr
+                                     ? nullptr
+                                     : CastField<FEnumProperty>(saveStruct->FindProperty(
+                                           FName(STR("PhysicalHealth"), FNAME_Find)));
+    auto* const physicalHealthUnderlying =
+        physicalHealth == nullptr ? nullptr : physicalHealth->GetUnderlyingProperty();
+    auto* const hpProperty =
+        saveStruct == nullptr
+            ? nullptr
+            : CastField<FStructProperty>(saveStruct->FindProperty(FName(STR("Hp"), FNAME_Find)));
+    auto* const hpStruct = hpProperty == nullptr ? nullptr : hpProperty->GetStruct().Get();
+    void* const hp = hpProperty == nullptr || saveParameter == nullptr
+                         ? nullptr
+                         : hpProperty->ContainerPtrToValuePtr<void>(saveParameter);
+    auto* const hpValue =
+        hpStruct == nullptr
+            ? nullptr
+            : CastField<FInt64Property>(hpStruct->FindProperty(FName(STR("Value"), FNAME_Find)));
+
+    auto* const setPhysicalHealth = parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
+    auto* const setPhysicalHealthInput =
+        setPhysicalHealth == nullptr ? nullptr
+                                     : CastField<FEnumProperty>(setPhysicalHealth->FindProperty(
+                                           FName(STR("PhysicalHealth"), FNAME_Find)));
+    auto* const setPhysicalHealthInputUnderlying =
+        setPhysicalHealthInput == nullptr ? nullptr
+                                          : setPhysicalHealthInput->GetUnderlyingProperty();
+    auto* const fullRecoveryHp = parameter->GetFunctionByNameInChain(STR("FullRecoveryHP"));
+    auto* const onRepSaveParameter =
+        parameter->GetFunctionByNameInChain(STR("OnRep_SaveParameter"));
+
+    if (saveParameter == nullptr || physicalHealth == nullptr ||
+        physicalHealthUnderlying == nullptr || !physicalHealthUnderlying->IsInteger() ||
+        hp == nullptr || hpValue == nullptr || setPhysicalHealth == nullptr ||
+        setPhysicalHealthInput == nullptr || setPhysicalHealthInputUnderlying == nullptr ||
+        !setPhysicalHealthInputUnderlying->IsInteger() || fullRecoveryHp == nullptr ||
+        fullRecoveryHp->GetParmsSize() != 0 || onRepSaveParameter == nullptr ||
+        onRepSaveParameter->GetParmsSize() != 0) {
+        return std::nullopt;
+    }
+
+    return ReviveAccess{
+        .saveParameter = saveParameter,
+        .physicalHealth = physicalHealth,
+        .physicalHealthUnderlying = physicalHealthUnderlying,
+        .hp = hp,
+        .hpValue = hpValue,
+        .setPhysicalHealth = setPhysicalHealth,
+        .setPhysicalHealthInput = setPhysicalHealthInput,
+        .setPhysicalHealthInputUnderlying = setPhysicalHealthInputUnderlying,
+        .fullRecoveryHp = fullRecoveryHp,
+        .onRepSaveParameter = onRepSaveParameter,
+    };
+}
+
+[[nodiscard]] auto read_revive_state(const ReviveAccess& access) -> ReviveState {
+    return ReviveState{
+        .physicalHealth = access.physicalHealthUnderlying->GetSignedIntPropertyValue(
+            access.physicalHealth->ContainerPtrToValuePtr<void>(access.saveParameter)),
+        .hpValue = access.hpValue->GetPropertyValueInContainer(access.hp),
+    };
+}
+
+auto set_physical_health(UObject* parameter, const ReviveAccess& access, const int64_t value)
+    -> void {
+    pal_game::FunctionParams params{access.setPhysicalHealth};
+    access.setPhysicalHealthInputUnderlying->SetIntPropertyValue(
+        access.setPhysicalHealthInput->ContainerPtrToValuePtr<void>(params.data()), value);
+    parameter->ProcessEvent(access.setPhysicalHealth, params.data());
+}
+
+[[nodiscard]] auto restore_revive_state(UObject* parameter, const ReviveState& original) -> bool {
+    auto access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return false;
+    }
+    set_physical_health(parameter, *access, original.physicalHealth);
+
+    access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return false;
+    }
+    access->hpValue->SetPropertyValueInContainer(access->hp, original.hpValue);
+    parameter->ProcessEvent(access->onRepSaveParameter, nullptr);
+
+    access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return false;
+    }
+    const auto restored = read_revive_state(*access);
+    return restored.physicalHealth == original.physicalHealth &&
+           restored.hpValue == original.hpValue;
+}
+
+[[nodiscard]] auto apply_revive(UObject* parameter, const ReviveState& original)
+    -> ReviveAttemptStatus {
+    auto access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return ReviveAttemptStatus::preflightFailed;
+    }
+    set_physical_health(parameter, *access, 0);
+    const auto rollback = [&] {
+        return restore_revive_state(parameter, original) ? ReviveAttemptStatus::rolledBack
+                                                         : ReviveAttemptStatus::rollbackFailed;
+    };
+
+    access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return rollback();
+    }
+    parameter->ProcessEvent(access->fullRecoveryHp, nullptr);
+
+    access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return rollback();
+    }
+    parameter->ProcessEvent(access->onRepSaveParameter, nullptr);
+
+    access = prepare_revive_access(parameter);
+    if (!access.has_value()) {
+        return rollback();
+    }
+    const auto after = read_revive_state(*access);
+    if (after.physicalHealth == 0 && after.hpValue > 0) {
+        return ReviveAttemptStatus::succeeded;
+    }
+    return rollback();
+}
+}  // namespace
+
 PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
     ModName = STR("PalworldEditor");
     ModVersion = STR("1.6.10");
@@ -279,14 +445,20 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     if (selectionRequested) {
         if (resolvedPal.has_value() && resolution.resolved &&
             selectedTarget_.confirm(resolution.observation) && worldSession_.confirm_target()) {
-            skillRuntimeSnapshot_.state = skillGateway_.read_state(
+            auto skillRead = skillGateway_.read_state(
                 reinterpret_cast<skill_editor::SkillTarget>(resolvedPal->parameter));
+            skillRuntimeSnapshot_.state = std::move(skillRead.state);
             skillRuntimeSnapshot_.palStat = statGateway_.read_stats(
                 reinterpret_cast<pal_stats::PalStatTarget>(resolvedPal->parameter));
             skillRuntimeSnapshot_.palIdentity = identityGateway_.read_identity(
                 reinterpret_cast<pal_identity::PalIdentityTarget>(resolvedPal->parameter),
                 resolvedPal->spawnStateKnown, resolvedPal->selectedIsSpawned);
-            skillRuntimeSnapshot_.lastResult.clear();
+            if (!skillRead.passiveReadable || !skillRead.activeReadable) {
+                skillRuntimeSnapshot_.lastResult =
+                    "技能读取不完整：当前不可安全编辑未成功读取的技能分区。";
+            } else {
+                skillRuntimeSnapshot_.lastResult.clear();
+            }
         } else {
             skillRuntimeSnapshot_.palStat = {};
             skillRuntimeSnapshot_.palIdentity = {};
@@ -557,15 +729,19 @@ auto PalworldEditorMod::revive_team_pals() -> void {
         return;
     }
 
+    auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr, STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
+    if (getHandleFunction == nullptr) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：队伍槽位接口不可用。";
+        skillSnapshotDirty_ = true;
+        return;
+    }
+
     int revivedCount = 0;
+    int failedCount = 0;
+    bool rollbackFailed = false;
     for (int slotIndex = 0; slotIndex < maxNum; ++slotIndex) {
         // GetOtomoIndividualHandle(slotIndex) → Handle（用直接 struct，和 pal_game.hpp 一致）
-        auto* const getHandleFunction = UObjectGlobals::StaticFindObject<UFunction*>(
-            nullptr, nullptr,
-            STR("/Script/Pal.PalOtomoHolderComponentBase:GetOtomoIndividualHandle"));
-        if (getHandleFunction == nullptr) {
-            continue;
-        }
         struct GetHandleParams {
             int32_t SlotIndex{};
             UObject* ReturnValue{};
@@ -586,44 +762,46 @@ auto PalworldEditorMod::revive_team_pals() -> void {
 
         // 检查 PhysicalHealth：Healthful=0, MinorInjury=1, Severe=2, Dying=3, DeadBody=4
         // CloudCemetery=5。非 Healthful 都需要复活。
-        const auto physicalHealth =
-            pal_game::invoke<int>(parameter, STR("GetPhysicalHealth")).value_or(0);
-        if (physicalHealth <= 0) {
-            continue;  // 已经 Healthful，跳过
-        }
-        auto* const setHealthFunction =
-            parameter->GetFunctionByNameInChain(STR("SetPhysicalHealth"));
-        if (setHealthFunction == nullptr) {
+        const auto access = prepare_revive_access(parameter);
+        if (!access.has_value()) {
+            ++failedCount;
             continue;
         }
-        pal_game::FunctionParams healthParams{setHealthFunction};
-        auto* const healthProp =
-            setHealthFunction->FindProperty(FName(STR("PhysicalHealth"), FNAME_Find));
-        if (auto* const enumProp = CastField<FEnumProperty>(healthProp)) {
-            enumProp->GetUnderlyingProperty()->SetIntPropertyValue(
-                enumProp->ContainerPtrToValuePtr<void>(healthParams.data()),
-                static_cast<int64_t>(0));
-        }
-        parameter->ProcessEvent(setHealthFunction, healthParams.data());
-
-        // 恢复 HP（SetPhysicalHealth 只改状态枚举，HP 仍为 0，需要 FullRecoveryHP 补满）
-        auto* const fullRecoveryFunction =
-            parameter->GetFunctionByNameInChain(STR("FullRecoveryHP"));
-        if (fullRecoveryFunction != nullptr) {
-            parameter->ProcessEvent(fullRecoveryFunction, nullptr);
+        const auto original = read_revive_state(*access);
+        if (original.physicalHealth <= 0) {
+            continue;  // 已经 Healthful，跳过
         }
 
-        // 触发存档参数复制，让游戏 Actor/客户端同步复活状态
-        auto* const onRepFunction = parameter->GetFunctionByNameInChain(STR("OnRep_SaveParameter"));
-        if (onRepFunction != nullptr && onRepFunction->GetParmsSize() == 0) {
-            parameter->ProcessEvent(onRepFunction, nullptr);
+        switch (apply_revive(parameter, original)) {
+            case ReviveAttemptStatus::succeeded:
+                ++revivedCount;
+                break;
+            case ReviveAttemptStatus::preflightFailed:
+            case ReviveAttemptStatus::rolledBack:
+                ++failedCount;
+                break;
+            case ReviveAttemptStatus::rollbackFailed:
+                ++failedCount;
+                rollbackFailed = true;
+                break;
         }
-        ++revivedCount;
+        if (rollbackFailed) {
+            break;
+        }
     }
 
-    if (revivedCount > 0) {
+    if (rollbackFailed) {
+        skillRuntimeSnapshot_.lastResult = "复活失败：写后校验失败且无法完整回滚；本次操作已停止。";
+    } else if (revivedCount > 0 && failedCount > 0) {
+        skillRuntimeSnapshot_.lastResult = "复活了 " + std::to_string(revivedCount) +
+                                           " 只队伍帕鲁，另有 " + std::to_string(failedCount) +
+                                           " 只未能安全修改。";
+    } else if (revivedCount > 0) {
         skillRuntimeSnapshot_.lastResult =
             "复活了 " + std::to_string(revivedCount) + " 只队伍帕鲁。";
+    } else if (failedCount > 0) {
+        skillRuntimeSnapshot_.lastResult =
+            "复活失败：有 " + std::to_string(failedCount) + " 只帕鲁无法安全修改。";
     } else {
         skillRuntimeSnapshot_.lastResult = "队伍中没有需要复活的帕鲁。";
     }

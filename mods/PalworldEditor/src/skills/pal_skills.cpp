@@ -9,11 +9,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/Core/Containers/Array.hpp>
+#include <Unreal/Core/Containers/ScriptArray.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/FText.hpp>
@@ -126,32 +130,231 @@ template <typename T>
     if (wazaDatabase == nullptr || findWazaFunction == nullptr) {
         return std::nullopt;
     }
-    pal_game::FunctionParams params{findWazaFunction};
     auto* const typeProp = findWazaFunction->FindProperty(FName(STR("Type"), FNAME_Find));
-    if (auto* const typeEnum = CastField<FEnumProperty>(typeProp)) {
-        typeEnum->GetUnderlyingProperty()->SetIntPropertyValue(
-            typeEnum->ContainerPtrToValuePtr<void>(params.data()), static_cast<int64_t>(wazaValue));
-    } else {
-        return std::nullopt;
-    }
-    wazaDatabase->ProcessEvent(findWazaFunction, params.data());
+    auto* const typeEnum = CastField<FEnumProperty>(typeProp);
+    auto* const typeUnderlying = typeEnum == nullptr ? nullptr : typeEnum->GetUnderlyingProperty();
+    auto* const returnProperty = CastField<FBoolProperty>(findWazaFunction->GetReturnProperty());
     auto* const outDataProp = CastField<FStructProperty>(
         findWazaFunction->FindProperty(FName(STR("OutData"), FNAME_Find)));
-    if (outDataProp == nullptr) {
+    auto* const outDataStruct = outDataProp == nullptr ? nullptr : outDataProp->GetStruct().Get();
+    auto* const categoryProp = outDataStruct == nullptr
+                                   ? nullptr
+                                   : CastField<FEnumProperty>(outDataStruct->FindProperty(
+                                         FName(STR("Category"), FNAME_Find)));
+    auto* const categoryUnderlying =
+        categoryProp == nullptr ? nullptr : categoryProp->GetUnderlyingProperty();
+    if (typeUnderlying == nullptr || returnProperty == nullptr || outDataProp == nullptr ||
+        categoryUnderlying == nullptr) {
         return std::nullopt;
     }
+
+    pal_game::FunctionParams params{findWazaFunction};
+    typeUnderlying->SetIntPropertyValue(typeEnum->ContainerPtrToValuePtr<void>(params.data()),
+                                        static_cast<int64_t>(wazaValue));
+    wazaDatabase->ProcessEvent(findWazaFunction, params.data());
     void* const outDataPtr = outDataProp->ContainerPtrToValuePtr<void>(params.data());
-    auto* const categoryProp = CastField<FEnumProperty>(
-        outDataProp->GetStruct()->FindProperty(FName(STR("Category"), FNAME_Find)));
-    if (categoryProp == nullptr) {
+    const auto categoryValue = categoryUnderlying->GetSignedIntPropertyValue(
+        categoryProp->ContainerPtrToValuePtr<void>(outDataPtr));
+    return skill_editor::active_skill_category_from_lookup(
+        returnProperty->GetPropertyValueInContainer(params.data()), categoryValue);
+}
+
+/** @brief 单只帕鲁的 `SaveParameter.MasteredWaza` 反射访问点。 */
+struct MasteredWazaAccess {
+    void* saveParameter{};
+    FArrayProperty* arrayProperty{};
+    FEnumProperty* elementProperty{};
+    FNumericProperty* underlyingProperty{};
+    UFunction* onRepSaveParameter{};
+};
+
+/** @brief 防止损坏数组元数据导致不受限分配或遍历。 */
+inline constexpr int32 kMaxMasteredWazaCount = 1024;
+/** @brief 防止技能返回数组损坏导致不受限分配或遍历。 */
+inline constexpr int32 kMaxReturnedSkillCount = 64;
+
+/** @brief 已通过运行时签名校验的主动技能写入函数与参数属性。 */
+struct ActiveWriteFunctions {
+    UFunction* clear{};
+    UFunction* add{};
+    FEnumProperty* wazaId{};
+    FNumericProperty* underlying{};
+};
+
+[[nodiscard]] auto prepare_active_write_functions() -> std::optional<ActiveWriteFunctions> {
+    auto* const clear =
+        find_function<UFunction>(STR("/Script/Pal.PalIndividualCharacterParameter:ClearEquipWaza"));
+    auto* const add =
+        find_function<UFunction>(STR("/Script/Pal.PalIndividualCharacterParameter:AddEquipWaza"));
+    auto* const wazaId =
+        add == nullptr
+            ? nullptr
+            : CastField<FEnumProperty>(add->FindProperty(FName(STR("WazaId"), FNAME_Find)));
+    auto* const underlying = wazaId == nullptr ? nullptr : wazaId->GetUnderlyingProperty();
+    if (clear == nullptr || clear->GetParmsSize() != 0 || clear->GetReturnProperty() != nullptr ||
+        add == nullptr || add->GetReturnProperty() != nullptr || wazaId == nullptr ||
+        !wazaId->HasAnyPropertyFlags(CPF_Parm) ||
+        wazaId->HasAnyPropertyFlags(CPF_OutParm | CPF_ReturnParm) || underlying == nullptr ||
+        !underlying->IsInteger() || add->GetParmsSize() != wazaId->GetElementSize()) {
         return std::nullopt;
     }
-    const auto catValue = categoryProp->GetUnderlyingProperty()->GetSignedIntPropertyValue(
-        categoryProp->ContainerPtrToValuePtr<void>(outDataPtr));
-    if (catValue >= 0 && catValue <= 2) {
-        return static_cast<skill_editor::ActiveSkillCategory>(catValue);
+    return ActiveWriteFunctions{
+        .clear = clear,
+        .add = add,
+        .wazaId = wazaId,
+        .underlying = underlying,
+    };
+}
+
+[[nodiscard]] auto write_active_sequence(UObject* pal, const ActiveWriteFunctions& functions,
+                                         const std::span<const skill_editor::ActiveSkill> sequence)
+    -> bool {
+    if (!pal_game::is_valid(pal)) {
+        return false;
     }
-    return std::nullopt;
+    pal->ProcessEvent(functions.clear, nullptr);
+    if (!pal_game::is_valid(pal)) {
+        return false;
+    }
+
+    for (const auto& skill : sequence) {
+        pal_game::FunctionParams params{functions.add};
+        functions.underlying->SetIntPropertyValue(
+            functions.wazaId->ContainerPtrToValuePtr<void>(params.data()),
+            static_cast<std::uint64_t>(skill.value));
+        pal->ProcessEvent(functions.add, params.data());
+        if (!pal_game::is_valid(pal)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+[[nodiscard]] auto prepare_mastered_waza(UObject* pal) -> std::optional<MasteredWazaAccess> {
+    if (!pal_game::is_valid(pal)) {
+        return std::nullopt;
+    }
+    auto* const saveProperty =
+        CastField<FStructProperty>(pal->GetPropertyByNameInChain(STR("SaveParameter")));
+    auto* const saveStruct = saveProperty == nullptr ? nullptr : saveProperty->GetStruct().Get();
+    auto* const arrayProperty = saveStruct == nullptr
+                                    ? nullptr
+                                    : CastField<FArrayProperty>(saveStruct->FindProperty(
+                                          FName(STR("MasteredWaza"), FNAME_Find)));
+    auto* const elementProperty =
+        arrayProperty == nullptr ? nullptr : CastField<FEnumProperty>(arrayProperty->GetInner());
+    auto* const underlyingProperty =
+        elementProperty == nullptr ? nullptr : elementProperty->GetUnderlyingProperty();
+    void* const saveParameter =
+        saveProperty == nullptr ? nullptr : saveProperty->ContainerPtrToValuePtr<void>(pal);
+    if (saveParameter == nullptr || arrayProperty == nullptr || elementProperty == nullptr ||
+        underlyingProperty == nullptr || !underlyingProperty->IsInteger() ||
+        !!(arrayProperty->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator)) {
+        return std::nullopt;
+    }
+    return MasteredWazaAccess{
+        .saveParameter = saveParameter,
+        .arrayProperty = arrayProperty,
+        .elementProperty = elementProperty,
+        .underlyingProperty = underlyingProperty,
+        .onRepSaveParameter = pal->GetFunctionByNameInChain(STR("OnRep_SaveParameter")),
+    };
+}
+
+[[nodiscard]] auto read_mastered_waza(const MasteredWazaAccess& access)
+    -> std::optional<std::vector<std::uint16_t>> {
+    FScriptArrayHelper_InContainer values{access.arrayProperty, access.saveParameter};
+    const auto count = values.Num();
+    if (count < 0 || count > kMaxMasteredWazaCount) {
+        return std::nullopt;
+    }
+    std::vector<std::uint16_t> result;
+    result.reserve(static_cast<std::size_t>(count));
+    for (int32 index{}; index < count; ++index) {
+        const auto value = access.underlyingProperty->GetUnsignedIntPropertyValue(
+            access.elementProperty->ContainerPtrToValuePtr<void>(values.GetRawPtr(index)));
+        if (value > std::numeric_limits<std::uint16_t>::max()) {
+            return std::nullopt;
+        }
+        result.push_back(static_cast<std::uint16_t>(value));
+    }
+    return result;
+}
+
+[[nodiscard]] auto append_mastered_waza(const MasteredWazaAccess& access,
+                                        const std::span<const std::uint16_t> values) -> bool {
+    const auto current = read_mastered_waza(access);
+    if (!current.has_value() ||
+        current->size() + values.size() > static_cast<std::size_t>(kMaxMasteredWazaCount)) {
+        return false;
+    }
+    auto* const inner = access.arrayProperty->GetInner();
+    auto* const array =
+        access.arrayProperty->ContainerPtrToValuePtr<FScriptArray>(access.saveParameter);
+    if (inner == nullptr || array == nullptr) {
+        return false;
+    }
+    const auto elementSize = inner->GetElementSize();
+    const auto elementAlignment = inner->GetMinAlignment();
+    for (const auto value : values) {
+        const auto addedIndex = array->Add(1, elementSize, elementAlignment);
+        auto* const element = static_cast<std::uint8_t*>(array->GetData()) +
+                              static_cast<std::size_t>(addedIndex) * elementSize;
+        inner->InitializeValue(element);
+        access.underlyingProperty->SetIntPropertyValue(
+            access.elementProperty->ContainerPtrToValuePtr<void>(element),
+            static_cast<std::uint64_t>(value));
+    }
+    return true;
+}
+
+[[nodiscard]] auto restore_mastered_waza_tail(const MasteredWazaAccess& access,
+                                              const std::span<const std::uint16_t> original)
+    -> bool {
+    const auto current = read_mastered_waza(access);
+    if (!current.has_value() || current->size() < original.size() ||
+        !std::ranges::equal(original, std::span{*current}.first(original.size()))) {
+        return false;
+    }
+
+    auto* const inner = access.arrayProperty->GetInner();
+    auto* const array =
+        access.arrayProperty->ContainerPtrToValuePtr<FScriptArray>(access.saveParameter);
+    if (inner == nullptr || array == nullptr) {
+        return false;
+    }
+    const auto elementSize = inner->GetElementSize();
+    const auto elementAlignment = inner->GetMinAlignment();
+    const auto firstRemoved = static_cast<int32>(original.size());
+    const auto removedCount = array->Num() - firstRemoved;
+    for (int32 index = array->Num(); index > firstRemoved; --index) {
+        auto* const element = static_cast<std::uint8_t*>(array->GetData()) +
+                              static_cast<std::size_t>(index - 1) * elementSize;
+        inner->DestroyValue(element);
+    }
+    array->Remove(firstRemoved, removedCount, elementSize, elementAlignment);
+    return read_mastered_waza(access) ==
+           std::optional<std::vector<std::uint16_t>>{
+               std::vector<std::uint16_t>{original.begin(), original.end()}};
+}
+
+[[nodiscard]] auto notify_mastered_waza_changed(UObject* pal, const MasteredWazaAccess& access)
+    -> bool {
+    if (!pal_game::is_valid(pal) || access.onRepSaveParameter == nullptr ||
+        access.onRepSaveParameter->GetParmsSize() != 0) {
+        return false;
+    }
+    pal->ProcessEvent(access.onRepSaveParameter, nullptr);
+    return true;
+}
+
+[[nodiscard]] auto same_active_values(const std::span<const skill_editor::ActiveSkill> left,
+                                      const std::span<const skill_editor::ActiveSkill> right)
+    -> bool {
+    return left.size() == right.size() &&
+           std::ranges::equal(left, right, [](const auto& lhs, const auto& rhs) {
+               return lhs.value == rhs.value;
+           });
 }
 
 }  // namespace
@@ -168,52 +371,85 @@ auto PalSkillGateway::is_valid(const skill_editor::SkillTarget target) const -> 
  *          并限制为可编辑的前三个槽位。完整调用契约见头文件中的成员声明。
  */
 auto PalSkillGateway::read_state(const skill_editor::SkillTarget target)
-    -> skill_editor::SkillState {
-    skill_editor::SkillState state;
+    -> skill_editor::SkillStateReadResult {
+    skill_editor::SkillStateReadResult result;
     auto* pal = to_pal(target);
     if (pal == nullptr) {
-        return state;
+        return result;
     }
 
-    if (auto* function = find_function<UFunction>(
-            STR("/Script/Pal.PalIndividualCharacterParameter:GetPassiveSkillList"))) {
-        /** @brief `GetPassiveSkillList` 的反射返回布局。 */
-        struct Params {
-            TArray<FName> ReturnValue; /**< 游戏返回的被动技能 Raw ID 数组。 */
-        } params;
-        pal->ProcessEvent(function, &params);
-
-        state.passiveIds.reserve(static_cast<std::size_t>(std::max(params.ReturnValue.Num(), 0)));
-        for (int32 index = 0; index < params.ReturnValue.Num(); ++index) {
-            state.passiveIds.push_back(
-                text_encoding::to_utf8(params.ReturnValue[index].ToString()));
+    auto* const passiveFunction = find_function<UFunction>(
+        STR("/Script/Pal.PalIndividualCharacterParameter:GetPassiveSkillList"));
+    auto* const passiveArray =
+        passiveFunction == nullptr
+            ? nullptr
+            : CastField<FArrayProperty>(passiveFunction->GetReturnProperty());
+    auto* const passiveElement =
+        passiveArray == nullptr ? nullptr : CastField<FNameProperty>(passiveArray->GetInner());
+    if (passiveFunction != nullptr && passiveArray != nullptr && passiveElement != nullptr &&
+        !(!!(passiveArray->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator))) {
+        pal_game::FunctionParams params{passiveFunction};
+        pal->ProcessEvent(passiveFunction, params.data());
+        FScriptArrayHelper_InContainer values{passiveArray, params.data()};
+        const auto count = values.Num();
+        if (count >= 0 && count <= kMaxReturnedSkillCount) {
+            result.state.passiveIds.reserve(static_cast<std::size_t>(count));
+            for (int32 index{}; index < count; ++index) {
+                FName id;
+                passiveElement->CopyCompleteValue(&id, values.GetRawPtr(index));
+                result.state.passiveIds.push_back(text_encoding::to_utf8(id.ToString()));
+            }
+            result.passiveReadable = true;
         }
     }
 
-    if (auto* function = find_function<UFunction>(
-            STR("/Script/Pal.PalIndividualCharacterParameter:GetEquipWaza"))) {
-        /** @brief `GetEquipWaza` 的反射返回布局。 */
-        struct Params {
-            TArray<EPalWazaID> ReturnValue; /**< 游戏返回的主动技能槽位枚举数组。 */
-        } params;
-        pal->ProcessEvent(function, &params);
-
-        const auto count = std::min<int32>(params.ReturnValue.Num(), 3);
-        state.activeSkills.reserve(static_cast<std::size_t>(std::max(count, 0)));
-        for (int32 index = 0; index < count; ++index) {
-            const auto value = static_cast<std::uint16_t>(params.ReturnValue[index]);
-            state.activeSkills.push_back(
-                {.value = value, .id = skill_editor::active_skill_id_or_numeric(value)});
-        }
-        if (params.ReturnValue.Num() > 3) {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: GetEquipWaza returned {} entries; only the first 3 are "
-                    "editable\n"),
-                params.ReturnValue.Num());
+    auto* const activeFunction =
+        find_function<UFunction>(STR("/Script/Pal.PalIndividualCharacterParameter:GetEquipWaza"));
+    auto* const activeArray = activeFunction == nullptr
+                                  ? nullptr
+                                  : CastField<FArrayProperty>(activeFunction->GetReturnProperty());
+    auto* const activeElement =
+        activeArray == nullptr ? nullptr : CastField<FEnumProperty>(activeArray->GetInner());
+    auto* const activeUnderlying =
+        activeElement == nullptr ? nullptr : activeElement->GetUnderlyingProperty();
+    pal = to_pal(target);
+    if (pal != nullptr && activeFunction != nullptr && activeArray != nullptr &&
+        activeElement != nullptr && activeUnderlying != nullptr && activeUnderlying->IsInteger() &&
+        !(!!(activeArray->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator))) {
+        pal_game::FunctionParams params{activeFunction};
+        pal->ProcessEvent(activeFunction, params.data());
+        FScriptArrayHelper_InContainer values{activeArray, params.data()};
+        const auto returnedCount = values.Num();
+        if (returnedCount >= 0 && returnedCount <= kMaxReturnedSkillCount) {
+            const auto editableCount = std::min<int32>(returnedCount, 3);
+            result.state.activeSkills.reserve(static_cast<std::size_t>(editableCount));
+            bool valuesValid = true;
+            for (int32 index{}; index < editableCount; ++index) {
+                const auto raw = activeUnderlying->GetUnsignedIntPropertyValue(
+                    activeElement->ContainerPtrToValuePtr<void>(values.GetRawPtr(index)));
+                if (raw > std::numeric_limits<std::uint16_t>::max()) {
+                    valuesValid = false;
+                    break;
+                }
+                const auto value = static_cast<std::uint16_t>(raw);
+                result.state.activeSkills.push_back(
+                    {.value = value, .id = skill_editor::active_skill_id_or_numeric(value)});
+            }
+            if (valuesValid) {
+                result.activeReadable = true;
+            } else {
+                result.state.activeSkills.clear();
+            }
+            if (returnedCount > 3) {
+                Output::send<LogLevel::Warning>(
+                    STR("PalworldEditor: GetEquipWaza returned {} entries; only the first 3 are "
+                        "editable\n"),
+                    returnedCount);
+            }
         }
     }
 
-    return state;
+    return result;
 }
 
 /**
@@ -264,33 +500,118 @@ auto PalSkillGateway::remove_passive(const skill_editor::SkillTarget target,
 }
 
 /**
- * @details 先调用 `ClearEquipWaza`，再按输入顺序逐项调用 `AddEquipWaza`；
- *          完整调用契约见头文件中的成员声明。
+ * @details 先把缺失技能追加到 `SaveParameter.MasteredWaza` 并通知重读，再重写
+ *          `EquipWaza`。任一步失败都会在当前调用内恢复原掌握列表和装备序列。
  */
 auto PalSkillGateway::rewrite_active(const skill_editor::SkillTarget target,
                                      const std::span<const skill_editor::ActiveSkill> skills)
-    -> bool {
+    -> skill_editor::ActiveWriteResult {
     auto* pal = to_pal(target);
-    auto* clearFunction =
-        find_function<UFunction>(STR("/Script/Pal.PalIndividualCharacterParameter:ClearEquipWaza"));
-    auto* addFunction =
-        find_function<UFunction>(STR("/Script/Pal.PalIndividualCharacterParameter:AddEquipWaza"));
-    if (pal == nullptr || clearFunction == nullptr || addFunction == nullptr || skills.size() > 3) {
-        return false;
+    auto originalRead = read_state(target);
+    if (pal == nullptr || skills.size() > 3 || !originalRead.activeReadable) {
+        return {
+            .status = skill_editor::ActiveWriteStatus::preflightFailed,
+            .readback = std::move(originalRead),
+        };
     }
 
-    pal->ProcessEvent(clearFunction, nullptr);
-    for (const auto& skill : skills) {
-        if (!pal_game::is_valid(pal)) {
-            return false;
-        }
-        /** @brief `AddEquipWaza` 的反射参数布局。 */
-        struct Params {
-            EPalWazaID WazaId; /**< 要追加到下一个槽位的主动技能枚举值。 */
-        } params{.WazaId = static_cast<EPalWazaID>(skill.value)};
-        pal->ProcessEvent(addFunction, &params);
+    pal = to_pal(target);
+    const auto functions = prepare_active_write_functions();
+    const auto masteredAccess = prepare_mastered_waza(pal);
+    const auto originalMastered =
+        masteredAccess.has_value() ? read_mastered_waza(*masteredAccess) : std::nullopt;
+    if (pal == nullptr || !functions.has_value() || !masteredAccess.has_value() ||
+        !originalMastered.has_value()) {
+        return {
+            .status = skill_editor::ActiveWriteStatus::preflightFailed,
+            .readback = std::move(originalRead),
+        };
     }
-    return true;
+
+    const auto originalActive = originalRead.state.activeSkills;
+
+    auto desiredMastered = *originalMastered;
+    std::vector<std::uint16_t> newlyMastered;
+    for (const auto& skill : skills) {
+        if (!std::ranges::contains(desiredMastered, skill.value)) {
+            desiredMastered.push_back(skill.value);
+            newlyMastered.push_back(skill.value);
+        }
+    }
+    const bool masteredChanged = !newlyMastered.empty();
+    const auto restore = [&]() -> skill_editor::ActiveWriteResult {
+        bool masteredRestored = !masteredChanged;
+        pal = to_pal(target);
+        if (masteredChanged) {
+            const auto restoreAccess = prepare_mastered_waza(pal);
+            masteredRestored = restoreAccess.has_value() &&
+                               restore_mastered_waza_tail(*restoreAccess, *originalMastered) &&
+                               notify_mastered_waza_changed(pal, *restoreAccess);
+        }
+
+        pal = to_pal(target);
+        const auto restoreFunctions = prepare_active_write_functions();
+        const bool activeRestored = pal != nullptr && restoreFunctions.has_value() &&
+                                    write_active_sequence(pal, *restoreFunctions, originalActive);
+
+        auto restoredRead = read_state(target);
+        pal = to_pal(target);
+        const auto verifiedAccess = prepare_mastered_waza(pal);
+        const auto restoredMastered =
+            verifiedAccess.has_value() ? read_mastered_waza(*verifiedAccess) : std::nullopt;
+        const bool verified = masteredRestored && activeRestored &&
+                              restoredMastered == originalMastered && restoredRead.activeReadable &&
+                              same_active_values(restoredRead.state.activeSkills, originalActive);
+        return {
+            .status = verified ? skill_editor::ActiveWriteStatus::rolledBack
+                               : skill_editor::ActiveWriteStatus::rollbackFailed,
+            .readback = std::move(restoredRead),
+        };
+    };
+
+    if (masteredChanged && !append_mastered_waza(*masteredAccess, newlyMastered)) {
+        return {
+            .status = skill_editor::ActiveWriteStatus::preflightFailed,
+            .readback = std::move(originalRead),
+        };
+    }
+
+    if (masteredChanged) {
+        if (!notify_mastered_waza_changed(pal, *masteredAccess)) {
+            return restore();
+        }
+        pal = to_pal(target);
+        const auto verifiedAccess = prepare_mastered_waza(pal);
+        if (!verifiedAccess.has_value() ||
+            read_mastered_waza(*verifiedAccess) !=
+                std::optional<std::vector<std::uint16_t>>{desiredMastered}) {
+            return restore();
+        }
+    }
+
+    pal = to_pal(target);
+    const auto writeFunctions = prepare_active_write_functions();
+    if (pal == nullptr || !writeFunctions.has_value() ||
+        !write_active_sequence(pal, *writeFunctions, skills)) {
+        return restore();
+    }
+
+    auto actualRead = read_state(target);
+    pal = to_pal(target);
+    const auto actualAccess = prepare_mastered_waza(pal);
+    const auto actualMastered =
+        actualAccess.has_value() ? read_mastered_waza(*actualAccess) : std::nullopt;
+    const bool masteredVerified =
+        actualMastered == std::optional<std::vector<std::uint16_t>>{desiredMastered};
+    if (actualRead.activeReadable && same_active_values(actualRead.state.activeSkills, skills) &&
+        masteredVerified) {
+        return {
+            .status = skill_editor::ActiveWriteStatus::succeeded,
+            .readback = std::move(actualRead),
+        };
+    }
+
+    return restore();
 }
 
 /**
@@ -446,16 +767,18 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
         });
 
     // 读取每个主动技能的 Category（Melee/Shot/Support）。
+    auto* const palUtility = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
     auto* const getWazaDbFunction =
         find_function<UFunction>(STR("/Script/Pal.PalUtility:GetWazaDatabase"));
     UObject* wazaDatabase{};
-    if (utility != nullptr && getWazaDbFunction != nullptr) {
+    if (palUtility != nullptr && getWazaDbFunction != nullptr && worldContext != nullptr) {
         struct WazaDbParams {
             UObject* WorldContextObject{};
             UObject* ReturnValue{};
         } dbParams{};
         dbParams.WorldContextObject = worldContext;
-        utility->ProcessEvent(getWazaDbFunction, &dbParams);
+        palUtility->ProcessEvent(getWazaDbFunction, &dbParams);
         wazaDatabase = dbParams.ReturnValue;
     }
     auto* const findWazaFunction =

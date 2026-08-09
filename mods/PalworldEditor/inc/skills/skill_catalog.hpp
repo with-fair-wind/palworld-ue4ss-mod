@@ -81,6 +81,22 @@ enum class ActiveSkillCategory : std::uint8_t {
 };
 
 /**
+ * @brief 把 `FindWazaForBP` 的返回状态和原始类别值转换为安全类别。
+ * @param[in] found 数据库是否确认找到了技能。
+ * @param[in] rawCategory `EPalWazaCategory` 的底层整数。
+ * @return 仅成功查找且类别值位于已知范围时返回对应类别。
+ */
+[[nodiscard]] constexpr auto active_skill_category_from_lookup(
+    const bool found, const std::int64_t rawCategory) noexcept
+    -> std::optional<ActiveSkillCategory> {
+    if (!found || rawCategory < static_cast<std::int64_t>(ActiveSkillCategory::Melee) ||
+        rawCategory > static_cast<std::int64_t>(ActiveSkillCategory::Support)) {
+        return std::nullopt;
+    }
+    return static_cast<ActiveSkillCategory>(rawCategory);
+}
+
+/**
  * @brief 表示一个可供技能编辑界面展示的技能。
  */
 struct SkillOption {
@@ -329,11 +345,6 @@ template <typename Localizer>
         if (localizedName.empty()) {
             continue;
         }
-        // 过滤没有中文翻译的技能（纯 ASCII 名 = 可能废弃/内部，效果不正常）
-        if (std::ranges::all_of(localizedName,
-                                [](char c) { return static_cast<unsigned char>(c) < 128; })) {
-            continue;
-        }
         options.push_back({
             .id = std::string(definition.id),
             .localizedName = std::move(localizedName),
@@ -575,6 +586,32 @@ private:
     for (const auto& option : options) {
         if (category.has_value() && (!option.passiveMetadata.has_value() ||
                                      option.passiveMetadata->category != *category)) {
+            continue;
+        }
+        if (excludedIds.contains(option.id) || !matches_skill(option, query)) {
+            continue;
+        }
+        result.push_back(&option);
+    }
+    return result;
+}
+
+/**
+ * @brief 按主动技能类别、排除集合和搜索词生成不复制技能值的视图。
+ * @param[in] options 待筛选的主动技能目录；返回指针的有效期不超过该目录。
+ * @param[in] category 具体类别；空值表示“全部”。
+ * @param[in] query 当前语言名称或 Raw ID 搜索文本。
+ * @param[in] excludedIds 已装备且不应再次选择的主动技能 Raw ID。
+ * @return 与原目录顺序一致、指向原目录元素的非拥有指针。
+ */
+[[nodiscard]] inline auto filter_active_skill_views(
+    const std::span<const SkillOption> options, const std::optional<ActiveSkillCategory> category,
+    const std::string_view query, const std::unordered_set<std::string>& excludedIds)
+    -> std::vector<const SkillOption*> {
+    std::vector<const SkillOption*> result;
+    result.reserve(options.size());
+    for (const auto& option : options) {
+        if (category.has_value() && option.activeCategory != category) {
             continue;
         }
         if (excludedIds.contains(option.id) || !matches_skill(option, query)) {

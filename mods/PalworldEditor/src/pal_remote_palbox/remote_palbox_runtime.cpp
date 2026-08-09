@@ -139,16 +139,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         return false;
     }
 
-    std::vector<std::byte> params(static_cast<std::size_t>(function->GetParmsSize()));
-    function->InitializeStruct(params.data());
-    struct ParamsGuard {
-        UFunction* function{};
-        void* params{};
-        ~ParamsGuard() {
-            function->DestroyStruct(params);
-        }
-    } guard{.function = function, .params = params.data()};
-
+    pal_game::FunctionParams params{function};
     manager->ProcessEvent(function, params.data());
     FScriptArrayHelper_InContainer values(arrayProperty, params.data());
     output.reserve(static_cast<std::size_t>(std::max(values.Num(), 0)));
@@ -180,16 +171,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         return false;
     }
 
-    std::vector<std::byte> params(static_cast<std::size_t>(function->GetParmsSize()));
-    function->InitializeStruct(params.data());
-    struct ParamsGuard {
-        UFunction* function{};
-        void* params{};
-        ~ParamsGuard() {
-            function->DestroyStruct(params);
-        }
-    } guard{.function = function, .params = params.data()};
-
+    pal_game::FunctionParams params{function};
     idProperty->CopyCompleteValue(idProperty->ContainerPtrToValuePtr<void>(params.data()), &baseId);
     manager->ProcessEvent(function, params.data());
     model = modelProperty->GetObjectPropertyValue(
@@ -213,12 +195,8 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return output.A != 0 || output.B != 0 || output.C != 0 || output.D != 0;
 }
 
-/** @brief 读取建设圈半径（视觉圈）：优先世界设置 BaseCampAreaRange，回退据点 AreaRange。
- *  @details 视觉圈（地面蓝色建造圈）由世界设置 BaseCampAreaRange 决定，所有据点相同，
- *           随 PalWorldSettings 可配置；据点模型 AreaRange 随据点等级膨胀（可能大于视觉圈），
- *           仅作设置对象不可用时的兜底。 */
-[[nodiscard]] auto read_build_area_range(UObject* worldContext, UObject* model, float& output)
-    -> bool {
+/** @brief 从世界设置读取所有基地共用的视觉建设圈半径。 */
+[[nodiscard]] auto read_world_build_area_range(UObject* worldContext, float& output) -> bool {
     auto* const setting = get_game_setting(worldContext);
     if (pal_game::is_valid(setting)) {
         auto* const property = setting->GetPropertyByNameInChain(STR("BaseCampAreaRange"));
@@ -228,6 +206,11 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
             return output > 0.0F;
         }
     }
+    return false;
+}
+
+/** @brief 世界设置不可用时，从单个基地模型读取兼容性回退半径。 */
+[[nodiscard]] auto read_model_area_range(UObject* model, float& output) -> bool {
     auto* const property =
         pal_game::is_valid(model) ? model->GetPropertyByNameInChain(STR("AreaRange")) : nullptr;
     auto* const floatProperty = CastField<FFloatProperty>(property);
@@ -568,31 +551,37 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
 }  // namespace
 
 auto RemotePalboxRuntime::load_config(const std::string_view iniPath) -> void {
-    iniPath_ = std::string{iniPath};
     std::string content;
     if (std::ifstream stream{std::string{iniPath}, std::ios::binary}; stream) {
         content.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     }
-    config_ = parse_remote_palbox_config(content);
+    const auto config = parse_remote_palbox_config(content);
+    {
+        const std::lock_guard lock(snapshotMutex_);
+        iniPath_ = std::string{iniPath};
+        config_ = config;
+        lastMessage_ = "配置已加载" + std::string{content.empty() ? "（使用默认值）" : ""};
+    }
     trigger_.reset();
-    note("配置已加载" + std::string{content.empty() ? "（使用默认值）" : ""}, false);
 }
 
 auto RemotePalboxRuntime::set_config(const RemotePalboxConfig config) -> void {
+    std::string iniPath;
     {
         const std::lock_guard lock(snapshotMutex_);
         config_ = config;
+        iniPath = iniPath_;
     }
     // 按键状态机只允许游戏线程访问：标记后由下一帧 tick 重置。
     configDirty_.store(true, std::memory_order_release);
-    if (!iniPath_.empty()) {
-        std::ofstream stream{std::string{iniPath_}, std::ios::binary | std::ios::trunc};
+    if (!iniPath.empty()) {
+        std::ofstream stream{iniPath, std::ios::binary | std::ios::trunc};
         if (stream) {
             stream << serialize_remote_palbox_config(config);
         } else {
             Output::send<LogLevel::Warning>(
                 STR("PalworldEditor: failed to write remote palbox config '{}'\n"),
-                text_encoding::widen_ascii(iniPath_));
+                text_encoding::widen_ascii(iniPath));
         }
     }
 }
@@ -631,10 +620,7 @@ auto RemotePalboxRuntime::request_open() -> void {
 
 auto RemotePalboxRuntime::begin_world_transition() -> void {
     trigger_.reset();
-    {
-        const std::lock_guard lock(snapshotMutex_);
-        domainDisabled_ = false;
-    }
+    domainDisabled_.store(false, std::memory_order_release);
     domainProbed_ = false;
     requestedOpen_.store(false);
     consecutiveTimeoutCount_ = 0;
@@ -648,7 +634,7 @@ auto RemotePalboxRuntime::snapshot() const -> RemotePalboxSnapshot {
     const std::lock_guard lock(snapshotMutex_);
     return RemotePalboxSnapshot{
         .config = config_,
-        .domainDisabled = domainDisabled_,
+        .domainDisabled = domainDisabled_.load(std::memory_order_acquire),
         .lastMessage = lastMessage_,
         .openCount = openCount_,
         .failCount = failCount_,
@@ -664,7 +650,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         trigger_.end_trigger();
         if (result == RemotePalboxTriggerResult::opened) {
             consecutiveTimeoutCount_ = 0;
-        } else if (result == RemotePalboxTriggerResult::unavailable &&
+        } else if (result == RemotePalboxTriggerResult::unavailable && domainProbed_ &&
                    elapsed > kTriggerTimeBudget) {
             // 只有结构故障（unavailable）连续超时才停用；blocked/noBase 是用户操作
             // 被门控拒绝或环境问题，即使耗时较长也不停用。
@@ -679,13 +665,9 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return result;
     };
 
-    if (domainDisabled_) {
+    if (domainDisabled_.load(std::memory_order_acquire)) {
         return finish(RemotePalboxTriggerResult::disabled);
     }
-    if (!probe_domain()) {
-        return finish(RemotePalboxTriggerResult::unavailable);
-    }
-
     auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
     auto* const controller = local_player_controller(worldContext);
     auto* const playerState = find_singleton(STR("PalPlayerState"));
@@ -722,6 +704,15 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return finish(RemotePalboxTriggerResult::blocked);
     }
 
+    if (!probe_domain()) {
+        const bool disabled = domainDisabled_.load(std::memory_order_acquire);
+        if (!disabled) {
+            note("远程终端服务尚未就绪，请稍后重试", true);
+        }
+        return finish(disabled ? RemotePalboxTriggerResult::disabled
+                               : RemotePalboxTriggerResult::unavailable);
+    }
+
     auto* const manager = find_singleton(STR("PalBaseCampManager"));
     std::vector<FGuid> baseIds;
     if (manager == nullptr || !read_base_ids(manager, baseIds) || baseIds.empty()) {
@@ -732,11 +723,16 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     auto* const mapObjectManager = find_singleton(STR("PalMapObjectManager"));
     FVector playerLocation{};
     const bool havePlayerLocation = read_player_location(controller, playerLocation);
+    float worldAreaRange{};
+    const bool haveWorldAreaRange =
+        config.onlyInsideBaseCircle && read_world_build_area_range(worldContext, worldAreaRange);
     std::vector<BaseCampCandidate> candidates;
     candidates.reserve(baseIds.size());
     // 候选列表可能跳过解析失败的基地，索引与 baseIds 不对齐；用并行表保留来源 GUID。
     std::vector<FGuid> candidateBaseIds;
     candidateBaseIds.reserve(baseIds.size());
+    std::vector<FGuid> candidateOwnerMapObjectIds;
+    candidateOwnerMapObjectIds.reserve(baseIds.size());
     for (const auto& baseId : baseIds) {
         UObject* model{};
         if (!try_get_base_model(manager, baseId, model)) {
@@ -762,15 +758,18 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         bool playerInside = false;
         if (config.onlyInsideBaseCircle) {
             float areaRange{};
+            const bool haveAreaRange =
+                haveWorldAreaRange || read_model_area_range(model, areaRange);
+            if (haveWorldAreaRange) {
+                areaRange = worldAreaRange;
+            }
             playerInside =
-                haveCenter && havePlayerLocation &&
-                read_build_area_range(worldContext, model, areaRange) &&
+                haveCenter && havePlayerLocation && haveAreaRange &&
                 distanceSquared <= static_cast<double>(areaRange) * static_cast<double>(areaRange);
         }
-        candidates.push_back({.id = std::to_string(baseId.A) + std::to_string(baseId.B),
-                              .playerInside = playerInside,
-                              .distanceSquared = distanceSquared});
+        candidates.push_back({.playerInside = playerInside, .distanceSquared = distanceSquared});
         candidateBaseIds.push_back(baseId);
+        candidateOwnerMapObjectIds.push_back(ownerMapObjectId);
     }
     const auto pick = select_remote_base_camp(candidates);
     if (!pick.has_value()) {
@@ -783,16 +782,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return finish(RemotePalboxTriggerResult::blocked);
     }
     const auto& selectedBase = candidateBaseIds[*pick];
-    UObject* selectedModel{};
-    if (!try_get_base_model(manager, selectedBase, selectedModel)) {
-        note("基地模型解析失败", true);
-        return finish(RemotePalboxTriggerResult::unavailable);
-    }
-    FGuid ownerMapObjectId{};
-    if (!read_guid(selectedModel, STR("GetOwnerMapObjectInstanceId"), ownerMapObjectId)) {
-        note("终端实例解析失败", true);
-        return finish(RemotePalboxTriggerResult::unavailable);
-    }
+    const auto& ownerMapObjectId = candidateOwnerMapObjectIds[*pick];
 
     // 界面类解析优先级：缓存路径（跨世界保留）→ 终端模型自带的 PalBoxWiget →
     // 按资产路径主动加载。任一路径得到 UClass* 后仅在本次触发内使用，跨帧只保留路径字符串。
@@ -906,16 +896,17 @@ auto RemotePalboxRuntime::probe_domain() -> bool {
     if (domainProbed_) {
         return true;
     }
-    domainProbed_ = true;
     auto* const hudService = find_singleton(STR("PalHUDService"));
     auto* const manager = find_singleton(STR("PalBaseCampManager"));
+    if (hudService == nullptr || manager == nullptr) {
+        return false;
+    }
     const bool hudOk =
-        hudService != nullptr &&
         hudService->GetFunctionByNameInChain(STR("CreateDispatchParameterForK2Node")) != nullptr &&
         hudService->GetFunctionByNameInChain(STR("Push")) != nullptr;
-    const bool managerOk = manager != nullptr &&
-                           manager->GetFunctionByNameInChain(STR("GetBaseCampIds")) != nullptr &&
+    const bool managerOk = manager->GetFunctionByNameInChain(STR("GetBaseCampIds")) != nullptr &&
                            manager->GetFunctionByNameInChain(STR("TryGetModel")) != nullptr;
+    domainProbed_ = true;
     if (!hudOk || !managerOk) {
         set_disabled("关键反射点不可用，本世界已停用远程终端");
         return false;
@@ -924,7 +915,7 @@ auto RemotePalboxRuntime::probe_domain() -> bool {
 }
 
 auto RemotePalboxRuntime::set_disabled(const std::string& message) -> void {
-    domainDisabled_ = true;
+    domainDisabled_.store(true, std::memory_order_release);
     note(message, true);
     Output::send<LogLevel::Warning>(STR("PalworldEditor: remote palbox disabled - {}\n"),
                                     text_encoding::widen_ascii(message));

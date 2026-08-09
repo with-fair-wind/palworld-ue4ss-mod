@@ -57,6 +57,32 @@ enum class SkillKind {
     active,  /**< EquipWaza 主动技能槽。 */
 };
 
+/** @brief 一次技能状态读取的值与两个相互独立的可读性标记。 */
+struct SkillStateReadResult {
+    /** @brief 成功读取分区的当前值；不可读分区保持为空且不得用于写入决策。 */
+    SkillState state;
+    /** @brief 被动技能列表是否已完整、安全地读取。 */
+    bool passiveReadable{};
+    /** @brief 主动技能槽是否已完整、安全地读取。 */
+    bool activeReadable{};
+};
+
+/** @brief 游戏网关执行完整主动技能写入事务后的明确结局。 */
+enum class ActiveWriteStatus {
+    succeeded,       /**< 新序列写入并经重读验证成功。 */
+    preflightFailed, /**< 写入前置条件失败，未修改游戏状态。 */
+    rolledBack,      /**< 写入失败，但网关已确认恢复原序列。 */
+    rollbackFailed,  /**< 写入后未能确认恢复原序列。 */
+};
+
+/** @brief 主动技能事务结局及网关可获得的最终重读状态。 */
+struct ActiveWriteResult {
+    /** @brief 完整事务的明确结局。 */
+    ActiveWriteStatus status{ActiveWriteStatus::preflightFailed};
+    /** @brief 成功、失败或回滚后的最终读取结果。 */
+    SkillStateReadResult readback;
+};
+
 /** @brief 对选定技能类别执行的编辑动作。 */
 enum class SkillEditOperation {
     add,                /**< 新增一项技能。 */
@@ -186,9 +212,9 @@ public:
      * @brief 读取目标的实际游戏值。
      *
      * @param[in] target 已通过 is_valid 校验的临时目标句柄。
-     * @return 从游戏读取到的实际被动技能和主动技能槽状态。
+     * @return 两个技能分区的实际状态以及各自是否完整可读。
      */
-    virtual auto read_state(SkillTarget target) -> SkillState = 0;
+    virtual auto read_state(SkillTarget target) -> SkillStateReadResult = 0;
     /**
      * @brief 请求添加被动技能。
      *
@@ -212,13 +238,12 @@ public:
      *
      * @param[in] target 已通过 is_valid 校验的临时目标句柄。
      * @param[in] skills 最多三项的目标主动技能序列；输入顺序就是 EquipWaza 槽位顺序。
-     * @retval true 反射调用已成功发起，但游戏是否接受修改仍须重读验证。
-     * @retval false 反射调用未能发起；调用方仍应按需要重读实际状态。
+     * @return 网关内部完成写入、验证和必要回滚后的结构化事务结果。
      *
-     * 实现可能先清空再逐项重写。
+     * 实现拥有整个“清空、逐项写入、验证、回滚”事务，调用方不得再次猜测或重复回滚。
      */
     virtual auto rewrite_active(SkillTarget target, std::span<const ActiveSkill> skills)
-        -> bool = 0;
+        -> ActiveWriteResult = 0;
 };
 
 /** @brief 不对外暴露的请求验证、状态比较与执行辅助算法。 */
@@ -300,17 +325,28 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
         apply_passive_difference(gateway, request.target, original.passiveIds,
                                  request.desiredPassiveIds);
         auto actual = gateway.read_state(request.target);
-        if (same_passives(actual.passiveIds, request.desiredPassiveIds)) {
-            return result(SkillEditStatus::succeeded, std::move(actual), "Passive preset applied");
+        if (!actual.passiveReadable) {
+            return result(SkillEditStatus::rollbackFailed, original,
+                          "Passive preset was written but could not be verified");
+        }
+        if (same_passives(actual.state.passiveIds, request.desiredPassiveIds)) {
+            return result(SkillEditStatus::succeeded, std::move(actual.state),
+                          "Passive preset applied");
         }
 
-        apply_passive_difference(gateway, request.target, actual.passiveIds, original.passiveIds);
+        apply_passive_difference(gateway, request.target, actual.state.passiveIds,
+                                 original.passiveIds);
         auto rolledBack = gateway.read_state(request.target);
-        if (same_passives(rolledBack.passiveIds, original.passiveIds)) {
-            return result(SkillEditStatus::rolledBack, std::move(rolledBack),
+        if (rolledBack.passiveReadable &&
+            same_passives(rolledBack.state.passiveIds, original.passiveIds)) {
+            return result(SkillEditStatus::rolledBack, std::move(rolledBack.state),
                           "Preset failed; original passive skills restored");
         }
-        return result(SkillEditStatus::rollbackFailed, std::move(rolledBack),
+        if (!rolledBack.passiveReadable) {
+            return result(SkillEditStatus::rollbackFailed, original,
+                          "Preset rollback could not be verified");
+        }
+        return result(SkillEditStatus::rollbackFailed, std::move(rolledBack.state),
                       "Preset and rollback both failed");
     }
 
@@ -327,10 +363,15 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
 
         gateway.add_passive(request.target, request.newPassiveId);
         auto actual = gateway.read_state(request.target);
-        if (contains_passive(actual.passiveIds, request.newPassiveId)) {
-            return result(SkillEditStatus::succeeded, std::move(actual), "Passive skill added");
+        if (!actual.passiveReadable) {
+            return result(SkillEditStatus::failed, original,
+                          "Passive add was issued but could not be verified");
         }
-        return result(SkillEditStatus::failed, std::move(actual),
+        if (contains_passive(actual.state.passiveIds, request.newPassiveId)) {
+            return result(SkillEditStatus::succeeded, std::move(actual.state),
+                          "Passive skill added");
+        }
+        return result(SkillEditStatus::failed, std::move(actual.state),
                       "Game rejected passive skill add");
     }
 
@@ -342,10 +383,15 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
     if (request.operation == SkillEditOperation::remove) {
         gateway.remove_passive(request.target, request.oldPassiveId);
         auto actual = gateway.read_state(request.target);
-        if (!contains_passive(actual.passiveIds, request.oldPassiveId)) {
-            return result(SkillEditStatus::succeeded, std::move(actual), "Passive skill removed");
+        if (!actual.passiveReadable) {
+            return result(SkillEditStatus::failed, original,
+                          "Passive remove was issued but could not be verified");
         }
-        return result(SkillEditStatus::failed, std::move(actual),
+        if (!contains_passive(actual.state.passiveIds, request.oldPassiveId)) {
+            return result(SkillEditStatus::succeeded, std::move(actual.state),
+                          "Passive skill removed");
+        }
+        return result(SkillEditStatus::failed, std::move(actual.state),
                       "Game rejected passive skill remove");
     }
 
@@ -357,24 +403,34 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
     gateway.remove_passive(request.target, request.oldPassiveId);
     gateway.add_passive(request.target, request.newPassiveId);
     auto actual = gateway.read_state(request.target);
-    if (!contains_passive(actual.passiveIds, request.oldPassiveId) &&
-        contains_passive(actual.passiveIds, request.newPassiveId)) {
-        return result(SkillEditStatus::succeeded, std::move(actual), "Passive skill replaced");
+    if (!actual.passiveReadable) {
+        return result(SkillEditStatus::rollbackFailed, original,
+                      "Passive replacement was written but could not be verified");
+    }
+    if (!contains_passive(actual.state.passiveIds, request.oldPassiveId) &&
+        contains_passive(actual.state.passiveIds, request.newPassiveId)) {
+        return result(SkillEditStatus::succeeded, std::move(actual.state),
+                      "Passive skill replaced");
     }
 
-    if (contains_passive(actual.passiveIds, request.newPassiveId)) {
+    if (contains_passive(actual.state.passiveIds, request.newPassiveId)) {
         gateway.remove_passive(request.target, request.newPassiveId);
     }
-    if (!contains_passive(actual.passiveIds, request.oldPassiveId)) {
+    if (!contains_passive(actual.state.passiveIds, request.oldPassiveId)) {
         gateway.add_passive(request.target, request.oldPassiveId);
     }
 
     auto rolledBack = gateway.read_state(request.target);
-    if (same_passives(rolledBack.passiveIds, original.passiveIds)) {
-        return result(SkillEditStatus::rolledBack, std::move(rolledBack),
+    if (rolledBack.passiveReadable &&
+        same_passives(rolledBack.state.passiveIds, original.passiveIds)) {
+        return result(SkillEditStatus::rolledBack, std::move(rolledBack.state),
                       "Replace failed; original restored");
     }
-    return result(SkillEditStatus::rollbackFailed, std::move(rolledBack),
+    if (!rolledBack.passiveReadable) {
+        return result(SkillEditStatus::rollbackFailed, original,
+                      "Passive replacement rollback could not be verified");
+    }
+    return result(SkillEditStatus::rollbackFailed, std::move(rolledBack.state),
                   "Replace and rollback both failed");
 }
 
@@ -397,9 +453,8 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
 /**
  * @brief 执行主动技能编辑的验证、写入、重读与回滚状态机。
  *
- * 前置请求或槽位验证失败时直接返回 rejected，不触发回滚。仅当已经调用 rewrite_active，
- * 随后重读验证失败时，才重写原始序列并重读。恢复成功返回 rolledBack，
- * 恢复失败返回 rollbackFailed。
+ * 前置请求或槽位验证失败时直接返回 rejected。网关拥有完整写入和回滚事务，
+ * 本层只验证结构化结局与最终重读状态，不再发起第二次猜测性回滚。
  */
 [[nodiscard]] inline auto execute_active(ISkillGateway& gateway, const SkillEditRequest& request,
                                          const SkillState& original) -> SkillEditResult {
@@ -440,20 +495,45 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
         desired.erase(desired.begin() + static_cast<std::ptrdiff_t>(request.activeSlot));
     }
 
-    gateway.rewrite_active(request.target, desired);
-    auto actual = gateway.read_state(request.target);
-    if (same_active_sequence(actual.activeSkills, desired)) {
-        return result(SkillEditStatus::succeeded, std::move(actual), "Active skill slots updated");
+    auto write = gateway.rewrite_active(request.target, desired);
+    switch (write.status) {
+        case ActiveWriteStatus::succeeded:
+            if (write.readback.activeReadable &&
+                same_active_sequence(write.readback.state.activeSkills, desired)) {
+                return result(SkillEditStatus::succeeded, std::move(write.readback.state),
+                              "Active skill slots updated");
+            }
+            if (!write.readback.activeReadable) {
+                return result(SkillEditStatus::rollbackFailed, original,
+                              "Active write reported success but could not be read back");
+            }
+            return result(SkillEditStatus::rollbackFailed, std::move(write.readback.state),
+                          "Active write reported success without a matching readback");
+        case ActiveWriteStatus::preflightFailed:
+            return result(SkillEditStatus::failed, std::move(write.readback.state),
+                          "Active edit preflight failed before writing");
+        case ActiveWriteStatus::rolledBack:
+            if (write.readback.activeReadable &&
+                same_active_sequence(write.readback.state.activeSkills, original.activeSkills)) {
+                return result(SkillEditStatus::rolledBack, std::move(write.readback.state),
+                              "Active edit failed; original slots restored");
+            }
+            if (!write.readback.activeReadable) {
+                return result(SkillEditStatus::rollbackFailed, original,
+                              "Active rollback could not be read back");
+            }
+            return result(SkillEditStatus::rollbackFailed, std::move(write.readback.state),
+                          "Active rollback reported success without a matching readback");
+        case ActiveWriteStatus::rollbackFailed:
+            if (!write.readback.activeReadable) {
+                return result(SkillEditStatus::rollbackFailed, original,
+                              "Active edit and rollback could not be verified");
+            }
+            return result(SkillEditStatus::rollbackFailed, std::move(write.readback.state),
+                          "Active edit and rollback both failed");
     }
-
-    gateway.rewrite_active(request.target, original.activeSkills);
-    auto rolledBack = gateway.read_state(request.target);
-    if (same_active_sequence(rolledBack.activeSkills, original.activeSkills)) {
-        return result(SkillEditStatus::rolledBack, std::move(rolledBack),
-                      "Active edit failed; original slots restored");
-    }
-    return result(SkillEditStatus::rollbackFailed, std::move(rolledBack),
-                  "Active edit and rollback both failed");
+    return result(SkillEditStatus::rollbackFailed, std::move(write.readback.state),
+                  "Active edit returned an unknown transaction status");
 }
 }  // namespace detail
 
@@ -476,10 +556,18 @@ inline auto apply_passive_difference(ISkillGateway& gateway, const SkillTarget t
                 .message = "Target Pal is no longer valid"};
     }
 
-    const auto original = gateway.read_state(request.target);
+    auto original = gateway.read_state(request.target);
     if (request.kind == SkillKind::passive) {
-        return detail::execute_passive(gateway, request, original);
+        if (!original.passiveReadable) {
+            return detail::result(SkillEditStatus::failed, std::move(original.state),
+                                  "Passive skill state is not safely readable");
+        }
+        return detail::execute_passive(gateway, request, original.state);
     }
-    return detail::execute_active(gateway, request, original);
+    if (!original.activeReadable) {
+        return detail::result(SkillEditStatus::failed, std::move(original.state),
+                              "Active skill state is not safely readable");
+    }
+    return detail::execute_active(gateway, request, original.state);
 }
 }  // namespace skill_editor

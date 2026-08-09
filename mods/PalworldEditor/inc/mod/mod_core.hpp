@@ -168,6 +168,7 @@ private:
      */
     static auto render_skill_picker(const char* id,
                                     const std::vector<skill_editor::SkillOption>& options,
+                                    std::optional<skill_editor::ActiveSkillCategory> category,
                                     const std::unordered_set<std::string>& excludedIds,
                                     char* search, std::size_t searchSize,
                                     std::optional<skill_editor::SkillOption>& selected) -> bool;

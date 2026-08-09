@@ -15,8 +15,7 @@
 namespace pal_skills {
 /**
  * @brief 通过 `PalIndividualCharacterParameter` 反射 API 实现技能编辑网关。
- * @details 本类不拥有任何 Unreal 对象。所有成员函数都必须在 Unreal 初始化完成后的游戏线程调用；
- *          写接口的布尔返回值只表示能否发起反射调用，调用方仍需重读状态确认游戏是否接受修改。
+ * @details 本类不拥有任何 Unreal 对象。所有成员函数都必须在 Unreal 初始化完成后的游戏线程调用。
  */
 class PalSkillGateway final : public skill_editor::ISkillGateway {
 public:
@@ -31,10 +30,11 @@ public:
     /**
      * @brief 读取帕鲁当前的被动技能与前三个 `EquipWaza` 主动技能槽。
      * @param[in] target 已由 is_valid() 校验的技能目标句柄。
-     * @return 从游戏反射接口读取的实际技能状态；目标失效时返回空状态。
+     * @return 从游戏反射接口读取的实际技能状态与两个分区各自的可读性。
      * @details 主动技能数值通过 Palworld 1.0 生成定义表还原为 Raw ID，未知值回退为十进制文本。
      */
-    auto read_state(skill_editor::SkillTarget target) -> skill_editor::SkillState override;
+    auto read_state(skill_editor::SkillTarget target)
+        -> skill_editor::SkillStateReadResult override;
 
     /**
      * @brief 请求向帕鲁添加一个被动技能。
@@ -60,12 +60,11 @@ public:
      * @brief 按给定顺序重写帕鲁的全部 `EquipWaza` 主动技能槽。
      * @param[in] target 已由 is_valid() 校验的技能目标句柄。
      * @param[in] skills 期望的紧凑槽位序列，顺序即槽位顺序，最多包含 3 项。
-     * @retval true 已先清空现有槽位并按输入顺序发起全部添加调用。
-     * @retval false 目标、反射函数或输入数量无效，或写入期间目标失效。
-     * @warning 失败可能发生在清空之后，调用方必须通过重读和回滚恢复原始序列。
+     * @return 包含成功、前置失败、已回滚或回滚失败，以及最终重读状态的完整事务结果。
      */
     auto rewrite_active(skill_editor::SkillTarget target,
-                        std::span<const skill_editor::ActiveSkill> skills) -> bool override;
+                        std::span<const skill_editor::ActiveSkill> skills)
+        -> skill_editor::ActiveWriteResult override;
 
     /**
      * @brief 在数量和时间软预算内读取一批被动技能分类元数据。

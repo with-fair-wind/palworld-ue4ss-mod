@@ -128,9 +128,9 @@ void test_base_camp_selection_prefers_inside() {
     using pal_remote_palbox::BaseCampCandidate;
     using pal_remote_palbox::select_remote_base_camp;
     const std::vector<BaseCampCandidate> camps{
-        {.id = "far", .playerInside = false, .distanceSquared = 100.0},
-        {.id = "near-outside", .playerInside = false, .distanceSquared = 10.0},
-        {.id = "inside", .playerInside = true, .distanceSquared = 5000.0},
+        {.playerInside = false, .distanceSquared = 100.0},
+        {.playerInside = false, .distanceSquared = 10.0},
+        {.playerInside = true, .distanceSquared = 5000.0},
     };
     const auto pick = select_remote_base_camp(camps);
     CHECK(pick.has_value());
@@ -141,8 +141,8 @@ void test_base_camp_selection_nearest_fallback() {
     using pal_remote_palbox::BaseCampCandidate;
     using pal_remote_palbox::select_remote_base_camp;
     const std::vector<BaseCampCandidate> camps{
-        {.id = "far", .playerInside = false, .distanceSquared = 100.0},
-        {.id = "near", .playerInside = false, .distanceSquared = 10.0},
+        {.playerInside = false, .distanceSquared = 100.0},
+        {.playerInside = false, .distanceSquared = 10.0},
     };
     const auto pick = select_remote_base_camp(camps);
     CHECK(pick.has_value());
@@ -159,8 +159,8 @@ void test_base_camp_selection_multiple_inside_takes_first() {
     using pal_remote_palbox::BaseCampCandidate;
     using pal_remote_palbox::select_remote_base_camp;
     const std::vector<BaseCampCandidate> camps{
-        {.id = "a", .playerInside = true, .distanceSquared = 1.0},
-        {.id = "b", .playerInside = true, .distanceSquared = 0.5},
+        {.playerInside = true, .distanceSquared = 1.0},
+        {.playerInside = true, .distanceSquared = 0.5},
     };
     const auto pick = select_remote_base_camp(camps);
     CHECK(pick.has_value());
