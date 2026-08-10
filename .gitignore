@@ -13,7 +13,11 @@ compile_commands.json
 # IDE / editor
 *.user
 .vs/
-.vscode/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/settings.json
+!.vscode/tasks.json
 .idea/
 *.swp
 

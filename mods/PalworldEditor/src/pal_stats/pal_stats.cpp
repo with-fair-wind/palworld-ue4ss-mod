@@ -114,12 +114,19 @@ struct RuntimeLimits {
     if (utility == nullptr || function == nullptr) {
         return std::nullopt;
     }
-    struct Params {
-        UObject* WorldContextObject{};
-        UObject* ReturnValue{};
-    } params{.WorldContextObject = worldContext};
-    utility->ProcessEvent(function, &params);
-    auto* const setting = params.ReturnValue;
+    auto* const context = CastField<FObjectPropertyBase>(
+        function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const result = CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    if (!pal_game::is_valid(worldContext) || !pal_game::has_exact_parameter_count(function, 2) ||
+        !pal_game::is_input_parameter(context) || !pal_game::is_return_parameter(result)) {
+        return std::nullopt;
+    }
+    FunctionParams params{function};
+    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
+                                    worldContext);
+    utility->ProcessEvent(function, params.data());
+    auto* const setting =
+        result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
     if (!pal_game::is_valid(setting)) {
         return std::nullopt;
     }
@@ -221,7 +228,8 @@ struct RuntimeLimits {
     auto* const output = function == nullptr ? nullptr
                                              : CastField<FIntProperty>(function->FindProperty(
                                                    FName(STR("ReturnValue"), FNAME_Find)));
-    if (function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return std::nullopt;
     }
     FunctionParams params{function};
@@ -305,7 +313,9 @@ public:
         auto* const rank = function == nullptr ? nullptr
                                                : CastField<FIntProperty>(function->FindProperty(
                                                      FName(STR("addRank"), FNAME_Find)));
-        if (function == nullptr || suitability == nullptr || rank == nullptr) {
+        if (!pal_game::has_exact_parameter_count(function, 2) ||
+            !pal_game::is_input_parameter(suitability) || !pal_game::is_input_parameter(rank) ||
+            function->GetReturnProperty() != nullptr) {
             return std::nullopt;
         }
         return WorkSuitabilitySetter{function, suitability, rank};
@@ -336,7 +346,8 @@ private:
 
 /** @brief 通知游戏刷新由 SaveParameter 派生的缓存、委托和组件。 */
 [[nodiscard]] auto invoke_save_parameter_rep(UObject* pal, UFunction* function) -> bool {
-    if (!pal_game::is_valid(pal) || function == nullptr || function->GetParmsSize() != 0) {
+    if (!pal_game::is_valid(pal) || !pal_game::has_exact_parameter_count(function, 0) ||
+        function->GetReturnProperty() != nullptr) {
         return false;
     }
     pal->ProcessEvent(function, nullptr);
@@ -362,7 +373,8 @@ auto apply_database_to_parameter(UObject* pal) -> bool {
     auto* const input = function == nullptr ? nullptr
                                             : CastField<FObjectPropertyBase>(function->FindProperty(
                                                   FName(STR("IndividualParameter"), FNAME_Find)));
-    if (function == nullptr || input == nullptr || !pal_game::is_valid(pal)) {
+    if (!pal_game::is_valid(pal) || !pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(input) || function->GetReturnProperty() != nullptr) {
         return false;
     }
     FunctionParams params{function};
@@ -381,29 +393,20 @@ auto apply_database_to_parameter(UObject* pal) -> bool {
     auto* const function =
         db == nullptr ? nullptr
                       : db->GetFunctionByNameInChain(STR("GetFriendshipRequiredPointByRank"));
-    if (function == nullptr) {
+    auto* const rankProp = function == nullptr ? nullptr
+                                               : CastField<FIntProperty>(function->FindProperty(
+                                                     FName(STR("FriendshipRank"), FNAME_Find)));
+    auto* const outProp = function == nullptr ? nullptr
+                                              : CastField<FIntProperty>(function->FindProperty(
+                                                    FName(STR("OutRequiredPoint"), FNAME_Find)));
+    if (!pal_game::has_exact_parameter_count(function, 2) ||
+        !pal_game::is_input_parameter(rankProp) || !pal_game::is_output_parameter(outProp)) {
         return std::nullopt;
     }
-    std::vector<std::byte> buffer(static_cast<std::size_t>(function->GetParmsSize()));
-    function->InitializeStruct(buffer.data());
-    struct DestroyGuard {
-        UFunction* function{};
-        void* params{};
-        ~DestroyGuard() {
-            function->DestroyStruct(params);
-        }
-    } guard{.function = function, .params = buffer.data()};
-
-    auto* const rankProp =
-        CastField<FIntProperty>(function->FindProperty(FName(STR("FriendshipRank"), FNAME_Find)));
-    auto* const outProp =
-        CastField<FIntProperty>(function->FindProperty(FName(STR("OutRequiredPoint"), FNAME_Find)));
-    if (rankProp == nullptr || outProp == nullptr) {
-        return std::nullopt;
-    }
-    rankProp->SetPropertyValueInContainer(buffer.data(), static_cast<int32_t>(rank));
-    db->ProcessEvent(function, buffer.data());
-    return outProp->GetPropertyValueInContainer(buffer.data());
+    FunctionParams params{function};
+    rankProp->SetPropertyValueInContainer(params.data(), static_cast<int32_t>(rank));
+    db->ProcessEvent(function, params.data());
+    return outProp->GetPropertyValueInContainer(params.data());
 }
 }  // namespace
 

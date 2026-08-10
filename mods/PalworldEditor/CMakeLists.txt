@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(${TARGET} SHARED
     src/mod/dllmain.cpp
     src/mod/editor_ui.cpp
+    src/game/pal_base_camp_reflection.cpp
     src/items/item_ui.cpp
     src/skills/pal_skills.cpp
     src/skills/skill_ui.cpp
@@ -28,6 +29,9 @@ add_library(${TARGET} SHARED
     src/pal_identity/pal_identity_ui.cpp
     src/pal_stats/pal_stats.cpp
     src/pal_stats/stat_ui.cpp
+    src/pal_remote_palbox/remote_palbox_runtime.cpp
+    src/pal_remote_palbox/remote_palbox_ui.cpp
+    src/pal_revive/pal_revive.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
@@ -61,6 +65,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PalworldEditor.BaseResourceSharing
         COMMAND PalworldEditorBaseResourceSharingTests)
+
+    add_executable(PalworldEditorRemotePalboxTests
+        tests/remote_palbox_tests.cpp
+    )
+    target_include_directories(PalworldEditorRemotePalboxTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorRemotePalboxTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorRemotePalboxTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.RemotePalbox
+        COMMAND PalworldEditorRemotePalboxTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).

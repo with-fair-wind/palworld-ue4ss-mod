@@ -83,7 +83,9 @@ struct SaveFields {
                              ? nullptr
                              : CastField<FObjectPropertyBase>(
                                    function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
-    if (utility == nullptr || function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return nullptr;
     }
     FunctionParams params{function};
@@ -105,7 +107,8 @@ struct SaveFields {
     auto* const output = function == nullptr ? nullptr
                                              : CastField<FBoolProperty>(function->FindProperty(
                                                    FName(STR("ReturnValue"), FNAME_Find)));
-    if (function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return std::nullopt;
     }
     FunctionParams params{function};
@@ -122,7 +125,8 @@ struct SaveFields {
     auto* const input = function == nullptr ? nullptr
                                             : CastField<FObjectPropertyBase>(function->FindProperty(
                                                   FName(STR("IndividualParameter"), FNAME_Find)));
-    if (function == nullptr || input == nullptr || !pal_game::is_valid(pal)) {
+    if (!pal_game::is_valid(pal) || !pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(input) || function->GetReturnProperty() != nullptr) {
         return false;
     }
     FunctionParams params{function};
@@ -135,7 +139,8 @@ struct SaveFields {
     auto* const function = pal_game::is_valid(pal)
                                ? pal->GetFunctionByNameInChain(STR("OnRep_SaveParameter"))
                                : nullptr;
-    if (function == nullptr || function->GetParmsSize() != 0) {
+    if (!pal_game::has_exact_parameter_count(function, 0) ||
+        function->GetReturnProperty() != nullptr) {
         return false;
     }
     pal->ProcessEvent(function, nullptr);

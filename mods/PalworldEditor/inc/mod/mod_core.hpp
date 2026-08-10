@@ -28,6 +28,7 @@
 #include <items/item_catalog.hpp>
 #include <pal_identity/pal_identity.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
+#include <pal_remote_palbox/remote_palbox_runtime.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <pal_stats/pal_stats.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
@@ -69,6 +70,24 @@ private:
 
     /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
     static auto unregister_callback(Hook::GlobalCallbackId& callbackId) -> void;
+
+    /** @brief 推进爪钩、资源共享、远程终端及一次性诊断请求。 */
+    auto process_runtime_services(float deltaSeconds) -> void;
+
+    /** @brief 消费背包给予/修改/读取请求，并返回主背包安全门状态。 */
+    [[nodiscard]] auto process_inventory_requests(float deltaSeconds) -> bool;
+
+    /** @brief 消费目标选择、技能、属性和形态编辑请求。 */
+    auto process_pal_edit_requests() -> void;
+
+    /** @brief 推进物品目录、技能目录和被动技能分类初始化任务。 */
+    auto process_initialization_tasks(bool worldContextReady) -> void;
+
+    /** @brief 汇总可观察运行时值，并按脏标记向 GUI 发布技能快照。 */
+    auto publish_runtime_state() -> void;
+
+    /** @brief 消费复活与 UObject 发现等低频一次性请求。 */
+    auto process_utility_requests() -> void;
 
     /** @brief 在游戏线程刷新技能目录，并为成功的被动目录建立增量分类任务。 */
     auto refresh_skill_catalog_on_game_thread() -> void;
@@ -175,6 +194,7 @@ private:
      */
     static auto render_skill_picker(const char* id,
                                     const std::vector<skill_editor::SkillOption>& options,
+                                    std::optional<skill_editor::ActiveSkillCategory> category,
                                     const std::unordered_set<std::string>& excludedIds,
                                     char* search, std::size_t searchSize,
                                     std::optional<skill_editor::SkillOption>& selected) -> bool;
@@ -237,6 +257,7 @@ private:
 
     /** @brief 渲染同公会跨据点制作/建造材料共享开关与运行状态。 */
     static void render_base_resource_sharing(PalworldEditorMod* self);
+    static void render_remote_palbox(PalworldEditorMod* self);
 
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
@@ -323,6 +344,8 @@ private:
     /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
     std::atomic<bool> wantProbeObject_{false};
 
+    /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
+    pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;
     /** @brief 游戏线程拥有的跨据点资源反射桥；GUI 只读取其值快照。 */
     base_resource_sharing::PalBaseResourceBridge baseResourceBridge_;
     /** @brief GUI/启动阶段提交给游戏线程的资源共享偏好。 */
