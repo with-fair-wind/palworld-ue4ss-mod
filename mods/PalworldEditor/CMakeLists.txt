@@ -19,6 +19,7 @@ add_library(${TARGET} SHARED
     src/mod/editor_ui.cpp
     src/game/pal_base_camp_reflection.cpp
     src/items/item_ui.cpp
+    src/items/stack_limit_gateway.cpp
     src/skills/pal_skills.cpp
     src/skills/skill_ui.cpp
     src/grappling_hook/grapple_cooldown_gateway.cpp

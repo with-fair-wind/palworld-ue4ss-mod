@@ -13,6 +13,30 @@
 #include <mod/editor_ui.hpp>
 #include <mod/mod_core.hpp>
 
+namespace {
+[[nodiscard]] auto stack_limit_phase_label(
+    const item_stack_limit::StackLimitRuntimePhase phase) noexcept -> const char* {
+    using enum item_stack_limit::StackLimitRuntimePhase;
+    switch (phase) {
+        case off:
+            return "已关闭";
+        case readyToApply:
+            return "等待应用";
+        case applying:
+            return "正在应用";
+        case active:
+            return "已生效";
+        case waitingForRetry:
+            return "未找到目标；等待手动重试";
+        case restoring:
+            return "正在恢复或保留恢复责任";
+        case safetyDisabled:
+            return "安全停用";
+    }
+    return "未知";
+}
+}  // namespace
+
 auto PalworldEditorMod::clamp(int v, int lo, int hi) -> int {
     return v < lo ? lo : (v > hi ? hi : v);
 }
@@ -108,10 +132,28 @@ void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
 
 void PalworldEditorMod::render_stack_unlimited(PalworldEditorMod* self) {
     editor_ui::section_header("物品堆叠");
-    bool unlimited = self->requestedStackUnlimited_.load(std::memory_order_acquire);
-    if (ImGui::Checkbox("物品堆叠无上限", &unlimited)) {
-        self->requestedStackUnlimited_.store(unlimited, std::memory_order_release);
-        self->stackSettingDirty_.store(true, std::memory_order_release);
+    const auto phase = self->stack_limit_phase_.load(std::memory_order_acquire);
+    const bool mutationsDisabled =
+        phase == item_stack_limit::StackLimitRuntimePhase::applying ||
+        phase == item_stack_limit::StackLimitRuntimePhase::restoring ||
+        phase == item_stack_limit::StackLimitRuntimePhase::safetyDisabled;
+    bool unlimited = self->requested_stack_unlimited_.load(std::memory_order_acquire);
+    ImGui::BeginDisabled(mutationsDisabled);
+    if (ImGui::Checkbox("普通物品高堆叠上限（999,999,999）", &unlimited)) {
+        self->requested_stack_unlimited_.store(unlimited, std::memory_order_release);
+        self->stack_setting_dirty_.store(true, std::memory_order_release);
     }
-    ImGui::TextDisabled("仅本次游戏进程有效；关闭开关或切换世界后恢复原值。");
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("状态：%s", stack_limit_phase_label(phase));
+    ImGui::TextDisabled("仅修改原始上限为 9999 的普通物品；装备、饰品等特殊物品保持原值。");
+    ImGui::TextDisabled("仅本次游戏进程有效；关闭开关或切换世界时按对象恢复原值。");
+
+    std::string status;
+    {
+        const std::lock_guard lock(self->stack_limit_status_mutex_);
+        status = self->stack_limit_status_;
+    }
+    if (!status.empty()) {
+        ImGui::TextWrapped("%s", status.c_str());
+    }
 }
