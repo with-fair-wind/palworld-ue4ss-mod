@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <items/item_catalog.hpp>
+#include <items/stack_limit_service.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <skills/active_skill_definitions.hpp>
@@ -655,6 +656,123 @@ void test_item_catalog_deduplicates_indexes_and_sorts() {
     const auto filtered = item_catalog::filter_items(catalog, "alpha");
     CHECK(filtered.size() == 1);
     CHECK(filtered[0]->id == "PalSphere");
+}
+
+void test_stack_limit_expands_only_native_stackable_items() {
+    CHECK(item_stack_limit::is_expandable_limit(9999));
+    CHECK(!item_stack_limit::is_expandable_limit(1));
+    CHECK(!item_stack_limit::is_expandable_limit(10));
+    CHECK(!item_stack_limit::is_expandable_limit(999999999));
+    CHECK(item_stack_limit::kExpandedStackLimit < INT32_MAX);
+}
+
+void test_stack_limit_ledger_applies_once_and_restores_exact_records() {
+    using enum item_stack_limit::StackLimitApplyOutcome;
+    using enum item_stack_limit::StackLimitRuntimePhase;
+    using enum item_stack_limit::StackLimitWork;
+
+    item_stack_limit::StackLimitOverrideLedger ledger;
+    CHECK(ledger.begin_world(7));
+    CHECK(ledger.phase(7) == off);
+    CHECK(ledger.next_work(7, true) == none);
+
+    ledger.set_desired(true);
+    CHECK(ledger.phase(7) == readyToApply);
+    CHECK(ledger.next_work(7, true) == apply);
+    CHECK(ledger.begin_apply(7));
+    CHECK(!ledger.begin_apply(7));
+    CHECK(ledger.complete_apply(7, succeeded,
+                                {{.objectFullName = L"PalStaticItemData /Game/Item/Wood.Wood",
+                                  .itemId = "Wood",
+                                  .originalLimit = item_stack_limit::kNativeStackableLimit}}));
+    CHECK(ledger.phase(7) == active);
+    CHECK(ledger.records().size() == 1);
+    CHECK(ledger.next_work(7, true) == none);
+
+    ledger.set_desired(false);
+    CHECK(ledger.next_work(7, true) == restore);
+    CHECK(ledger.complete_restore(true));
+    CHECK(ledger.records().empty());
+    CHECK(ledger.phase(7) == off);
+}
+
+void test_stack_limit_ledger_requires_explicit_retry_after_unavailable_target() {
+    using enum item_stack_limit::StackLimitApplyOutcome;
+    using enum item_stack_limit::StackLimitRuntimePhase;
+    using enum item_stack_limit::StackLimitWork;
+
+    item_stack_limit::StackLimitOverrideLedger ledger;
+    CHECK(ledger.begin_world(3));
+    ledger.set_desired(true);
+    CHECK(ledger.begin_apply(3));
+    CHECK(ledger.complete_apply(3, targetUnavailable));
+    CHECK(ledger.phase(3) == waitingForRetry);
+    CHECK(ledger.next_work(3, true) == none);
+
+    ledger.set_desired(false);
+    ledger.set_desired(true);
+    CHECK(ledger.next_work(3, true) == apply);
+}
+
+void test_stack_limit_rollback_failure_retains_cleanup_responsibility() {
+    using enum item_stack_limit::StackLimitApplyOutcome;
+    using enum item_stack_limit::StackLimitRuntimePhase;
+    using enum item_stack_limit::StackLimitWork;
+
+    item_stack_limit::StackLimitOverrideLedger ledger;
+    CHECK(ledger.begin_world(9));
+    ledger.set_desired(true);
+    CHECK(ledger.begin_apply(9));
+    CHECK(ledger.complete_apply(9, rollbackFailed,
+                                {{.objectFullName = L"PalStaticItemData /Game/Item/Stone.Stone",
+                                  .itemId = "Stone",
+                                  .originalLimit = item_stack_limit::kNativeStackableLimit}}));
+    CHECK(ledger.safety_disabled());
+    CHECK(ledger.phase(9) == restoring);
+    CHECK(ledger.next_work(9, true) == restore);
+
+    const item_stack_limit::StackLimitOverrideRecord remaining{
+        .objectFullName = L"PalStaticItemData /Game/Item/Stone.Stone",
+        .itemId = "Stone",
+        .originalLimit = item_stack_limit::kNativeStackableLimit,
+    };
+    CHECK(ledger.complete_restore(false, {remaining}));
+    CHECK(ledger.records().size() == 1);
+    CHECK(ledger.records().front() == remaining);
+    CHECK(ledger.next_work(9, true) == none);
+    ledger.allow_restore_retry();
+    CHECK(ledger.next_work(9, true) == restore);
+    CHECK(ledger.complete_restore(true));
+    CHECK(ledger.records().empty());
+    CHECK(ledger.phase(9) == safetyDisabled);
+
+    ledger.set_desired(true);
+    CHECK(ledger.next_work(9, true) == none);
+}
+
+void test_stack_limit_restore_rejects_inconsistent_gateway_result() {
+    item_stack_limit::StackLimitOverrideLedger ledger;
+    CHECK(ledger.begin_world(12));
+    ledger.set_desired(true);
+    CHECK(ledger.begin_apply(12));
+    CHECK(ledger.complete_apply(12, item_stack_limit::StackLimitApplyOutcome::succeeded,
+                                {{.objectFullName = L"PalStaticItemData /Game/Item/Wood.Wood",
+                                  .itemId = "Wood",
+                                  .originalLimit = item_stack_limit::kNativeStackableLimit}}));
+    ledger.set_desired(false);
+
+    CHECK(!ledger.complete_restore(false));
+    CHECK(ledger.safety_disabled());
+    CHECK(ledger.records().size() == 1);
+
+    const item_stack_limit::StackLimitOverrideRecord unknown{
+        .objectFullName = L"PalStaticItemData /Game/Item/Unknown.Unknown",
+        .itemId = "Unknown",
+        .originalLimit = item_stack_limit::kNativeStackableLimit,
+    };
+    CHECK(!ledger.complete_restore(false, {unknown}));
+    CHECK(ledger.records().size() == 1);
+    CHECK(ledger.records().front().itemId == "Wood");
 }
 
 class FakeSkillGateway final : public skill_editor::ISkillGateway {
@@ -1754,6 +1872,11 @@ auto main() -> int {
     test_item_catalog_labels_and_search();
     test_item_catalog_scan_scheduler_is_bounded_and_world_scoped();
     test_item_catalog_deduplicates_indexes_and_sorts();
+    test_stack_limit_expands_only_native_stackable_items();
+    test_stack_limit_ledger_applies_once_and_restores_exact_records();
+    test_stack_limit_ledger_requires_explicit_retry_after_unavailable_target();
+    test_stack_limit_rollback_failure_retains_cleanup_responsibility();
+    test_stack_limit_restore_rejects_inconsistent_gateway_result();
     test_passive_edits_validate_target_and_limits();
     test_skill_edits_fail_closed_when_requested_state_is_unreadable();
     test_passive_add_remove_and_replace_reread_state();

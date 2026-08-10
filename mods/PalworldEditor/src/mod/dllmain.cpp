@@ -25,6 +25,7 @@
 #include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
+#include <Unreal/UnrealInitializer.hpp>
 #include <common/text_encoding.hpp>
 #include <mod/mod_core.hpp>
 #include <pal_revive/pal_revive.hpp>
@@ -49,6 +50,15 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
 }
 
 PalworldEditorMod::~PalworldEditorMod() {
+    if (!stack_limit_ledger_.records().empty()) {
+        if (IsGameThreadInitialized() && IsInGameThread()) {
+            static_cast<void>(restore_stack_limit_overrides("卸载"));
+        } else {
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: unload did not run on the game thread; stack-limit "
+                    "records remain until the process exits or the affected objects reload.\n"));
+        }
+    }
     baseResourceBridge_.shutdown_hooks();
     unregister_callback(engineTickCallbackId_);
     unregister_callback(loadMapPostCallbackId_);
@@ -95,6 +105,9 @@ auto PalworldEditorMod::on_unreal_init() -> void {
 
     wantProbeObject_.store(true);
     want_scan_items_.store(true);
+    static_cast<void>(stack_limit_ledger_.begin_world(worldSession_.generation()));
+    stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
+                             std::memory_order_release);
     baseResourceBridge_.on_world_ready(worldSession_.generation());
     static_cast<void>(grappleLedger_.begin_world(worldSession_.generation()));
     grappleReadinessScheduler_.begin_world(worldSession_.generation());
@@ -131,6 +144,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
 
     process_runtime_services(deltaSeconds);
     const auto worldContextReady = process_inventory_requests(deltaSeconds);
+    process_stack_limit_work(worldContextReady);
     process_pal_edit_requests();
     process_initialization_tasks(worldContextReady);
     process_utility_requests();
@@ -607,6 +621,73 @@ auto PalworldEditorMod::revive_team_pals() -> void {
     skillSnapshotDirty_ = true;
 }
 
+auto PalworldEditorMod::process_stack_limit_work(const bool worldContextReady) -> void {
+    if (worldContextReady && stack_setting_dirty_.exchange(false, std::memory_order_acq_rel)) {
+        const bool desired = requested_stack_unlimited_.load(std::memory_order_acquire);
+        stack_limit_ledger_.set_desired(desired);
+        if (!desired && stack_limit_ledger_.records().empty()) {
+            publish_stack_limit_status("已取消高堆叠上限请求；当前没有需要恢复的对象。");
+        }
+    }
+
+    const auto generation = worldSession_.generation();
+    switch (stack_limit_ledger_.next_work(generation, worldContextReady)) {
+        case item_stack_limit::StackLimitWork::none:
+            break;
+        case item_stack_limit::StackLimitWork::apply: {
+            if (!stack_limit_ledger_.begin_apply(generation)) {
+                break;
+            }
+            stack_limit_phase_.store(item_stack_limit::StackLimitRuntimePhase::applying,
+                                     std::memory_order_release);
+            auto result = item_stack_limit::apply_stack_limit_override();
+            static_cast<void>(stack_limit_ledger_.complete_apply(
+                generation, item_stack_limit::to_apply_outcome(result.status),
+                std::move(result.records)));
+            if (!stack_limit_ledger_.desired()) {
+                requested_stack_unlimited_.store(false, std::memory_order_release);
+            }
+            publish_stack_limit_status(std::move(result.message));
+            break;
+        }
+        case item_stack_limit::StackLimitWork::restore:
+            static_cast<void>(restore_stack_limit_overrides("关闭开关"));
+            break;
+    }
+
+    stack_limit_phase_.store(stack_limit_ledger_.phase(generation), std::memory_order_release);
+}
+
+auto PalworldEditorMod::restore_stack_limit_overrides(const std::string_view reason) -> bool {
+    stack_limit_ledger_.set_desired(false);
+    requested_stack_unlimited_.store(false, std::memory_order_release);
+    if (stack_limit_ledger_.records().empty()) {
+        stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
+                                 std::memory_order_release);
+        return true;
+    }
+
+    auto result = item_stack_limit::restore_stack_limit_override(stack_limit_ledger_.records());
+    const bool succeeded = result.succeeded();
+    const bool ledgerAccepted =
+        stack_limit_ledger_.complete_restore(succeeded, std::move(result.records));
+    std::string message{reason};
+    message.append("：");
+    message.append(result.message);
+    if (!ledgerAccepted) {
+        message.append(" 反射结果与恢复账本不一致；已保留原账本并安全停用。");
+    }
+    publish_stack_limit_status(std::move(message));
+    stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
+                             std::memory_order_release);
+    return succeeded;
+}
+
+auto PalworldEditorMod::publish_stack_limit_status(std::string message) -> void {
+    const std::lock_guard lock(stack_limit_status_mutex_);
+    stack_limit_status_ = std::move(message);
+}
+
 auto PalworldEditorMod::process_grapple_work(const float deltaSeconds) -> void {
     if (!worldLifecycleCallbacksReady_.load(std::memory_order_acquire)) {
         grappleRuntimePhase_.store(grappling_hook::CooldownRuntimePhase::waitingForWorld,
@@ -721,6 +802,14 @@ auto PalworldEditorMod::begin_world_transition() -> void {
         // 当前世界即将销毁，无法恢复的对象不会跨世界存活；清除旧路径但保留安全停用状态。
         grappleLedger_.complete_restore(true);
     }
+    // 静态物品数据可能跨地图存活；切图前按精确账本恢复，失败时保留责任并停用再次应用。
+    stack_limit_ledger_.set_desired(false);
+    static_cast<void>(restore_stack_limit_overrides("世界切换"));
+    requested_stack_unlimited_.store(false, std::memory_order_release);
+    stack_setting_dirty_.store(false, std::memory_order_release);
+    if (stack_limit_ledger_.records().empty()) {
+        static_cast<void>(stack_limit_ledger_.begin_world(nextWorldGeneration));
+    }
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
     grappleReadinessScheduler_.begin_world(nextWorldGeneration);
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
@@ -803,6 +892,16 @@ auto PalworldEditorMod::finish_world_transition() -> void {
         worldSession_.begin_transition();
     }
     worldSession_.finish_transition();
+    if (!stack_limit_ledger_.records().empty()) {
+        // 对切图前已不可解析的对象只在新世界就绪事件再尝试一次，禁止退化为 EngineTick 轮询。
+        stack_limit_ledger_.allow_restore_retry();
+        static_cast<void>(restore_stack_limit_overrides("新世界就绪"));
+    }
+    if (stack_limit_ledger_.records().empty()) {
+        static_cast<void>(stack_limit_ledger_.begin_world(worldSession_.generation()));
+    }
+    stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
+                             std::memory_order_release);
     remotePalboxRuntime_.finish_world_transition();
     baseResourceBridge_.on_world_ready(worldSession_.generation());
     itemCatalogScanScheduler_.begin_world(worldSession_.generation());

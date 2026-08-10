@@ -26,6 +26,7 @@
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
+#include <items/stack_limit_gateway.hpp>
 #include <pal_identity/pal_identity.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
@@ -65,7 +66,6 @@ private:
     static constexpr std::size_t kPassiveMetadataBatchSize = 8;
     /** @brief 每个 EngineTick 被动技能分类反射的软时间预算。 */
     static constexpr auto kPassiveMetadataBudget = std::chrono::microseconds{500};
-
     /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
     static auto unregister_callback(Hook::GlobalCallbackId& callbackId) -> void;
 
@@ -107,6 +107,19 @@ private:
 
     /** @brief 遍历队伍槽位，复活所有处于死亡/濒死状态的帕鲁。 */
     auto revive_team_pals() -> void;
+
+    /** @brief 在主背包安全门就绪后消费堆叠上限请求并执行一次性事务。 */
+    auto process_stack_limit_work(bool worldContextReady) -> void;
+
+    /**
+     * @brief 按纯值账本恢复本 mod 实际覆盖的 MaxStackCount。
+     * @param[in] reason 用于面向用户诊断的生命周期阶段。
+     * @return 全部仍存在对象是否恢复并通过重读验证。
+     */
+    [[nodiscard]] auto restore_stack_limit_overrides(std::string_view reason) -> bool;
+
+    /** @brief 发布堆叠上限运行阶段与面向用户的诊断文本。 */
+    auto publish_stack_limit_status(std::string message) -> void;
 
     /**
      * @brief 在关闭开关或切图前恢复全部活动爪钩覆盖。
@@ -190,6 +203,9 @@ private:
                                     const std::unordered_set<std::string>& excludedIds,
                                     char* search, std::size_t searchSize,
                                     std::optional<skill_editor::SkillOption>& selected) -> bool;
+
+    /** @brief 渲染物品堆叠无上限开关；切换时向游戏线程提交一次进程内请求。 */
+    static void render_stack_unlimited(PalworldEditorMod* self);
 
     /** @brief 渲染物品 Raw ID 与数量输入，并提交给予物品请求。 */
     static void render_give_items(PalworldEditorMod* self);
@@ -320,6 +336,10 @@ private:
     std::atomic<bool> want_read_{false};
     /** @brief 请求游戏线程在下一次更新中输出 UObject 诊断信息。 */
     std::atomic<bool> want_discover_{false};
+    /** @brief GUI 线程提交的高堆叠上限偏好。 */
+    std::atomic<bool> requested_stack_unlimited_{false};
+    /** @brief 通知 EngineTick 消费最新的堆叠上限偏好。 */
+    std::atomic<bool> stack_setting_dirty_{false};
     /** @brief GUI 线程提交、game_thread_tick 消费的一次性复活请求。 */
     std::atomic<bool> wantReviveTeam_{false};
     /** @brief 请求游戏线程在下一次更新中重新扫描物品目录。 */
@@ -328,6 +348,16 @@ private:
     item_catalog::ItemCatalogScanScheduler itemCatalogScanScheduler_;
     /** @brief 请求首次 EngineTick 输出 UObject 诊断信息。 */
     std::atomic<bool> wantProbeObject_{false};
+
+    /** @brief 只保存对象全名、Raw ID、原值和事务阶段的纯值账本。 */
+    item_stack_limit::StackLimitOverrideLedger stack_limit_ledger_;
+    /** @brief 游戏线程发布、GUI 只读的堆叠上限运行阶段。 */
+    std::atomic<item_stack_limit::StackLimitRuntimePhase> stack_limit_phase_{
+        item_stack_limit::StackLimitRuntimePhase::off};
+    /** @brief 保护游戏线程发布、GUI 复制的堆叠上限诊断。 */
+    std::mutex stack_limit_status_mutex_;
+    /** @brief 最近一次应用或恢复事务的面向用户文本。 */
+    std::string stack_limit_status_;
 
     /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
     pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;
