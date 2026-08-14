@@ -65,23 +65,25 @@ dump 查找速查：
 
 ## 二·B、捕获覆盖 Hook 清单（4 条）
 
-定义于 `src/capture_override/capture_override_runtime.cpp`。仅在主开关开启时注册 pre-hook，
-回调内从参数按名读取 `TargetCharacter`（`APalCharacter*`），写入捕获标志。任一路径解析失败
+定义于 `src/capture_override/capture_override_runtime.cpp`。仅在主开关开启时注册成对的
+pre/post-hook；原生函数与 Blueprint 脚本函数统一通过 `common/function_hook_registry` 登记。
+pre 回调完整校验签名并临时覆盖捕获字段，post 回调恢复精确原值。任一路径、签名、字段或恢复失败
 则安全停用本世界。
 
 | 路径 | 回调读取的参数 | 源文件:行 |
 |---|---|---|
-| `PalSphereBodyBase:SetupInternal` | `TargetCharacter`（唯一参数） | `capture_override_runtime.cpp` `kCaptureHookPaths` |
+| `PalSphereBodyBase:SetupInternal` | `TargetCharacter`（唯一参数） | `capture_override_runtime.cpp` `kCaptureHookManifest` |
 | `PalPlayerController:SetupInternalForSphere` | `TargetCharacter`（末参） | 同上 |
 | `PalPlayerController:SetupInternalForSphere_ToServer` | `TargetCharacter`（末参） | 同上 |
 | `PalPlayerController:SetupInternalForSphere_ToALL` | `TargetCharacter`（末参） | 同上 |
 
-回调内写入的字段（主开关）：`StaticCharacterParameterComponent` 的 `IsUncapturable`、
+pre 回调临时写入、post 回调恢复的字段（主开关）：`StaticCharacterParameterComponent` 的 `IsUncapturable`、
 `IsBoss_Database`、`IsTowerBoss_Database`、`IsRaidBoss_Database`、`IsPredatorBoss_Database`、
 `IsRaidBoss_BP`（均 bool=false）；个体参数 `bIsUncapturable`（bool=false）。
 强制 100% 子选项额外写：`CaptureSuccessRate`（float=9999.0）、`SetSpawnedCharacterType(0)`、
-`bIsForceCapturable`（bool=true）。角色→组件路径：`CharacterParameterComponent` 字段 →
-`GetIndividualParameter()` UFunction。
+`bIsForceCapturable`（bool=true）。个体字段同时通过 `SetUncapturable(bool)` /
+`SetForceCapturable(bool)` 原生 setter 通知；形态类型通过 `SetSpawnedCharacterType(enum)` 写入。
+角色→组件路径：`CharacterParameterComponent` 字段 → `GetIndividualParameter()` UFunction。
 
 ---
 
@@ -115,6 +117,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `GetOtomoIndividualHandle` | `UPalOtomoHolderComponentBase` | 按槽取 Otomo Handle | `inc/game/pal_game.hpp:125` |
 | `TryGetSpawnedOtomoHandle` | `UPalOtomoHolderComponentBase` | 当前出战判断（形态锁定） | `inc/game/pal_game.hpp:231` |
 | `TryGetIndividualParameter` | Handle | 取个体参数对象 | `inc/game/pal_game.hpp:247`, `src/pal_revive/pal_revive.cpp:210` |
+| `GetIndividualParameter` | CharacterParameterComponent | 捕获覆盖目标个体参数 | `src/capture_override/capture_override_runtime.cpp` |
 | `GetPalId` | Handle | 取 `FPalInstanceID` | `inc/game/pal_game.hpp:270` |
 | `GetCharacterID` | Parameter | 读 CharacterID | `inc/game/pal_game.hpp:294`, `src/pal_identity/pal_identity.cpp:226` |
 | `GetSelectedOtomoID` | Holder | 当前选中 Otomo | `inc/game/pal_game.hpp:214` |
@@ -129,6 +132,8 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `GetIsBoss`/`GetIsTowerBoss`/`GetIsRaidBoss`/`GetIsPredatorBoss` | `UPalDatabaseCharacterParameter` | Boss 分类 | `src/pal_identity/pal_identity.cpp:185, 161-163` |
 | `SetPhysicalHealth` | Parameter | 复活写入 | `src/pal_revive/pal_revive.cpp:72` |
 | `FullRecoveryHP` | Parameter | 满血恢复 | `src/pal_revive/pal_revive.cpp:80` |
+| `SetUncapturable`/`SetForceCapturable` | Parameter | 临时覆盖并恢复个体捕获标志 | `src/capture_override/capture_override_runtime.cpp` |
+| `SetSpawnedCharacterType` | StaticCharacterParameterComponent | 强制模式临时切换 Common 类型 | `src/capture_override/capture_override_runtime.cpp` |
 | `GetMaxOtomoNum` | Holder | 队伍上限 | `src/pal_revive/pal_revive.cpp:193` |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
 

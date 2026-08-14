@@ -114,7 +114,7 @@ auto PalworldEditorMod::on_unreal_init() -> void {
     grappleReadinessScheduler_.begin_world(worldSession_.generation());
     grappleRuntimePhase_.store(grappleLedger_.phase(worldSession_.generation()),
                                std::memory_order_release);
-    captureRuntime_.on_world_begin(worldSession_.generation());
+    captureRuntime_.on_world_begin();
     captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
 
     if (engineTickCallbackId_ == Hook::ERROR_ID || !worldLifecycleCallbacksReady_.load()) {
@@ -173,8 +173,9 @@ auto PalworldEditorMod::process_runtime_services(const float deltaSeconds) -> vo
         captureRuntime_.set_config(
             {.enabled = requestedCaptureEnabled_.load(std::memory_order_acquire),
              .forceHundredPercent = requestedCaptureForcePercent_.load(std::memory_order_acquire)});
-        captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
     }
+    captureRuntime_.tick();
+    captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
     process_grapple_work(deltaSeconds);
     baseResourceBridge_.ensure_hooks_registered();
     baseResourceBridge_.tick(deltaSeconds);
@@ -826,7 +827,6 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
     remotePalboxRuntime_.begin_world_transition();
     captureRuntime_.on_world_end();
-    captureRuntime_.on_world_begin(nextWorldGeneration);
     captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
     worldSession_.begin_transition();
     statWritesDisabledForWorld_ = false;
@@ -853,9 +853,6 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     wantRefreshSkillCatalog_.store(false);
     wantProbeObject_.store(false);
     grappleRetryRequested_.store(false, std::memory_order_release);
-    requestedCaptureEnabled_.store(false, std::memory_order_release);
-    requestedCaptureForcePercent_.store(false, std::memory_order_release);
-    captureSettingDirty_.store(false, std::memory_order_release);
 
     {
         const std::lock_guard lock(inv_mutex_);
@@ -919,6 +916,8 @@ auto PalworldEditorMod::finish_world_transition() -> void {
                              std::memory_order_release);
     remotePalboxRuntime_.finish_world_transition();
     baseResourceBridge_.on_world_ready(worldSession_.generation());
+    captureRuntime_.on_world_begin();
+    captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
     itemCatalogScanScheduler_.begin_world(worldSession_.generation());
     want_read_.store(true);
     want_scan_items_.store(true);

@@ -23,7 +23,6 @@
 #include <Unreal/Hooks/Hooks.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <capture_override/capture_override_runtime.hpp>
-#include <capture_override/capture_override_state.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>

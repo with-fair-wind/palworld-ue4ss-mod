@@ -30,9 +30,8 @@ void PalworldEditorMod::render_capture_override(PalworldEditorMod* self) {
         ImGui::TextColored(ImVec4(0.35F, 1.0F, 0.4F, 1.0F), "已启用：投球时实时清除捕获限制。");
     }
     if (safetyDisabled) {
-        ImGui::TextColored(
-            ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
-            "投球 hook 路径解析失败；已在本世界安全停用，切换开关不会绕过。");
+        ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                           "Hook 签名、捕获字段或恢复事务失败；已在本世界安全停用。");
     }
     ImGui::TextDisabled("仅本次游戏进程有效；重新启动游戏后默认关闭。");
     ImGui::TextDisabled(

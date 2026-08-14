@@ -24,9 +24,73 @@ struct CaptureOverrideConfig {
 
 /** @brief 游戏线程发布、GUI 只读的运行阶段。 */
 enum class CaptureRuntimePhase : std::uint8_t {
-    off,              /**< 未启用，hook 未注册。 */
-    hooksRegistered,  /**< hook 已注册，等待投球时实时清除标志。 */
-    safetyDisabled,   /**< hook 注册失败，本世界安全停用，切换开关不会绕过。 */
+    off,             /**< 未启用，hook 未注册。 */
+    hooksRegistered, /**< hook 已注册，等待投球时实时清除标志。 */
+    safetyDisabled,  /**< hook 注册或字段事务失败，本世界安全停用。 */
+};
+
+/** @brief 捕获覆盖功能唯一的纯值生命周期状态所有者。 */
+class CaptureOverrideState final {
+public:
+    /** @brief 更新用户期望；安全停用状态不会被同世界内切换开关绕过。 */
+    auto set_config(const CaptureOverrideConfig& config) noexcept -> void {
+        config_ = config;
+    }
+
+    /** @brief 新世界可访问；保留进程内用户配置并解除上一世界的安全停用。 */
+    auto begin_world() noexcept -> void {
+        worldAccessible_ = true;
+        phase_ = CaptureRuntimePhase::off;
+    }
+
+    /** @brief 世界即将销毁；保留用户配置供下一世界恢复。 */
+    auto end_world() noexcept -> void {
+        worldAccessible_ = false;
+        phase_ = CaptureRuntimePhase::off;
+    }
+
+    /** @brief 标记全部必需 Hook 已完整登记。 */
+    auto hooks_registered() noexcept -> void {
+        phase_ = CaptureRuntimePhase::hooksRegistered;
+    }
+
+    /** @brief 标记 Hook 已完整注销；安全停用状态保持不变。 */
+    auto hooks_removed() noexcept -> void {
+        if (phase_ != CaptureRuntimePhase::safetyDisabled) {
+            phase_ = CaptureRuntimePhase::off;
+        }
+    }
+
+    /** @brief 本世界发生结构性或回滚失败，禁止重新启用。 */
+    auto disable_for_world() noexcept -> void {
+        phase_ = CaptureRuntimePhase::safetyDisabled;
+    }
+
+    /** @retval true 当前应尝试登记全部 Hook。 */
+    [[nodiscard]] auto should_register_hooks() const noexcept -> bool {
+        return worldAccessible_ && config_.enabled && phase_ == CaptureRuntimePhase::off;
+    }
+
+    /** @retval true 已登记 Hook 不再应保持。 */
+    [[nodiscard]] auto should_remove_hooks() const noexcept -> bool {
+        return phase_ == CaptureRuntimePhase::hooksRegistered &&
+               (!worldAccessible_ || !config_.enabled);
+    }
+
+    /** @return 当前配置。 */
+    [[nodiscard]] auto config() const noexcept -> CaptureOverrideConfig {
+        return config_;
+    }
+
+    /** @return 当前运行阶段。 */
+    [[nodiscard]] auto phase() const noexcept -> CaptureRuntimePhase {
+        return phase_;
+    }
+
+private:
+    CaptureOverrideConfig config_{};
+    CaptureRuntimePhase phase_{CaptureRuntimePhase::off};
+    bool worldAccessible_{};
 };
 
 }  // namespace capture_override
