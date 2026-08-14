@@ -29,3 +29,5 @@ compile_commands.json
 /.claude/settings.local.json
 
 /Dump/
+/ref/
+/.zcode/

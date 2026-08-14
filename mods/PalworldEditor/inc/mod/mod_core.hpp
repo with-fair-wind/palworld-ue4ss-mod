@@ -22,6 +22,8 @@
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
+#include <capture_override/capture_override_runtime.hpp>
+#include <capture_override/capture_override_state.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
@@ -264,6 +266,9 @@ private:
     static void render_base_resource_sharing(PalworldEditorMod* self);
     static void render_remote_palbox(PalworldEditorMod* self);
 
+    /** @brief 渲染捕获不可捕获帕鲁的两级开关；切换时向游戏线程提交一次进程内请求。 */
+    static void render_capture_override(PalworldEditorMod* self);
+
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
 
@@ -388,6 +393,18 @@ private:
     std::mutex grappleStatusMutex_;
     /** @brief 最近一次爪钩应用或恢复结果的面向用户文本。 */
     std::string grappleRuntimeStatus_;
+
+    /** @brief GUI 提交的主开关：解锁不可捕获帕鲁；EngineTick 消费。 */
+    std::atomic<bool> requestedCaptureEnabled_{false};
+    /** @brief GUI 提交的强制 100% 成功率子选项；EngineTick 消费。 */
+    std::atomic<bool> requestedCaptureForcePercent_{false};
+    /** @brief 通知 EngineTick 消费最新捕获覆盖配置。 */
+    std::atomic<bool> captureSettingDirty_{false};
+    /** @brief 游戏线程拥有的投球 pre-hook 注册/注销运行时；GUI 只读取其阶段。 */
+    capture_override::CaptureOverrideRuntime captureRuntime_;
+    /** @brief 游戏线程发布、GUI 只读的捕获覆盖运行阶段。 */
+    std::atomic<capture_override::CaptureRuntimePhase> captureRuntimePhase_{
+        capture_override::CaptureRuntimePhase::off};
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;

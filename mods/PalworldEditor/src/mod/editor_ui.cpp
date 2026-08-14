@@ -101,6 +101,7 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
             render_base_resource_sharing(self);
             render_remote_palbox(self);
             render_grapple_no_cooldown(self);
+            render_capture_override(self);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("诊断")) {
