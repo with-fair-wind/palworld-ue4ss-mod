@@ -118,6 +118,16 @@ struct CaptureTransaction {
     std::optional<EnumOverride> spawnedType;
 };
 
+struct ObjectPreparation {
+    CapturePreparationStatus status{CapturePreparationStatus::unavailable};
+    UObject* object{};
+};
+
+struct TransactionPreparation {
+    CapturePreparationStatus status{CapturePreparationStatus::unavailable};
+    CaptureTransaction transaction;
+};
+
 struct PendingHookCall {
     UFunction* function{};
     std::optional<CaptureTransaction> transaction;
@@ -166,48 +176,57 @@ enum class ApplyTransactionResult : std::uint8_t {
     return true;
 }
 
-[[nodiscard]] auto read_target_character(UFunction* function, void* locals) -> UObject* {
-    if (function == nullptr || locals == nullptr) {
-        return nullptr;
+[[nodiscard]] auto read_target_character(UFunction* function, void* locals) -> ObjectPreparation {
+    if (function == nullptr) {
+        return {.status = CapturePreparationStatus::incompatible};
+    }
+    if (locals == nullptr) {
+        return {.status = CapturePreparationStatus::unavailable};
     }
     auto* const property = CastField<FObjectPropertyBase>(
         function->FindProperty(FName(STR("TargetCharacter"), FNAME_Find)));
     if (!pal_game::is_input_parameter(property) ||
         !matches_object_class(property, kCharacterClassPath)) {
-        return nullptr;
+        return {.status = CapturePreparationStatus::incompatible};
     }
     auto* const character =
         property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(locals));
+    if (!pal_game::is_valid(character)) {
+        return {.status = CapturePreparationStatus::unavailable};
+    }
     auto* const expectedClass = find_class(kCharacterClassPath);
-    return pal_game::is_valid(character) && expectedClass != nullptr &&
-                   character->GetClassPrivate()->IsChildOf(expectedClass)
-               ? character
-               : nullptr;
+    if (expectedClass == nullptr || !character->GetClassPrivate()->IsChildOf(expectedClass)) {
+        return {.status = CapturePreparationStatus::incompatible};
+    }
+    return {.status = CapturePreparationStatus::ready, .object = character};
 }
 
 [[nodiscard]] auto read_object_property(UObject* object, const TCHAR* propertyName,
-                                        const TCHAR* expectedClassPath) -> UObject* {
+                                        const TCHAR* expectedClassPath) -> ObjectPreparation {
     if (!pal_game::is_valid(object)) {
-        return nullptr;
+        return {.status = CapturePreparationStatus::unavailable};
     }
     auto* const property =
         CastField<FObjectPropertyBase>(object->GetPropertyByNameInChain(propertyName));
     if (!matches_object_class(property, expectedClassPath)) {
-        return nullptr;
+        return {.status = CapturePreparationStatus::incompatible};
     }
     auto* const value =
         property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
+    if (!pal_game::is_valid(value)) {
+        return {.status = CapturePreparationStatus::unavailable};
+    }
     auto* const expectedClass = find_class(expectedClassPath);
-    return pal_game::is_valid(value) && expectedClass != nullptr &&
-                   value->GetClassPrivate()->IsChildOf(expectedClass)
-               ? value
-               : nullptr;
+    if (expectedClass == nullptr || !value->GetClassPrivate()->IsChildOf(expectedClass)) {
+        return {.status = CapturePreparationStatus::incompatible};
+    }
+    return {.status = CapturePreparationStatus::ready, .object = value};
 }
 
 [[nodiscard]] auto call_object_getter(UObject* object, const TCHAR* functionName,
-                                      const TCHAR* expectedClassPath) -> UObject* {
+                                      const TCHAR* expectedClassPath) -> ObjectPreparation {
     if (!pal_game::is_valid(object)) {
-        return nullptr;
+        return {.status = CapturePreparationStatus::unavailable};
     }
     auto* const function = object->GetFunctionByNameInChain(functionName);
     auto* const result = function == nullptr
@@ -216,20 +235,23 @@ enum class ApplyTransactionResult : std::uint8_t {
     if (!pal_game::has_exact_parameter_count(function, 1) ||
         !pal_game::is_return_parameter(result) ||
         !matches_object_class(result, expectedClassPath)) {
-        return nullptr;
+        return {.status = CapturePreparationStatus::incompatible};
     }
     pal_game::FunctionParams params{function};
     object->ProcessEvent(function, params.data());
     if (!pal_game::is_valid(object)) {
-        return nullptr;
+        return {.status = CapturePreparationStatus::unavailable};
     }
     auto* const value =
         result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
+    if (!pal_game::is_valid(value)) {
+        return {.status = CapturePreparationStatus::unavailable};
+    }
     auto* const expectedClass = find_class(expectedClassPath);
-    return pal_game::is_valid(value) && expectedClass != nullptr &&
-                   value->GetClassPrivate()->IsChildOf(expectedClass)
-               ? value
-               : nullptr;
+    if (expectedClass == nullptr || !value->GetClassPrivate()->IsChildOf(expectedClass)) {
+        return {.status = CapturePreparationStatus::incompatible};
+    }
+    return {.status = CapturePreparationStatus::ready, .object = value};
 }
 
 [[nodiscard]] auto find_bool_setter(UObject* object, const TCHAR* functionName,
@@ -342,24 +364,37 @@ enum class ApplyTransactionResult : std::uint8_t {
 }
 
 [[nodiscard]] auto prepare_transaction(UObject* character, const bool forceHundredPercent)
-    -> std::optional<CaptureTransaction> {
-    auto* const staticComponent = read_object_property(
-        character, STR("StaticCharacterParameterComponent"), kStaticComponentClassPath);
-    auto* const parameterComponent = read_object_property(
-        character, STR("CharacterParameterComponent"), kParameterComponentClassPath);
-    auto* const individualParameter = call_object_getter(
-        parameterComponent, STR("GetIndividualParameter"), kIndividualParameterClassPath);
-    if (!pal_game::is_valid(character) || !pal_game::is_valid(staticComponent) ||
-        !pal_game::is_valid(parameterComponent) || !pal_game::is_valid(individualParameter)) {
-        return std::nullopt;
+    -> TransactionPreparation {
+    if (!pal_game::is_valid(character)) {
+        return {.status = CapturePreparationStatus::unavailable};
     }
+    const auto staticComponentResult = read_object_property(
+        character, STR("StaticCharacterParameterComponent"), kStaticComponentClassPath);
+    if (staticComponentResult.status != CapturePreparationStatus::ready) {
+        return {.status = staticComponentResult.status};
+    }
+    const auto parameterComponentResult = read_object_property(
+        character, STR("CharacterParameterComponent"), kParameterComponentClassPath);
+    if (parameterComponentResult.status != CapturePreparationStatus::ready) {
+        return {.status = parameterComponentResult.status};
+    }
+    const auto individualParameterResult =
+        call_object_getter(parameterComponentResult.object, STR("GetIndividualParameter"),
+                           kIndividualParameterClassPath);
+    if (individualParameterResult.status != CapturePreparationStatus::ready) {
+        return {.status = individualParameterResult.status};
+    }
+    auto* const staticComponent = staticComponentResult.object;
+    auto* const individualParameter = individualParameterResult.object;
 
     CaptureTransaction transaction;
     for (const auto* fieldName :
          {STR("IsUncapturable"), STR("IsBoss_Database"), STR("IsTowerBoss_Database"),
           STR("IsRaidBoss_Database"), STR("IsPredatorBoss_Database"), STR("IsRaidBoss_BP")}) {
         if (!append_bool(transaction, make_bool_override(staticComponent, fieldName, false))) {
-            return std::nullopt;
+            return {.status = pal_game::is_valid(staticComponent)
+                                  ? CapturePreparationStatus::incompatible
+                                  : CapturePreparationStatus::unavailable};
         }
     }
 
@@ -367,15 +402,17 @@ enum class ApplyTransactionResult : std::uint8_t {
     const auto uncapturableSetter =
         find_bool_setter(individualParameter, STR("SetUncapturable"), STR("bInUncapturable"));
     if (!uncapturable.has_value() || !uncapturableSetter.has_value()) {
-        return std::nullopt;
+        return {.status = pal_game::is_valid(individualParameter)
+                              ? CapturePreparationStatus::incompatible
+                              : CapturePreparationStatus::unavailable};
     }
     uncapturable->setter = uncapturableSetter;
     if (!append_bool(transaction, uncapturable)) {
-        return std::nullopt;
+        return {.status = CapturePreparationStatus::incompatible};
     }
 
     if (!forceHundredPercent) {
-        return transaction;
+        return {.status = CapturePreparationStatus::ready, .transaction = transaction};
     }
 
     auto forceCapturable = make_bool_override(individualParameter, STR("bIsForceCapturable"), true);
@@ -387,15 +424,23 @@ enum class ApplyTransactionResult : std::uint8_t {
         find_enum_setter(staticComponent, STR("SetSpawnedCharacterType"), STR("SpawnedType"));
     if (!forceCapturable.has_value() || !forceSetter.has_value() ||
         !transaction.captureRate.has_value() || !spawnedSetter.has_value()) {
-        return std::nullopt;
+        return {.status =
+                    pal_game::is_valid(staticComponent) && pal_game::is_valid(individualParameter)
+                        ? CapturePreparationStatus::incompatible
+                        : CapturePreparationStatus::unavailable};
     }
     forceCapturable->setter = forceSetter;
     if (!append_bool(transaction, forceCapturable)) {
-        return std::nullopt;
+        return {.status = CapturePreparationStatus::incompatible};
     }
     transaction.spawnedType = make_enum_override(staticComponent, STR("SpawnedCharacterType"),
                                                  *spawnedSetter, kSpawnedCommon);
-    return transaction.spawnedType.has_value() ? std::optional{transaction} : std::nullopt;
+    if (!transaction.spawnedType.has_value()) {
+        return {.status = pal_game::is_valid(staticComponent)
+                              ? CapturePreparationStatus::incompatible
+                              : CapturePreparationStatus::unavailable};
+    }
+    return {.status = CapturePreparationStatus::ready, .transaction = transaction};
 }
 
 [[nodiscard]] auto call_bool_setter(UObject* object, const BoolSetter& setter, const bool value)
@@ -630,19 +675,24 @@ auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
             if (state_.phase() != CaptureRuntimePhase::hooksRegistered) {
                 return;
             }
-            auto* const character = read_target_character(function, context.TheStack.Locals());
-            auto transaction = prepare_transaction(character, state_.config().forceHundredPercent);
-            if (!transaction.has_value()) {
-                state_.disable_for_world();
+            const auto target = read_target_character(function, context.TheStack.Locals());
+            state_.observe_preparation_status(target.status);
+            if (target.status != CapturePreparationStatus::ready) {
                 return;
             }
-            const auto applyResult = apply_transaction(*transaction);
+            auto preparation =
+                prepare_transaction(target.object, state_.config().forceHundredPercent);
+            state_.observe_preparation_status(preparation.status);
+            if (preparation.status != CapturePreparationStatus::ready) {
+                return;
+            }
+            const auto applyResult = apply_transaction(preparation.transaction);
             if (applyResult == ApplyTransactionResult::success) {
-                pending.transaction = transaction;
+                pending.transaction = preparation.transaction;
                 return;
             }
             if (applyResult == ApplyTransactionResult::rollbackFailed) {
-                pending.transaction = transaction;
+                pending.transaction = preparation.transaction;
             }
             state_.disable_for_world();
         };

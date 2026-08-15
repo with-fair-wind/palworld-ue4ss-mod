@@ -82,12 +82,26 @@ void test_safety_disable_cannot_be_bypassed_in_the_same_world() {
     CHECK(state.should_register_hooks());
 }
 
+void test_unavailable_target_skips_without_disabling_the_world() {
+    capture_override::CaptureOverrideState state;
+    state.set_config({.enabled = true});
+    state.begin_world();
+    state.hooks_registered();
+
+    state.observe_preparation_status(capture_override::CapturePreparationStatus::unavailable);
+    CHECK(state.phase() == capture_override::CaptureRuntimePhase::hooksRegistered);
+
+    state.observe_preparation_status(capture_override::CapturePreparationStatus::incompatible);
+    CHECK(state.phase() == capture_override::CaptureRuntimePhase::safetyDisabled);
+}
+
 int main() {
     test_disabled_by_default();
     test_enabled_config_registers_only_in_an_accessible_world();
     test_disabling_requests_hook_removal();
     test_world_transition_preserves_process_config();
     test_safety_disable_cannot_be_bypassed_in_the_same_world();
+    test_unavailable_target_skips_without_disabling_the_world();
     if (failures > 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

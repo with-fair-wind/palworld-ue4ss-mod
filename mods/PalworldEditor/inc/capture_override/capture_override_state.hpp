@@ -29,6 +29,13 @@ enum class CaptureRuntimePhase : std::uint8_t {
     safetyDisabled,  /**< hook 注册或字段事务失败，本世界安全停用。 */
 };
 
+/** @brief 单次捕获目标事务预检结果。 */
+enum class CapturePreparationStatus : std::uint8_t {
+    ready,        /**< 目标完整，可建立临时覆盖事务。 */
+    unavailable,  /**< 本次目标为空、正在消失或组件暂未就绪；仅跳过本次调用。 */
+    incompatible, /**< 运行时字段或函数签名不兼容；本世界必须安全停用。 */
+};
+
 /** @brief 捕获覆盖功能唯一的纯值生命周期状态所有者。 */
 class CaptureOverrideState final {
 public:
@@ -64,6 +71,13 @@ public:
     /** @brief 本世界发生结构性或回滚失败，禁止重新启用。 */
     auto disable_for_world() noexcept -> void {
         phase_ = CaptureRuntimePhase::safetyDisabled;
+    }
+
+    /** @brief 消费单次目标预检结果；暂时不可用不改变功能状态。 */
+    auto observe_preparation_status(const CapturePreparationStatus status) noexcept -> void {
+        if (status == CapturePreparationStatus::incompatible) {
+            disable_for_world();
+        }
     }
 
     /** @retval true 当前应尝试登记全部 Hook。 */
