@@ -437,11 +437,12 @@ void PalworldEditorMod::render_pal_editor(PalworldEditorMod* self) {
         return;
     }
 
-    SkillEditorSnapshot snapshot;
+    std::shared_ptr<const SkillEditorSnapshot> publishedSnapshot;
     {
         const std::lock_guard lock(self->skillSnapshotMutex_);
-        snapshot = self->skillSnapshot_;
+        publishedSnapshot = self->skillSnapshot_;
     }
+    const auto& snapshot = *publishedSnapshot;
     if (self->skillUiGeneration_ != snapshot.targetGeneration ||
         self->skillUiWorldGeneration_ != snapshot.worldGeneration) {
         self->skillUiGeneration_ = snapshot.targetGeneration;

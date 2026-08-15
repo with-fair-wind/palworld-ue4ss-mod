@@ -172,10 +172,11 @@ struct RuntimeLimits {
     WorkSuitabilityRanks values{};
     std::array<bool, kWorkSuitabilityCount> visited{};
     FScriptArrayHelper_InContainer entries(arrayProperty, saveParam);
-    if (entries.Num() < 0 || entries.Num() > 128) {
+    const int32 entryCount = entries.Num();
+    if (entryCount < 0 || entryCount > kMaxWorkSuitabilityEntries) {
         return std::nullopt;
     }
-    for (int32 index{}; index < entries.Num(); ++index) {
+    for (int32 index{}; index < entryCount; ++index) {
         void* const item = entries.GetRawPtr(index);
         const auto rawSuitability = read_enum(suitability, item);
         if (!rawSuitability.has_value() || *rawSuitability < 1 ||
@@ -385,8 +386,9 @@ auto apply_database_to_parameter(UObject* pal) -> bool {
 
 /**
  * @brief 查询某亲密度 rank 所需的累计点数阈值。
- * @details 使用动态参数缓冲区匹配 `GetFriendshipRequiredPointByRank(int32, int32&)` 的 UFunction
- *          布局，避免手工对齐；查询失败时返回空，调用方必须保持零写入。
+ * @details 使用动态参数缓冲区匹配 `GetFriendshipRequiredPointByRank(int32, int32&) -> bool`
+ *          的 UFunction 布局，避免手工对齐；签名不匹配或数据库查询失败时返回空，调用方
+ *          必须保持零写入。
  */
 [[nodiscard]] auto friendship_required_point(const int rank) -> std::optional<int> {
     auto* const db = database();
@@ -399,13 +401,20 @@ auto apply_database_to_parameter(UObject* pal) -> bool {
     auto* const outProp = function == nullptr ? nullptr
                                               : CastField<FIntProperty>(function->FindProperty(
                                                     FName(STR("OutRequiredPoint"), FNAME_Find)));
-    if (!pal_game::has_exact_parameter_count(function, 2) ||
-        !pal_game::is_input_parameter(rankProp) || !pal_game::is_output_parameter(outProp)) {
+    auto* const resultProp =
+        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
+    // bool 返回 + 1 入参 + 1 出参 = 3 个 CPF_Parm；本项目计数含返回值（与 GetSkillData 一致）。
+    if (!pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(rankProp) || !pal_game::is_output_parameter(outProp) ||
+        resultProp == nullptr) {
         return std::nullopt;
     }
     FunctionParams params{function};
     rankProp->SetPropertyValueInContainer(params.data(), static_cast<int32_t>(rank));
     db->ProcessEvent(function, params.data());
+    if (!resultProp->GetPropertyValueInContainer(params.data())) {
+        return std::nullopt;
+    }
     return outProp->GetPropertyValueInContainer(params.data());
 }
 }  // namespace

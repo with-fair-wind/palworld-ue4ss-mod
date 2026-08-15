@@ -8,6 +8,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <string_view>
@@ -322,12 +323,26 @@ struct SelectedPalTarget {
 inline constexpr std::wstring_view kDiscoveryKeywords[] = {
     L"Inventory", L"IndividualCharacter", L"ItemContainer", L"Otomo", L"PalCharacterContainer",
 };
+/** @brief Palworld 物品主数据读取的防御性领域上限。 */
+inline constexpr int32 kMaximumStaticItemEntries = 100'000;
+/** @brief 稀疏 Map 最大索引的防御性上限，避免异常元数据造成无界遍历。 */
+inline constexpr int32 kMaximumStaticItemMapIndex = 200'000;
+/** @brief 主背包槽位读取的防御性上限，避免异常 Num() 驱动无界 ProcessEvent。 */
+inline constexpr int32 kMaximumInventorySlotCount = 10'000;
 
 /** @brief 表示主背包中的一个非空物品槽快照。 */
 struct InvEntry {
     std::string item_id; /**< 传给游戏接口的物品 Raw ID，不是本地化展示名称。 */
     int count;           /**< 扫描时读取到的堆叠数量。 */
     int32_t slot_index;  /**< 容器槽位索引；修改数量时使用此值，而不是 `item_id`。 */
+};
+
+/** @brief 主背包槽位数量直接写事务的可验证结果。 */
+enum class SlotCountWriteStatus : std::uint8_t {
+    succeeded,       /**< 写入值已经同步重读确认。 */
+    preflightFailed, /**< 容器、槽位、属性或输入范围在写前不可用。 */
+    rolledBack,      /**< 写后验证失败，但原值已经恢复并重读确认。 */
+    rollbackFailed,  /**< 写后验证失败，且无法确认原值恢复。 */
 };
 
 /**
@@ -446,6 +461,11 @@ inline auto read_inventory() -> std::vector<InvEntry> {
         return items;
     }
     const int32_t num = container_num(container);
+    if (num < 0 || num > kMaximumInventorySlotCount) {
+        Output::send<LogLevel::Warning>(
+            STR("read_inventory: slot count {} is outside the safe domain.\n"), num);
+        return items;
+    }
     int nonEmpty = 0;
     for (int32_t i = 0; i < num; ++i) {
         UObject* slot = container_get(container, i);
@@ -474,26 +494,49 @@ inline auto read_inventory() -> std::vector<InvEntry> {
  * @brief 直接修改主背包指定槽位的 `StackCount` 属性。
  * @param[in] slotIndex 主背包容器槽位索引。
  * @param[in] newCount 要写入的数量；本接口不执行范围裁剪。
- * @warning 只能在游戏线程调用。容器、槽位或属性不可用时静默返回。
+ * @return 写入、验证及必要回滚的明确结果。
+ * @warning 只能在游戏线程调用；没有已验证的原生 setter/OnRep，因此仍属于本地直接属性写。
  */
-inline auto set_slot_count(int32_t slotIndex, int32_t newCount) -> void {
+[[nodiscard]] inline auto set_slot_count(const int32_t slotIndex, const int32_t newCount)
+    -> SlotCountWriteStatus {
+    if (slotIndex < 0 || slotIndex >= kMaximumInventorySlotCount || newCount < 0 ||
+        newCount > 9999) {
+        return SlotCountWriteStatus::preflightFailed;
+    }
     UObject* container = get_main_container();
     if (container == nullptr) {
-        return;
+        return SlotCountWriteStatus::preflightFailed;
     }
     UObject* slot = container_get(container, slotIndex);
     if (slot == nullptr) {
-        return;
+        return SlotCountWriteStatus::preflightFailed;
     }
     FProperty* sc = slot->GetPropertyByNameInChain(STR("StackCount"));
     auto* ip = CastField<FIntProperty>(sc);
     if (ip == nullptr) {
-        return;
+        return SlotCountWriteStatus::preflightFailed;
     }
     const int32_t old = ip->GetPropertyValueInContainer(slot);
+    if (old == newCount) {
+        return SlotCountWriteStatus::succeeded;
+    }
     ip->SetPropertyValueInContainer(slot, newCount);
-    Output::send<LogLevel::Warning>(STR("set_slot_count: slot {} StackCount {} -> {}\n"), slotIndex,
-                                    old, newCount);
+    if (ip->GetPropertyValueInContainer(slot) == newCount) {
+        Output::send<LogLevel::Warning>(STR("set_slot_count: slot {} StackCount {} -> {}\n"),
+                                        slotIndex, old, newCount);
+        return SlotCountWriteStatus::succeeded;
+    }
+
+    ip->SetPropertyValueInContainer(slot, old);
+    if (ip->GetPropertyValueInContainer(slot) == old) {
+        Output::send<LogLevel::Warning>(
+            STR("set_slot_count: write verification failed for slot {}; original restored.\n"),
+            slotIndex);
+        return SlotCountWriteStatus::rolledBack;
+    }
+    Output::send<LogLevel::Error>(
+        STR("set_slot_count: write and rollback verification failed for slot {}.\n"), slotIndex);
+    return SlotCountWriteStatus::rollbackFailed;
 }
 
 /**
@@ -668,12 +711,19 @@ inline auto localized_item_name(UObject* utility, UFunction* function, UObject* 
         return false;
     }
 
+    const int32 entryCount = map->Num();
+    const int32 maximumIndex = map->GetMaxIndex();
+    if (entryCount <= 0 || entryCount > kMaximumStaticItemEntries || maximumIndex < 0 ||
+        maximumIndex > kMaximumStaticItemMapIndex) {
+        return false;
+    }
+
     const auto layout =
         FScriptMap::GetScriptLayout(keyProperty->GetSize(), keyProperty->GetMinAlignment(),
                                     valueProperty->GetSize(), valueProperty->GetMinAlignment());
     std::vector<FName> discovered;
-    discovered.reserve(static_cast<std::size_t>(map->Num()));
-    for (int32 index{}; index < map->GetMaxIndex(); ++index) {
+    discovered.reserve(static_cast<std::size_t>(entryCount));
+    for (int32 index{}; index < maximumIndex; ++index) {
         if (!map->IsValidIndex(index)) {
             continue;
         }

@@ -2,7 +2,6 @@
  * @file pal_base_camp_reflection.cpp
  * @brief 实现基地管理器与地图物体管理器的经签名校验反射调用。
  */
-#include <algorithm>
 #include <cstddef>
 
 #include <Unreal/Core/Containers/ScriptArray.hpp>
@@ -14,6 +13,10 @@
 using namespace RC::Unreal;
 
 namespace pal_base_camp_reflection {
+namespace {
+constexpr int32 kMaximumBaseCampCount = 1'024;
+}
+
 auto read_base_ids(UObject* manager, std::vector<FGuid>& output) -> bool {
     output.clear();
     auto* const function = pal_game::is_valid(manager)
@@ -34,8 +37,12 @@ auto read_base_ids(UObject* manager, std::vector<FGuid>& output) -> bool {
     pal_game::FunctionParams params{function};
     manager->ProcessEvent(function, params.data());
     FScriptArrayHelper_InContainer values(arrayProperty, params.data());
-    output.reserve(static_cast<std::size_t>(std::max(values.Num(), 0)));
-    for (int32 index{}; index < values.Num(); ++index) {
+    const int32 count = values.Num();
+    if (count < 0 || count > kMaximumBaseCampCount) {
+        return false;
+    }
+    output.reserve(static_cast<std::size_t>(count));
+    for (int32 index{}; index < count; ++index) {
         FGuid id{};
         guidProperty->CopyCompleteValue(&id, values.GetRawPtr(index));
         output.push_back(id);

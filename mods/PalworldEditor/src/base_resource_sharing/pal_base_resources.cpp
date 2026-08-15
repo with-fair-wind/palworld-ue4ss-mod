@@ -11,7 +11,6 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
-#include <Unreal/Hooks.hpp>
 #include <Unreal/UFunctionStructs.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -19,6 +18,7 @@
 #include <base_resource_sharing/pal_base_resource_runtime.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <base_resource_sharing/persistent_union.hpp>
+#include <common/function_hook_registry.hpp>
 #include <common/game_reflection.hpp>
 
 namespace base_resource_sharing {
@@ -27,6 +27,15 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace {
+auto log_shutdown_error_noexcept(const TCHAR* message) noexcept -> void {
+    try {
+        Output::send<LogLevel::Error>(message);
+    } catch (...) {
+        // 关停期间日志设备可能已经不可用；不得因此跳过后续 Hook 注销。
+        static_cast<void>(0);
+    }
+}
+
 [[nodiscard]] auto object_name(UObject* object) -> std::wstring {
     return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
 }
@@ -59,9 +68,6 @@ public:
     struct HookBinding {
         UFunction* function{};
         HookSpec spec;
-        ResourceHookBackend backend{ResourceHookBackend::unsupported};
-        CallbackId preId{-1};
-        CallbackId postId{-1};
     };
 
     auto set_enabled(const bool enabled) -> void {
@@ -183,16 +189,23 @@ public:
             if (function == nullptr) {
                 continue;
             }
-            const auto functionPointer = function->GetFuncPtr();
-            const auto backend = select_resource_hook_backend(
-                functionPointer != nullptr,
-                functionPointer == UObject::ProcessInternalInternal.get_function_address(),
-                function->HasAnyFunctionFlags(EFunctionFlags::FUNC_Native));
-            if (backend == ResourceHookBackend::nativeFunction) {
-                register_native_hook(function, spec);
-            } else if (backend == ResourceHookBackend::scriptFunction &&
-                       ensure_script_dispatcher_registered()) {
-                hooks_.push_back({.function = function, .spec = spec, .backend = backend});
+            UnrealScriptFunctionCallable preCallback;
+            UnrealScriptFunctionCallable postCallback;
+            if (spec.preEvent != HookEvent::none) {
+                preCallback = [this, function, spec](UnrealScriptFunctionCallableContext& context,
+                                                     void*) {
+                    on_hook_pre(function, spec, context);
+                };
+            }
+            if (spec.postEvent != HookEvent::none) {
+                postCallback = [this, function, spec](UnrealScriptFunctionCallableContext& context,
+                                                      void*) {
+                    on_hook_post(function, spec, context);
+                };
+            }
+            if (hookRegistry_.register_hook(function, std::move(preCallback),
+                                            std::move(postCallback))) {
+                hooks_.push_back({.function = function, .spec = spec});
             }
         }
 
@@ -203,19 +216,37 @@ public:
     }
 
     auto shutdown_hooks() -> void {
-        restore_all_synchronously("卸载 mod");
-        unregister_resource_hooks();
+        // Restoration and hook removal are independent cleanup responsibilities. In particular,
+        // an allocation or reflection failure while restoring must never leave callbacks pointing
+        // into a DLL that UE4SS is about to unload.
+        try {
+            restore_all_synchronously("卸载 mod");
+        } catch (...) {
+            log_shutdown_error_noexcept(
+                STR("PalworldEditor: persistent storage restore threw during shutdown.\n"));
+        }
+        try {
+            unregister_resource_hooks();
+        } catch (...) {
+            log_shutdown_error_noexcept(
+                STR("PalworldEditor: resource hook removal threw during shutdown.\n"));
+        }
         runtime_.begin_world_transition(runtime_.generation() + 1);
         unionLifecycle_.begin_world(runtime_.generation());
-        unionLedger_.clear();
         desiredPlan_ = {};
         reset_pending_work();
-        catalog_ = {};
-        registrationIndex_.clear();
         baseCount_ = 0;
         containerCount_ = 0;
         pendingContainerCount_ = 0;
-        worldContextFullName_.clear();
+        if (unionLedger_.empty()) {
+            catalog_ = {};
+            registrationIndex_.clear();
+            worldContextFullName_.clear();
+        } else {
+            // EngineTick 异常停用后对象仍可能继续存活；保留精确边账本及其解析上下文，
+            // 让随后的游戏线程卸载清理仍能重试，而不是把未完成恢复伪装成成功。
+            safetyDisabled_ = true;
+        }
         snapshotDirty_.mark();
         publish_snapshot();
     }
@@ -647,122 +678,8 @@ private:
         dispatch_hook(function, HookPhase::post, spec, context);
     }
 
-    auto register_native_hook(UFunction* function, const HookSpec& spec) -> void {
-        CallbackId preId{-1};
-        CallbackId postId{-1};
-        if (spec.preEvent != HookEvent::none) {
-            preId = function->RegisterPreHook(
-                [this, function, spec](UnrealScriptFunctionCallableContext& context, void*) {
-                    on_hook_pre(function, spec, context);
-                });
-        }
-        if (spec.postEvent != HookEvent::none) {
-            postId = function->RegisterPostHook(
-                [this, function, spec](UnrealScriptFunctionCallableContext& context, void*) {
-                    on_hook_post(function, spec, context);
-                });
-        }
-
-        const bool preReady = spec.preEvent == HookEvent::none || preId >= 0;
-        const bool postReady = spec.postEvent == HookEvent::none || postId >= 0;
-        if (preReady && postReady) {
-            hooks_.push_back({.function = function,
-                              .spec = spec,
-                              .backend = ResourceHookBackend::nativeFunction,
-                              .preId = preId,
-                              .postId = postId});
-            return;
-        }
-
-        if (preId >= 0) {
-            static_cast<void>(function->UnregisterHook(preId));
-        }
-        if (postId >= 0) {
-            static_cast<void>(function->UnregisterHook(postId));
-        }
-    }
-
-    [[nodiscard]] auto ensure_script_dispatcher_registered() -> bool {
-        if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
-            return true;
-        }
-
-        const Hook::FCallbackOptions preOptions{
-            .bOnce = false,
-            .bReadonly = true,
-            .OwnerModName = STR("PalworldEditor"),
-            .HookName = STR("BaseResourceScriptPre"),
-        };
-        scriptPreCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPreCallback(
-            [this](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack,
-                   void* result) { dispatch_script_hook(HookPhase::pre, context, stack, result); },
-            preOptions);
-
-        const Hook::FCallbackOptions postOptions{
-            .bOnce = false,
-            .bReadonly = true,
-            .OwnerModName = STR("PalworldEditor"),
-            .HookName = STR("BaseResourceScriptPost"),
-        };
-        scriptPostCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPostCallback(
-            [this](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack,
-                   void* result) { dispatch_script_hook(HookPhase::post, context, stack, result); },
-            postOptions);
-
-        if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
-            return true;
-        }
-        unregister_script_dispatcher();
-        return false;
-    }
-
-    auto dispatch_script_hook(const HookPhase phase, UObject* context, FFrame& stack, void* result)
-        -> void {
-        auto* function = stack.Node();
-        for (const auto& hook : hooks_) {
-            if (hook.backend != ResourceHookBackend::scriptFunction || hook.function != function) {
-                continue;
-            }
-
-            UnrealScriptFunctionCallableContext callableContext{context, stack, result};
-            if (phase == HookPhase::pre) {
-                on_hook_pre(function, hook.spec, callableContext);
-            } else {
-                on_hook_post(function, hook.spec, callableContext);
-            }
-            return;
-        }
-    }
-
-    static auto unregister_global_callback(Hook::GlobalCallbackId& callbackId) -> void {
-        if (callbackId == Hook::ERROR_ID) {
-            return;
-        }
-        if (!Hook::UnregisterCallback(callbackId)) {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: failed to unregister resource callback id={}\n"), callbackId);
-        }
-        callbackId = Hook::ERROR_ID;
-    }
-
-    auto unregister_script_dispatcher() -> void {
-        unregister_global_callback(scriptPreCallbackId_);
-        unregister_global_callback(scriptPostCallbackId_);
-    }
-
     auto unregister_resource_hooks() -> void {
-        for (auto hook = hooks_.rbegin(); hook != hooks_.rend(); ++hook) {
-            if (hook->backend != ResourceHookBackend::nativeFunction || hook->function == nullptr) {
-                continue;
-            }
-            if (hook->preId >= 0) {
-                static_cast<void>(hook->function->UnregisterHook(hook->preId));
-            }
-            if (hook->postId >= 0) {
-                static_cast<void>(hook->function->UnregisterHook(hook->postId));
-            }
-        }
-        unregister_script_dispatcher();
+        hookRegistry_.unregister_all();
         hooks_.clear();
         resolutions_ = all_hook_resolutions(false);
         capabilitiesGeneration_ = 0;
@@ -891,8 +808,7 @@ private:
     bool waitingForStructure_{};
     std::vector<HookResolution> resolutions_{all_hook_resolutions(false)};
     std::vector<HookBinding> hooks_;
-    Hook::GlobalCallbackId scriptPreCallbackId_{Hook::ERROR_ID};
-    Hook::GlobalCallbackId scriptPostCallbackId_{Hook::ERROR_ID};
+    pal_game::FunctionHookRegistry hookRegistry_{STR("BaseResourceScript")};
     std::array<std::string, 3> worldDisabledErrors_;
     std::uint64_t capabilitiesGeneration_{};
     std::size_t baseCount_{};

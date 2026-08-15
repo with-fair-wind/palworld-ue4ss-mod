@@ -9,8 +9,10 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -22,6 +24,7 @@
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/Hooks/Hooks.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
+#include <capture_override/capture_override_runtime.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
@@ -67,7 +70,13 @@ private:
     /** @brief 每个 EngineTick 被动技能分类反射的软时间预算。 */
     static constexpr auto kPassiveMetadataBudget = std::chrono::microseconds{500};
     /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
-    static auto unregister_callback(Hook::GlobalCallbackId& callbackId) -> void;
+    static auto unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void;
+
+    /** @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。 */
+    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept -> void;
+
+    /** @brief 通知等待卸载的 UE4SS UpdateThread，游戏线程清理已经结束。 */
+    auto signal_unload_cleanup_finished() noexcept -> void;
 
     /** @brief 推进爪钩、资源共享、远程终端及一次性诊断请求。 */
     auto process_runtime_services(float deltaSeconds) -> void;
@@ -79,7 +88,7 @@ private:
     auto process_pal_edit_requests() -> void;
 
     /** @brief 推进物品目录、技能目录和被动技能分类初始化任务。 */
-    auto process_initialization_tasks(bool worldContextReady) -> void;
+    auto process_initialization_tasks() -> void;
 
     /** @brief 汇总可观察运行时值，并按脏标记向 GUI 发布技能快照。 */
     auto publish_runtime_state() -> void;
@@ -264,6 +273,9 @@ private:
     static void render_base_resource_sharing(PalworldEditorMod* self);
     static void render_remote_palbox(PalworldEditorMod* self);
 
+    /** @brief 渲染捕获不可捕获帕鲁的两级开关；切换时向游戏线程提交一次进程内请求。 */
+    static void render_capture_override(PalworldEditorMod* self);
+
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
 
@@ -334,6 +346,10 @@ private:
 
     /** @brief 请求游戏线程在下一次更新中刷新主背包快照。 */
     std::atomic<bool> want_read_{false};
+    /** @brief 当前世界是否曾通过 Common 主背包安全门；只用于启动任务停止重复探测。 */
+    bool worldInitializationReady_{};
+    /** @brief 背包数量恢复验证失败后阻止当前世界继续直接写槽位。 */
+    std::atomic<bool> inventoryWritesDisabled_{false};
     /** @brief 请求游戏线程在下一次更新中输出 UObject 诊断信息。 */
     std::atomic<bool> want_discover_{false};
     /** @brief GUI 线程提交的高堆叠上限偏好。 */
@@ -389,6 +405,18 @@ private:
     /** @brief 最近一次爪钩应用或恢复结果的面向用户文本。 */
     std::string grappleRuntimeStatus_;
 
+    /** @brief GUI 提交的主开关：解锁不可捕获帕鲁；EngineTick 消费。 */
+    std::atomic<bool> requestedCaptureEnabled_{false};
+    /** @brief GUI 提交的强制 100% 成功率子选项；EngineTick 消费。 */
+    std::atomic<bool> requestedCaptureForcePercent_{false};
+    /** @brief 通知 EngineTick 消费最新捕获覆盖配置。 */
+    std::atomic<bool> captureSettingDirty_{false};
+    /** @brief 游戏线程拥有的投球 pre-hook 注册/注销运行时；GUI 只读取其阶段。 */
+    capture_override::CaptureOverrideRuntime captureRuntime_;
+    /** @brief 游戏线程发布、GUI 只读的捕获覆盖运行阶段。 */
+    std::atomic<capture_override::CaptureRuntimePhase> captureRuntimePhase_{
+        capture_override::CaptureRuntimePhase::off};
+
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;
     /** @brief 在游戏线程执行帕鲁属性反射读写的无 UObject 所有权网关。 */
@@ -415,12 +443,13 @@ private:
     std::optional<skill_editor::SelectedTargetResolutionStatus> lastResolutionStatus_;
     /** @brief GUI 生产、游戏线程 FIFO 消费的线程安全技能编辑请求队列。 */
     skill_editor::SkillEditQueue skillQueue_;
-    /** @brief 保护游戏线程发布、GUI 线程复制的 skillSnapshot_。 */
+    /** @brief 保护游戏线程发布、GUI 线程取得不可变 skillSnapshot_ 引用的互斥量。 */
     std::mutex skillSnapshotMutex_;
     /** @brief 仅由游戏线程修改的技能编辑工作快照。 */
     SkillEditorSnapshot skillRuntimeSnapshot_;
-    /** @brief 最近一次发布给 GUI 的完整技能编辑快照；由 skillSnapshotMutex_ 保护。 */
-    SkillEditorSnapshot skillSnapshot_;
+    /** @brief 最近一次发布给 GUI 的不可变技能快照；目录只在脏发布时复制一次。 */
+    std::shared_ptr<const SkillEditorSnapshot> skillSnapshot_{
+        std::make_shared<SkillEditorSnapshot>()};
     /** @brief 游戏线程工作快照是否包含尚未发布的可观察变化。 */
     bool skillSnapshotDirty_{true};
     /** @brief 保护绑定世界代次的“选择当前帕鲁”请求。 */
@@ -482,4 +511,64 @@ private:
     Hook::GlobalCallbackId loadMapPostCallbackId_{Hook::ERROR_ID};
     /** @brief 两个 LoadMap 生命周期回调是否均已成功注册。 */
     std::atomic<bool> worldLifecycleCallbacksReady_{false};
+
+    struct RuntimeCallbackGate {
+        std::atomic<bool> active{true};
+        std::atomic<std::uint32_t> inFlight{};
+
+        [[nodiscard]] auto try_enter() noexcept -> bool {
+            if (!active.load(std::memory_order_acquire)) {
+                return false;
+            }
+            inFlight.fetch_add(1, std::memory_order_acq_rel);
+            if (active.load(std::memory_order_acquire)) {
+                return true;
+            }
+            leave();
+            return false;
+        }
+
+        auto leave() noexcept -> void {
+            if (inFlight.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                inFlight.notify_all();
+            }
+        }
+
+        auto deactivate_and_wait() noexcept -> void {
+            active.store(false, std::memory_order_release);
+            auto remaining = inFlight.load(std::memory_order_acquire);
+            while (remaining != 0) {
+                inFlight.wait(remaining, std::memory_order_acquire);
+                remaining = inFlight.load(std::memory_order_acquire);
+            }
+        }
+    };
+
+    class RuntimeCallbackLease final {
+    public:
+        explicit RuntimeCallbackLease(RuntimeCallbackGate& gate) noexcept : gate_{gate} {}
+        ~RuntimeCallbackLease() {
+            gate_.leave();
+        }
+        RuntimeCallbackLease(const RuntimeCallbackLease&) = delete;
+        auto operator=(const RuntimeCallbackLease&) -> RuntimeCallbackLease& = delete;
+
+    private:
+        RuntimeCallbackGate& gate_;
+    };
+
+    /** @brief 让注销失败或延迟回收的全局回调在实例析构前变为惰性。 */
+    std::shared_ptr<RuntimeCallbackGate> runtimeCallbackGate_{
+        std::make_shared<RuntimeCallbackGate>()};
+
+    /** @brief UE4SS UpdateThread 请求下一次 EngineTick 执行游戏线程卸载清理。 */
+    std::atomic<bool> unloadRequested_{false};
+    /** @brief 防止 EngineTick 异常后继续执行可能不一致的运行时工作。 */
+    std::atomic<bool> runtimeSafetyDisabled_{false};
+    /** @brief 保护卸载完成条件；不在持锁期间调用 Unreal。 */
+    std::mutex unloadMutex_;
+    /** @brief UpdateThread 等待游戏线程完成 Hook 注销和可逆恢复。 */
+    std::condition_variable unloadCondition_;
+    /** @brief 仅在 unloadMutex_ 下访问的游戏线程清理完成标志。 */
+    bool unloadCleanupFinished_{};
 };

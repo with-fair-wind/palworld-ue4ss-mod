@@ -8,6 +8,7 @@
 #include <base_resource_sharing/persistent_union.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
 #include <base_resource_sharing/resource_session.hpp>
+#include <common/function_hook_backend.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <grappling_hook/cooldown_service.hpp>
 
@@ -303,13 +304,14 @@ void test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete
 }
 
 void test_hook_backend_avoids_the_generic_full_name_dispatcher() {
-    using namespace base_resource_sharing;
+    using pal_game::FunctionHookBackend;
+    using pal_game::select_function_hook_backend;
 
-    CHECK(select_resource_hook_backend(true, false, true) == ResourceHookBackend::nativeFunction);
-    CHECK(select_resource_hook_backend(true, true, false) == ResourceHookBackend::scriptFunction);
-    CHECK(select_resource_hook_backend(false, false, false) == ResourceHookBackend::unsupported);
-    CHECK(select_resource_hook_backend(true, false, false) == ResourceHookBackend::unsupported);
-    CHECK(select_resource_hook_backend(true, true, true) == ResourceHookBackend::unsupported);
+    CHECK(select_function_hook_backend(true, false, true) == FunctionHookBackend::nativeFunction);
+    CHECK(select_function_hook_backend(true, true, false) == FunctionHookBackend::scriptFunction);
+    CHECK(select_function_hook_backend(false, false, false) == FunctionHookBackend::unsupported);
+    CHECK(select_function_hook_backend(true, false, false) == FunctionHookBackend::unsupported);
+    CHECK(select_function_hook_backend(true, true, true) == FunctionHookBackend::unsupported);
 }
 
 void test_hook_manifest_validates_live_unions_before_original_consumption() {

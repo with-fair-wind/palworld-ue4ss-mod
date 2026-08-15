@@ -73,6 +73,14 @@ struct ItemCatalogSnapshot {
     return found == catalog.labelsById.end() ? std::string(id) : found->second;
 }
 
+namespace detail {
+[[nodiscard]] inline auto matches_lowered_item(const ItemOption& item,
+                                               const std::string_view loweredQuery) -> bool {
+    return loweredQuery.empty() || ascii_lower(item.id).contains(loweredQuery) ||
+           ascii_lower(item.localizedName).contains(loweredQuery);
+}
+}  // namespace detail
+
 /**
  * @brief 判断物品是否匹配不区分 ASCII 大小写的搜索词。
  * @param[in] item 要检查的物品。
@@ -81,9 +89,7 @@ struct ItemCatalogSnapshot {
  */
 [[nodiscard]] inline auto matches_item(const ItemOption& item, const std::string_view query)
     -> bool {
-    const auto loweredQuery = ascii_lower(query);
-    return loweredQuery.empty() || ascii_lower(item.id).contains(loweredQuery) ||
-           ascii_lower(item.localizedName).contains(loweredQuery);
+    return detail::matches_lowered_item(item, ascii_lower(query));
 }
 
 /**
@@ -97,8 +103,9 @@ struct ItemCatalogSnapshot {
     -> std::vector<const ItemOption*> {
     std::vector<const ItemOption*> filtered;
     filtered.reserve(catalog.items.size());
+    const auto loweredQuery = ascii_lower(query);
     for (const auto& item : catalog.items) {
-        if (matches_item(item, query)) {
+        if (detail::matches_lowered_item(item, loweredQuery)) {
             filtered.push_back(&item);
         }
     }

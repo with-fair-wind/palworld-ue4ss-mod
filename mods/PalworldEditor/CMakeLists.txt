@@ -17,6 +17,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 add_library(${TARGET} SHARED
     src/mod/dllmain.cpp
     src/mod/editor_ui.cpp
+    src/common/function_hook_registry.cpp
     src/game/pal_base_camp_reflection.cpp
     src/items/item_ui.cpp
     src/items/stack_limit_gateway.cpp
@@ -33,6 +34,8 @@ add_library(${TARGET} SHARED
     src/pal_remote_palbox/remote_palbox_runtime.cpp
     src/pal_remote_palbox/remote_palbox_ui.cpp
     src/pal_revive/pal_revive.cpp
+    src/capture_override/capture_override_runtime.cpp
+    src/capture_override/capture_override_ui.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
@@ -79,6 +82,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PalworldEditor.RemotePalbox
         COMMAND PalworldEditorRemotePalboxTests)
+
+    add_executable(PalworldEditorCaptureOverrideTests
+        tests/capture_override_tests.cpp
+    )
+    target_include_directories(PalworldEditorCaptureOverrideTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorCaptureOverrideTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorCaptureOverrideTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.CaptureOverride
+        COMMAND PalworldEditorCaptureOverrideTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
