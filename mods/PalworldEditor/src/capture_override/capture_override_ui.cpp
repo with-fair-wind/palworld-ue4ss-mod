@@ -36,4 +36,6 @@ void PalworldEditorMod::render_capture_override(PalworldEditorMod* self) {
     ImGui::TextDisabled("仅本次游戏进程有效；重新启动游戏后默认关闭。");
     ImGui::TextDisabled(
         "开启后投出的帕鲁球会临时清除目标的不可捕获/Boss 标志；关闭后新投出的球恢复原版判定。");
+    ImGui::TextDisabled(
+        "对人类 NPC（如商人）会临时翻转 IsPal 门控尽力解锁捕获；能否成功以游戏实际表现为准。");
 }

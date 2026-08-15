@@ -111,10 +111,13 @@ struct EnumOverride {
 };
 
 struct CaptureTransaction {
-    std::array<BoolOverride, 8> bools{};
+    /** @brief 6 个静态标志 + IsPal + bIsUncapturable + 强制模式的 bIsForceCapturable = 最多 9。 */
+    std::array<BoolOverride, 9> bools{};
     std::size_t boolCount{};
     std::optional<FloatOverride> captureRate;
     std::optional<EnumOverride> spawnedType;
+    /** @brief 目标原本不是帕鲁（人类 NPC）；用于诊断日志。 */
+    bool nonPalTarget{};
 };
 
 struct ObjectPreparation {
@@ -391,6 +394,19 @@ enum class ApplyTransactionResult : std::uint8_t {
                                   ? CapturePreparationStatus::incompatible
                                   : CapturePreparationStatus::unavailable};
         }
+    }
+
+    // 人类 NPC（如商人）的 IsPal=false 是独立于不可捕获标志的捕获门控；对真帕鲁是无变化的
+    // 空操作，仅在投球调用窗口内临时翻转为 true 并在 post-hook 恢复。
+    const auto isPalOverride = make_bool_override(staticComponent, STR("IsPal"), true);
+    if (!isPalOverride.has_value()) {
+        return {.status = pal_game::is_valid(staticComponent)
+                              ? CapturePreparationStatus::incompatible
+                              : CapturePreparationStatus::unavailable};
+    }
+    transaction.nonPalTarget = !isPalOverride->original;
+    if (!append_bool(transaction, isPalOverride)) {
+        return {.status = CapturePreparationStatus::incompatible};
     }
 
     auto uncapturable = make_bool_override(individualParameter, STR("bIsUncapturable"), false);
@@ -683,7 +699,13 @@ auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
             }
             const auto applyResult = apply_transaction(preparation.transaction);
             if (applyResult == ApplyTransactionResult::success) {
+                // 先入账再诊断：日志在极端情况下抛出时，恢复责任已经就位。
                 pending.transaction = preparation.transaction;
+                if (pending.transaction->nonPalTarget) {
+                    Output::send<LogLevel::Verbose>(
+                        STR("PalworldEditor: capture override applied to a non-Pal target "
+                            "(IsPal temporarily true).\n"));
+                }
                 return;
             }
             if (applyResult == ApplyTransactionResult::rollbackFailed) {
