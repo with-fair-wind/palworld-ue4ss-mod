@@ -172,10 +172,11 @@ struct RuntimeLimits {
     WorkSuitabilityRanks values{};
     std::array<bool, kWorkSuitabilityCount> visited{};
     FScriptArrayHelper_InContainer entries(arrayProperty, saveParam);
-    if (entries.Num() < 0 || entries.Num() > 128) {
+    const int32 entryCount = entries.Num();
+    if (entryCount < 0 || entryCount > kMaxWorkSuitabilityEntries) {
         return std::nullopt;
     }
-    for (int32 index{}; index < entries.Num(); ++index) {
+    for (int32 index{}; index < entryCount; ++index) {
         void* const item = entries.GetRawPtr(index);
         const auto rawSuitability = read_enum(suitability, item);
         if (!rawSuitability.has_value() || *rawSuitability < 1 ||

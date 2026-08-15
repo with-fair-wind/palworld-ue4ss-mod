@@ -84,6 +84,8 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
 - 直接写 `StackCount` 绕过游戏复制/通知逻辑：单机可用，多人不可靠；
 - 技能编辑与制作/建造材料共享仅支持单人/本地房主；制作/建造共享可用，修理材料共享仍不可用（尚未验证安全的修理入口）；
 - 爪钩、捕获覆盖与资源共享开关每次启动默认关闭，不跨进程持久化；
+- 为覆盖 UE4SS 延迟回收回调闭包的热卸载窗口，Mod DLL 会固定到进程退出；UE4SS 热重载可重建实例与
+  Hook，但替换 DLL 二进制后必须重启游戏；
 - 不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时启用；
 - 依赖 Palworld 1.0 的 UFunction 参数布局与 UHT dump；游戏更新后需重新生成技能定义表。
 
@@ -94,3 +96,4 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
 - [pwmodding.wiki](https://pwmodding.wiki) · [ItemIDs](https://github.com/KURAMAAA0/PalModding/blob/main/ItemIDs.txt)
 - [PalSchema](https://github.com/Okaetsu/PalSchema) · [PalworldSaveTools](https://github.com/deafdudecomputers/PalworldSaveTools)
 - [UE4SS C++ 模板](https://github.com/UE4SS-RE/UE4SSCPPTemplate)
+- [Palworld SDK 依赖登记与更新核查流程](docs/sdk-dependency-registry.md)

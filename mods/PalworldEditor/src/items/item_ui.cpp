@@ -14,6 +14,12 @@
 #include <mod/mod_core.hpp>
 
 namespace {
+[[nodiscard]] auto item_label_reference(const item_catalog::ItemCatalogSnapshot& catalog,
+                                        const std::string& id) -> const std::string& {
+    const auto found = catalog.labelsById.find(id);
+    return found == catalog.labelsById.end() ? id : found->second;
+}
+
 [[nodiscard]] auto stack_limit_phase_label(
     const item_stack_limit::StackLimitRuntimePhase phase) noexcept -> const char* {
     using enum item_stack_limit::StackLimitRuntimePhase;
@@ -76,12 +82,17 @@ void PalworldEditorMod::render_item_browser(PalworldEditorMod* self) {
             ImGui::TextDisabled("尚未发现物品，请重新扫描。");
         }
         const auto visible = item_catalog::filter_items(self->item_db_cache_, self->search_buf_);
-        for (const auto* item : visible) {
-            const auto label = item_catalog::item_label(*item);
-            if (ImGui::Selectable(label.c_str())) {
-                const auto copyLen = std::min(item->id.size(), sizeof(self->item_buf_) - 1);
-                std::memcpy(self->item_buf_, item->id.data(), copyLen);
-                self->item_buf_[copyLen] = '\0';
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(visible.size()));
+        while (clipper.Step()) {
+            for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+                const auto* const item = visible[static_cast<std::size_t>(index)];
+                const auto& label = item_label_reference(self->item_db_cache_, item->id);
+                if (ImGui::Selectable(label.c_str())) {
+                    const auto copyLen = std::min(item->id.size(), sizeof(self->item_buf_) - 1);
+                    std::memcpy(self->item_buf_, item->id.data(), copyLen);
+                    self->item_buf_[copyLen] = '\0';
+                }
             }
         }
     }
@@ -90,6 +101,7 @@ void PalworldEditorMod::render_item_browser(PalworldEditorMod* self) {
 
 void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
     editor_ui::section_header("背包");
+    const bool writesDisabled = self->inventoryWritesDisabled_.load(std::memory_order_acquire);
     if (ImGui::Button("刷新背包")) {
         self->want_read_.store(true);
     }
@@ -98,23 +110,28 @@ void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
     {
         const std::lock_guard lock(self->inv_mutex_);
         ImGui::BeginChild("invlist", ImVec2(380, 220), true);
-        for (int i = 0; i < static_cast<int>(self->inv_cache_.size()); ++i) {
-            const auto& e = self->inv_cache_[i];
-            const auto itemLabel = item_catalog::item_label(self->item_db_cache_, e.item_id);
-            const auto label =
-                itemLabel + "  x" + std::to_string(e.count) + " ##inv" + std::to_string(i);
-            if (ImGui::Selectable(label.c_str(), self->selected_ == i)) {
-                self->selected_ = i;
-                self->set_count_input_ = e.count;
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(self->inv_cache_.size()));
+        while (clipper.Step()) {
+            for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+                const auto& entry = self->inv_cache_[static_cast<std::size_t>(index)];
+                const auto& itemLabel = item_label_reference(self->item_db_cache_, entry.item_id);
+                const auto label = itemLabel + "  x" + std::to_string(entry.count) + " ##inv" +
+                                   std::to_string(index);
+                if (ImGui::Selectable(label.c_str(), self->selected_ == index)) {
+                    self->selected_ = index;
+                    self->set_count_input_ = entry.count;
+                }
             }
         }
         ImGui::EndChild();
 
         if (self->selected_ >= 0 && self->selected_ < static_cast<int>(self->inv_cache_.size())) {
             const auto& e = self->inv_cache_[self->selected_];
-            const auto itemLabel = item_catalog::item_label(self->item_db_cache_, e.item_id);
+            const auto& itemLabel = item_label_reference(self->item_db_cache_, e.item_id);
             ImGui::Text("已选中：%s（槽位 %d，×%d）", itemLabel.c_str(),
                         static_cast<int>(e.slot_index), e.count);
+            ImGui::BeginDisabled(writesDisabled);
             ImGui::InputInt("新数量", &self->set_count_input_);
             self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
             {
@@ -126,7 +143,12 @@ void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
                     self->modify_requested_ = true;
                 }
             }
+            ImGui::EndDisabled();
         }
+    }
+    if (writesDisabled) {
+        ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+                           "背包数量恢复验证失败；本世界已停用后续直接写入。");
     }
 }
 

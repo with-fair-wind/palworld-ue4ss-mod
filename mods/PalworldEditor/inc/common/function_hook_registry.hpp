@@ -4,6 +4,8 @@
  */
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -21,7 +23,8 @@ namespace pal_game {
 /**
  * @brief 管理一组 UFunction pre/post Hook，并统一处理 Blueprint 脚本分发。
  * @details 登记器只保存 Hook 生命周期所需的 UFunction 非拥有句柄；调用者必须在 LoadMap
- *          前或所属模块卸载前调用 unregister_all()。单次注册失败会立即回滚本次登记。
+ *          前或所属模块卸载前于游戏线程调用 unregister_all()。析构函数不访问 Unreal，
+ *          只将可能残留的回调门关闭。单次注册失败会立即回滚本次登记。
  */
 class FunctionHookRegistry final {
 public:
@@ -46,16 +49,24 @@ public:
     [[nodiscard]] auto register_hook(RC::Unreal::UFunction* function, Callback preCallback,
                                      Callback postCallback) -> bool;
 
-    /** @brief 逆序注销全部原生 Hook 与全局脚本分发回调。 */
-    auto unregister_all() -> void;
+    /**
+     * @brief 逆序注销全部原生 Hook 与全局脚本分发回调。
+     * @warning 所属模块必须在游戏线程调用；析构函数不会代替该操作访问 Unreal。
+     */
+    auto unregister_all() noexcept -> void;
 
     /** @retval true 当前没有已登记 Hook。 */
     [[nodiscard]] auto empty() const noexcept -> bool;
 
 private:
+    struct CallbackGate {
+        std::atomic<bool> active{true};
+    };
+
     struct Binding {
         RC::Unreal::UFunction* function{};
         FunctionHookBackend backend{FunctionHookBackend::unsupported};
+        std::shared_ptr<CallbackGate> gate;
         Callback preCallback;
         Callback postCallback;
         RC::Unreal::CallbackId preId{-1};
@@ -63,7 +74,7 @@ private:
     };
 
     [[nodiscard]] auto ensure_script_dispatcher_registered() -> bool;
-    auto unregister_script_dispatcher() -> void;
+    auto unregister_script_dispatcher() noexcept -> void;
     auto dispatch_script(bool pre, RC::Unreal::UObject* context, RC::Unreal::FFrame& stack,
                          void* result) -> void;
     static auto invoke_safely(const Callback& callback,
@@ -71,6 +82,7 @@ private:
 
     std::wstring callbackNamePrefix_;
     std::vector<Binding> bindings_;
+    std::shared_ptr<CallbackGate> scriptDispatcherGate_;
     RC::Unreal::Hook::GlobalCallbackId scriptPreCallbackId_{RC::Unreal::Hook::ERROR_ID};
     RC::Unreal::Hook::GlobalCallbackId scriptPostCallbackId_{RC::Unreal::Hook::ERROR_ID};
 };

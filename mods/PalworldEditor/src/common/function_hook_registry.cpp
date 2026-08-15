@@ -17,11 +17,46 @@ namespace pal_game {
 using namespace RC;
 using namespace RC::Unreal;
 
+namespace {
+auto log_hook_error(const TCHAR* message) noexcept -> void {
+    try {
+        Output::send<LogLevel::Warning>(message);
+    } catch (...) {
+        // 卸载期间日志设备可能先于 Mod 关闭；回调钝化不能因此失败。
+        static_cast<void>(0);
+    }
+}
+
+auto unregister_native_hook(UFunction* function, const CallbackId callbackId) noexcept -> void {
+    if (function == nullptr || callbackId < 0) {
+        return;
+    }
+    try {
+        static_cast<void>(function->UnregisterHook(callbackId));
+    } catch (...) {
+        log_hook_error(STR("PalworldEditor: native UFunction hook unregistration threw.\n"));
+    }
+}
+}  // namespace
+
 FunctionHookRegistry::FunctionHookRegistry(const std::wstring_view callbackNamePrefix)
     : callbackNamePrefix_{callbackNamePrefix} {}
 
 FunctionHookRegistry::~FunctionHookRegistry() {
-    unregister_all();
+    for (const auto& binding : bindings_) {
+        if (binding.gate != nullptr) {
+            binding.gate->active.store(false, std::memory_order_release);
+        }
+    }
+    if (scriptDispatcherGate_ != nullptr) {
+        scriptDispatcherGate_->active.store(false, std::memory_order_release);
+    }
+    if (!bindings_.empty() || scriptPreCallbackId_ != Hook::ERROR_ID ||
+        scriptPostCallbackId_ != Hook::ERROR_ID) {
+        log_hook_error(
+            STR("PalworldEditor: FunctionHookRegistry destroyed before game-thread hook "
+                "unregistration; callbacks were made inert.\n"));
+    }
 }
 
 auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallback,
@@ -43,6 +78,7 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
         try {
             bindings_.push_back({.function = function,
                                  .backend = backend,
+                                 .gate = nullptr,
                                  .preCallback = std::move(preCallback),
                                  .postCallback = std::move(postCallback)});
         } catch (...) {
@@ -62,64 +98,83 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
 
     CallbackId preId{-1};
     CallbackId postId{-1};
-    if (preCallback) {
-        preId = function->RegisterPreHook(
-            [callback = preCallback](UnrealScriptFunctionCallableContext& context, void*) {
-                invoke_safely(callback, context);
-            });
+    std::shared_ptr<CallbackGate> gate;
+    try {
+        gate = std::make_shared<CallbackGate>();
+    } catch (...) {
+        return false;
     }
-    if (postCallback) {
-        postId = function->RegisterPostHook(
-            [callback = postCallback](UnrealScriptFunctionCallableContext& context, void*) {
-                invoke_safely(callback, context);
-            });
+    try {
+        if (preCallback) {
+            preId =
+                function->RegisterPreHook([gate, callback = preCallback](
+                                              UnrealScriptFunctionCallableContext& context, void*) {
+                    if (gate->active.load(std::memory_order_acquire)) {
+                        invoke_safely(callback, context);
+                    }
+                });
+        }
+        if (postCallback) {
+            postId = function->RegisterPostHook(
+                [gate, callback = postCallback](UnrealScriptFunctionCallableContext& context,
+                                                void*) {
+                    if (gate->active.load(std::memory_order_acquire)) {
+                        invoke_safely(callback, context);
+                    }
+                });
+        }
+    } catch (...) {
+        gate->active.store(false, std::memory_order_release);
+        unregister_native_hook(function, preId);
+        unregister_native_hook(function, postId);
+        return false;
     }
 
     const bool preReady = !preCallback || preId >= 0;
     const bool postReady = !postCallback || postId >= 0;
     if (!preReady || !postReady) {
-        if (preId >= 0) {
-            static_cast<void>(function->UnregisterHook(preId));
-        }
-        if (postId >= 0) {
-            static_cast<void>(function->UnregisterHook(postId));
-        }
+        gate->active.store(false, std::memory_order_release);
+        unregister_native_hook(function, preId);
+        unregister_native_hook(function, postId);
         return false;
     }
 
     try {
         bindings_.push_back({.function = function,
                              .backend = backend,
+                             .gate = gate,
                              .preCallback = std::move(preCallback),
                              .postCallback = std::move(postCallback),
                              .preId = preId,
                              .postId = postId});
     } catch (...) {
-        if (preId >= 0) {
-            static_cast<void>(function->UnregisterHook(preId));
-        }
-        if (postId >= 0) {
-            static_cast<void>(function->UnregisterHook(postId));
-        }
+        gate->active.store(false, std::memory_order_release);
+        unregister_native_hook(function, preId);
+        unregister_native_hook(function, postId);
         return false;
     }
     return true;
 }
 
-auto FunctionHookRegistry::unregister_all() -> void {
+auto FunctionHookRegistry::unregister_all() noexcept -> void {
+    for (const auto& binding : bindings_) {
+        if (binding.gate != nullptr) {
+            binding.gate->active.store(false, std::memory_order_release);
+        }
+    }
+    if (scriptDispatcherGate_ != nullptr) {
+        scriptDispatcherGate_->active.store(false, std::memory_order_release);
+    }
     for (auto& binding : std::views::reverse(bindings_)) {
         if (binding.backend != FunctionHookBackend::nativeFunction || binding.function == nullptr) {
             continue;
         }
-        if (binding.preId >= 0) {
-            static_cast<void>(binding.function->UnregisterHook(binding.preId));
-        }
-        if (binding.postId >= 0) {
-            static_cast<void>(binding.function->UnregisterHook(binding.postId));
-        }
+        unregister_native_hook(binding.function, binding.preId);
+        unregister_native_hook(binding.function, binding.postId);
     }
     unregister_script_dispatcher();
     bindings_.clear();
+    scriptDispatcherGate_.reset();
 }
 
 auto FunctionHookRegistry::empty() const noexcept -> bool {
@@ -130,30 +185,50 @@ auto FunctionHookRegistry::ensure_script_dispatcher_registered() -> bool {
     if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
         return true;
     }
+    if (scriptDispatcherGate_ == nullptr ||
+        !scriptDispatcherGate_->active.load(std::memory_order_acquire)) {
+        try {
+            scriptDispatcherGate_ = std::make_shared<CallbackGate>();
+        } catch (...) {
+            return false;
+        }
+    }
 
-    const Hook::FCallbackOptions preOptions{
-        .bOnce = false,
-        .bReadonly = true,
-        .OwnerModName = STR("PalworldEditor"),
-        .HookName = callbackNamePrefix_ + STR("Pre"),
-    };
-    scriptPreCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPreCallback(
-        [this](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack, void* result) {
-            dispatch_script(true, context, stack, result);
-        },
-        preOptions);
+    try {
+        const Hook::FCallbackOptions preOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = callbackNamePrefix_ + STR("Pre"),
+        };
+        const auto gate = scriptDispatcherGate_;
+        scriptPreCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPreCallback(
+            [this, gate](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack,
+                         void* result) {
+                if (gate->active.load(std::memory_order_acquire)) {
+                    dispatch_script(true, context, stack, result);
+                }
+            },
+            preOptions);
 
-    const Hook::FCallbackOptions postOptions{
-        .bOnce = false,
-        .bReadonly = true,
-        .OwnerModName = STR("PalworldEditor"),
-        .HookName = callbackNamePrefix_ + STR("Post"),
-    };
-    scriptPostCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPostCallback(
-        [this](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack, void* result) {
-            dispatch_script(false, context, stack, result);
-        },
-        postOptions);
+        const Hook::FCallbackOptions postOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = callbackNamePrefix_ + STR("Post"),
+        };
+        scriptPostCallbackId_ = Hook::RegisterProcessLocalScriptFunctionPostCallback(
+            [this, gate](Hook::TCallbackIterationData<void>&, UObject* context, FFrame& stack,
+                         void* result) {
+                if (gate->active.load(std::memory_order_acquire)) {
+                    dispatch_script(false, context, stack, result);
+                }
+            },
+            postOptions);
+    } catch (...) {
+        unregister_script_dispatcher();
+        return false;
+    }
 
     if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
         return true;
@@ -162,18 +237,29 @@ auto FunctionHookRegistry::ensure_script_dispatcher_registered() -> bool {
     return false;
 }
 
-auto FunctionHookRegistry::unregister_script_dispatcher() -> void {
+auto FunctionHookRegistry::unregister_script_dispatcher() noexcept -> void {
+    if (scriptDispatcherGate_ != nullptr) {
+        scriptDispatcherGate_->active.store(false, std::memory_order_release);
+    }
     if (scriptPreCallbackId_ != Hook::ERROR_ID) {
-        if (!Hook::UnregisterCallback(scriptPreCallbackId_)) {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: failed to unregister script pre-hook callback\n"));
+        try {
+            if (!Hook::UnregisterCallback(scriptPreCallbackId_)) {
+                log_hook_error(
+                    STR("PalworldEditor: failed to unregister script pre-hook callback\n"));
+            }
+        } catch (...) {
+            log_hook_error(STR("PalworldEditor: script pre-hook unregistration threw.\n"));
         }
         scriptPreCallbackId_ = Hook::ERROR_ID;
     }
     if (scriptPostCallbackId_ != Hook::ERROR_ID) {
-        if (!Hook::UnregisterCallback(scriptPostCallbackId_)) {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: failed to unregister script post-hook callback\n"));
+        try {
+            if (!Hook::UnregisterCallback(scriptPostCallbackId_)) {
+                log_hook_error(
+                    STR("PalworldEditor: failed to unregister script post-hook callback\n"));
+            }
+        } catch (...) {
+            log_hook_error(STR("PalworldEditor: script post-hook unregistration threw.\n"));
         }
         scriptPostCallbackId_ = Hook::ERROR_ID;
     }
@@ -200,10 +286,9 @@ auto FunctionHookRegistry::invoke_safely(const Callback& callback,
     try {
         callback(context, nullptr);
     } catch (const std::exception&) {
-        Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: UFunction hook callback rejected an exception\n"));
+        log_hook_error(STR("PalworldEditor: UFunction hook callback rejected an exception\n"));
     } catch (...) {
-        Output::send<LogLevel::Warning>(
+        log_hook_error(
             STR("PalworldEditor: UFunction hook callback rejected an unknown exception\n"));
     }
 }

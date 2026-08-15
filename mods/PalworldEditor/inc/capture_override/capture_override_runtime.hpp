@@ -36,7 +36,10 @@ public:
     /** @brief EngineTick 常量时间维护；处理回调请求的延迟安全注销。 */
     auto tick() -> void;
 
-    /** @brief 卸载前注销全部 Hook。 */
+    /**
+     * @brief 卸载前恢复在途事务并注销全部 Hook。
+     * @warning 只允许在游戏线程调用；完成后对象析构不再访问 Unreal。
+     */
     auto shutdown() -> void;
 
     /** @return 当前运行阶段。 */

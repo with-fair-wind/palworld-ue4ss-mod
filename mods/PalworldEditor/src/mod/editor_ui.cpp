@@ -85,6 +85,13 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
         ImGui::End();
         return;
     }
+    const bool runtimeDisabled = self->runtimeSafetyDisabled_.load(std::memory_order_acquire);
+    if (runtimeDisabled) {
+        ImGui::TextColored(
+            ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
+            "运行时因生命周期或异常错误已安全停用；请查看 UE4SS 日志并重新加载 Mod。");
+    }
+    ImGui::BeginDisabled(runtimeDisabled);
     if (ImGui::BeginTabBar("##editor_tabs", ImGuiTabBarFlags_None)) {
         if (ImGui::BeginTabItem("物品")) {
             render_stack_unlimited(self);
@@ -110,6 +117,7 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
         }
         ImGui::EndTabBar();
     }
+    ImGui::EndDisabled();
     ImGui::End();
 }
 

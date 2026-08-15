@@ -15,6 +15,8 @@
 - **技能**：数字键高亮"下一次按 E 会召唤"的队伍帕鲁，主动/被动技能编辑、被动技能分类选择与四词条预设；
 - **帕鲁属性**：等级、个体值、四项帕鲁之魂强化、浓缩星级、性别、13 类工作适应性永久加成与亲密度；
 - **形态**：Alpha（头目）、Lucky（闪光）、觉醒三个独立开关，需收回帕鲁后应用；
+- **队伍复活**：按当前队伍槽位恢复帕鲁生命状态；
+- **爪钩与捕获**：默认关闭的爪钩无冷却，以及投球期间瞬时捕获限制覆盖；
 - **远程终端**：按键触发的跨据点终端选择，含圈内判定与战斗中禁用（默认关闭）；
 - **据点资源共享**：同公会跨据点制作/建造材料共享（默认关闭，仅单人/本地房主）。
 
@@ -53,13 +55,13 @@ cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
 提交前至少运行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-- 三个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖物品目录、技能目录与编辑、配置、资源
-  共享、远程终端等纯值逻辑；反射调用、ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
+- 四个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖物品目录、技能目录与编辑、配置、资源
+  共享、远程终端和捕获覆盖等纯值逻辑；反射调用、ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
 - 游戏内应看到 `PalworldEditor loaded (v1.6.10)`；除物品、技能与世界切换回归外，逐项验证清单见
   `AGENTS.md` 的"验证一次改动"。
 
@@ -247,11 +249,14 @@ Windows SDK，允许它查询 MSVC 驱动（如
   不读取运行时 `UEnum` 布局；更新 Palworld/UHT dump 后必须重新运行生成脚本；
 - `inc/pal_stats/` + `src/pal_stats.cpp`：帕鲁属性编辑领域与 `SaveParameter` 反射适配；
 - `inc/pal_identity/` + `src/pal_identity.cpp`：Alpha/Lucky/觉醒三维形态编辑；
+- `inc/pal_revive/` + `src/pal_revive.cpp`：队伍帕鲁复活；
 - `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩对象的一次性冷却覆盖与原值恢复；
+- `inc/capture_override/` + `src/capture_override/`：捕获限制瞬时事务与 Hook 生命周期；
 - `inc/pal_remote_palbox/` + `src/pal_remote_palbox/`：远程终端——按键上升沿状态机（300ms 防连点）
   与基地选择策略（纯值层 `remote_palbox.hpp`）+ 游戏线程运行时 `remote_palbox_runtime.cpp`；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：
   同公会跨据点制作/建造材料共享；
+- `inc/common/` + `src/common/`：反射参数、签名判断与 UFunction Hook 登记等公共原语；
 - `src/dllmain.cpp`：mod 生命周期、ImGui、EngineTick/LoadMap 与线程间请求交接；
 - `src/*_ui.cpp`：各业务模块的 ImGui 界面。
 

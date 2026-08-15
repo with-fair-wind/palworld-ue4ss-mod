@@ -42,6 +42,8 @@ namespace {
 
 /** @brief 连续触发超时的次数上限；达到后停用域。 */
 inline constexpr std::uint64_t kMaxConsecutiveTimeouts = 5;
+/** @brief HUD 可堆叠窗口数组的防御性上限。 */
+inline constexpr int32 kMaximumStackableWidgets = 4'096;
 
 /** @brief 选择策略输入与打开终端所需 GUID 的单一候选记录。 */
 struct ResolvedBaseCampCandidate {
@@ -391,7 +393,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     }
     FScriptArrayHelper_InContainer helper{arrayProperty, hud};
     const auto count = helper.Num();
-    if (count == 0) {
+    if (count <= 0 || count > kMaximumStackableWidgets) {
         return false;
     }
     // 数组非空：逐个检查元素；IsInViewport 不可用的元素跳过（不视为打开）。

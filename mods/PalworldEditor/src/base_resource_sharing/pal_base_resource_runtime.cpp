@@ -25,6 +25,9 @@ using namespace RC::Unreal;
 
 namespace {
 
+constexpr int32 kMaximumModulesPerBase = 4'096;
+constexpr int32 kMaximumContainersPerModule = 10'000;
+
 [[nodiscard]] auto to_key(const FGuid& guid) -> GuidKey {
     return {{guid.A, guid.B, guid.C, guid.D}};
 }
@@ -111,22 +114,9 @@ namespace {
 
 [[nodiscard]] auto try_get_object(UObject* target, const CharType* functionName, UObject*& output)
     -> bool {
-    output = nullptr;
-    if (!pal_game::is_valid(target)) {
-        return false;
-    }
-    auto* function = target->GetFunctionByNameInChain(functionName);
-    auto* const result = function == nullptr
-                             ? nullptr
-                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_return_parameter(result)) {
-        return false;
-    }
-    FunctionParams params{function};
-    target->ProcessEvent(function, params.data());
-    output = result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(output);
+    const auto result = pal_game::invoke<UObject*>(target, functionName);
+    output = result.value_or(nullptr);
+    return result.has_value();
 }
 
 [[nodiscard]] auto read_object_property(UObject* object, const CharType* propertyName) -> UObject* {
@@ -241,8 +231,12 @@ namespace {
         return false;
     }
     FScriptArrayHelper_InContainer infos(property, module);
-    output.reserve(static_cast<std::size_t>(std::max(infos.Num(), 0)));
-    for (int32 index{}; index < infos.Num(); ++index) {
+    const int32 count = infos.Num();
+    if (count < 0 || count > kMaximumContainersPerModule) {
+        return false;
+    }
+    output.reserve(static_cast<std::size_t>(count));
+    for (int32 index{}; index < count; ++index) {
         FGuid containerId{};
         FGuid ownerMapObjectId{};
         if (!try_get_container_info(property, infos.GetRawPtr(index), containerId,
@@ -263,8 +257,12 @@ namespace {
         return false;
     }
     FScriptArrayHelper_InContainer containers(property, helper);
-    output.reserve(static_cast<std::size_t>(std::max(containers.Num(), 0)));
-    for (int32 index{}; index < containers.Num(); ++index) {
+    const int32 count = containers.Num();
+    if (count < 0 || count > kMaximumContainersPerModule) {
+        return false;
+    }
+    output.reserve(static_cast<std::size_t>(count));
+    for (int32 index{}; index < count; ++index) {
         auto* container = objectProperty->GetObjectPropertyValue(containers.GetRawPtr(index));
         FGuid id{};
         if (!try_get_guid(container, STR("GetId"), id)) {
@@ -369,7 +367,11 @@ auto notify_array_changed(UObject* object, const CharType* functionName) -> void
         return false;
     }
     FScriptArrayHelper_InContainer infos(sourceProperty, sourceObject);
-    for (int32 index{}; index < infos.Num(); ++index) {
+    const int32 count = infos.Num();
+    if (count < 0 || count > kMaximumContainersPerModule) {
+        return false;
+    }
+    for (int32 index{}; index < count; ++index) {
         FGuid id{};
         FGuid ownerMapObjectId{};
         if (try_get_container_info(sourceProperty, infos.GetRawPtr(index), id, ownerMapObjectId) &&
@@ -569,7 +571,12 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
 
         UObject* storageModule{};
         FScriptArrayHelper_InContainer modules(moduleArray, baseModel);
-        for (int32 index{}; index < modules.Num(); ++index) {
+        const int32 moduleCount = modules.Num();
+        if (moduleCount < 0 || moduleCount > kMaximumModulesPerBase) {
+            result.error = "据点模块数组数量超出安全上限。";
+            return result;
+        }
+        for (int32 index{}; index < moduleCount; ++index) {
             auto* candidate = moduleProperty->GetObjectPropertyValue(modules.GetRawPtr(index));
             if (candidate != nullptr && candidate->IsA(storageClass)) {
                 storageModule = candidate;
@@ -597,7 +604,12 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
                                     .objectFullName = std::move(storageModuleName)};
         std::set<GuidKey> moduleIds;
         FScriptArrayHelper_InContainer infos(containerInfos, storageModule);
-        for (int32 index{}; index < infos.Num(); ++index) {
+        const int32 containerCount = infos.Num();
+        if (containerCount < 0 || containerCount > kMaximumContainersPerModule) {
+            result.error = "据点仓储登记数量超出安全上限。";
+            return result;
+        }
+        for (int32 index{}; index < containerCount; ++index) {
             FGuid containerId{};
             FGuid ownerMapObjectId{};
             std::uint8_t containerType{};

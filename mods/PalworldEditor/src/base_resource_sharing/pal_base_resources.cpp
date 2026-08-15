@@ -27,6 +27,15 @@ using namespace RC;
 using namespace RC::Unreal;
 
 namespace {
+auto log_shutdown_error_noexcept(const TCHAR* message) noexcept -> void {
+    try {
+        Output::send<LogLevel::Error>(message);
+    } catch (...) {
+        // 关停期间日志设备可能已经不可用；不得因此跳过后续 Hook 注销。
+        static_cast<void>(0);
+    }
+}
+
 [[nodiscard]] auto object_name(UObject* object) -> std::wstring {
     return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
 }
@@ -207,19 +216,37 @@ public:
     }
 
     auto shutdown_hooks() -> void {
-        restore_all_synchronously("卸载 mod");
-        unregister_resource_hooks();
+        // Restoration and hook removal are independent cleanup responsibilities. In particular,
+        // an allocation or reflection failure while restoring must never leave callbacks pointing
+        // into a DLL that UE4SS is about to unload.
+        try {
+            restore_all_synchronously("卸载 mod");
+        } catch (...) {
+            log_shutdown_error_noexcept(
+                STR("PalworldEditor: persistent storage restore threw during shutdown.\n"));
+        }
+        try {
+            unregister_resource_hooks();
+        } catch (...) {
+            log_shutdown_error_noexcept(
+                STR("PalworldEditor: resource hook removal threw during shutdown.\n"));
+        }
         runtime_.begin_world_transition(runtime_.generation() + 1);
         unionLifecycle_.begin_world(runtime_.generation());
-        unionLedger_.clear();
         desiredPlan_ = {};
         reset_pending_work();
-        catalog_ = {};
-        registrationIndex_.clear();
         baseCount_ = 0;
         containerCount_ = 0;
         pendingContainerCount_ = 0;
-        worldContextFullName_.clear();
+        if (unionLedger_.empty()) {
+            catalog_ = {};
+            registrationIndex_.clear();
+            worldContextFullName_.clear();
+        } else {
+            // EngineTick 异常停用后对象仍可能继续存活；保留精确边账本及其解析上下文，
+            // 让随后的游戏线程卸载清理仍能重试，而不是把未完成恢复伪装成成功。
+            safetyDisabled_ = true;
+        }
         snapshotDirty_.mark();
         publish_snapshot();
     }

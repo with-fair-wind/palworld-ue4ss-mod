@@ -10,6 +10,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <exception>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -17,6 +18,12 @@
 #include <utility>
 #include <vector>
 
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <GUI/GUITab.hpp>
 #include <UE4SSProgram.hpp>
@@ -26,6 +33,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealInitializer.hpp>
+#include <Windows.h>
 #include <common/text_encoding.hpp>
 #include <mod/mod_core.hpp>
 #include <pal_revive/pal_revive.hpp>
@@ -34,11 +42,42 @@
 using namespace RC;
 using namespace RC::Unreal;
 
+namespace {
+template <auto Level, typename... Args>
+auto log_noexcept(const TCHAR* format, Args&&... args) noexcept -> void {
+    try {
+        Output::send<Level>(format, std::forward<Args>(args)...);
+    } catch (...) {
+        // 日志设备在关停期间可能已经销毁；安全路径不能因诊断失败再次抛出。
+        static_cast<void>(0);
+    }
+}
+
+/**
+ * @brief 保持本 DLL 代码页存活到进程退出，覆盖 UE4SS 延迟回收失效回调闭包的窗口。
+ * @details UE4SS 的全局回调注销会等待在途执行，但无效闭包由独立 GC 线程稍后销毁；
+ *          CppMod 随后立即 FreeLibrary。固定模块不保留 mod 实例或 Hook，只防止闭包析构代码失效。
+ */
+[[nodiscard]] auto pin_current_module() noexcept -> bool {
+    HMODULE module{};
+    return GetModuleHandleExW(
+               GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+               reinterpret_cast<LPCWSTR>(&pin_current_module), &module) != FALSE;
+}
+}  // namespace
+
 PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
     ModName = STR("PalworldEditor");
     ModVersion = STR("1.6.10");
     ModDescription = STR("Item, Pal skill, and same-guild base resource editor for Palworld 1.0");
     ModAuthors = STR("with-fair-wind");
+
+    if (!pin_current_module()) {
+        log_noexcept<LogLevel::Error>(
+            STR("PalworldEditor: failed to pin the mod DLL; hot unload callback retirement is "
+                "not safe.\n"));
+        runtimeSafetyDisabled_.store(true, std::memory_order_release);
+    }
 
     Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.10)\n"));
 
@@ -50,108 +89,258 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
 }
 
 PalworldEditorMod::~PalworldEditorMod() {
-    if (!stack_limit_ledger_.records().empty()) {
-        if (IsGameThreadInitialized() && IsInGameThread()) {
-            static_cast<void>(restore_stack_limit_overrides("卸载"));
-        } else {
-            Output::send<LogLevel::Warning>(
-                STR("PalworldEditor: unload did not run on the game thread; stack-limit "
-                    "records remain until the process exits or the affected objects reload.\n"));
-        }
+    unloadRequested_.store(true, std::memory_order_release);
+    if (IsGameThreadInitialized() && IsInGameThread()) {
+        shutdown_runtime_on_game_thread("卸载");
+        signal_unload_cleanup_finished();
+    } else if (engineTickCallbackId_ != Hook::ERROR_ID) {
+        // UE4SS hot-unloads C++ mods on its UpdateThread. Keep the object and DLL alive until
+        // the next EngineTick has restored values and removed every UFunction hook on the game
+        // thread. A timeout would reintroduce the exact dangling-callback race this barrier avoids.
+        std::unique_lock lock(unloadMutex_);
+        unloadCondition_.wait(lock, [this] { return unloadCleanupFinished_; });
     }
-    baseResourceBridge_.shutdown_hooks();
-    captureRuntime_.shutdown();
+
+    // Global detour callbacks provide executor waiting, so remove them only after the game-thread
+    // cleanup has signalled and the EngineTick callback is allowed to return.
+    runtimeCallbackGate_->deactivate_and_wait();
     unregister_callback(engineTickCallbackId_);
     unregister_callback(loadMapPostCallbackId_);
     unregister_callback(loadMapPreCallbackId_);
 }
 
 auto PalworldEditorMod::on_unreal_init() -> void {
-    const Hook::FCallbackOptions loadMapPreOptions{
-        .bOnce = false,
-        .bReadonly = true,
-        .OwnerModName = STR("PalworldEditor"),
-        .HookName = STR("WorldTransitionBegin"),
-    };
-    loadMapPreCallbackId_ = Hook::RegisterLoadMapPreCallback(
-        [this](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&, FURL,
-               UPendingNetGame*, FString&) { begin_world_transition(); },
-        loadMapPreOptions);
+    if (runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+        skillRuntimeSnapshot_.lastResult =
+            "Mod DLL 无法固定到进程生命周期；为避免延迟回调访问已卸载代码，运行时功能未启动。";
+        skillSnapshotDirty_ = true;
+        publish_skill_snapshot_if_dirty();
+        return;
+    }
 
-    const Hook::FCallbackOptions loadMapPostOptions{
-        .bOnce = false,
-        .bReadonly = true,
-        .OwnerModName = STR("PalworldEditor"),
-        .HookName = STR("WorldTransitionFinish"),
+    const auto fail_initialization = [this](const TCHAR* logMessage,
+                                            const std::string_view userMessage) noexcept {
+        log_noexcept<LogLevel::Error>(logMessage);
+        runtimeSafetyDisabled_.store(true, std::memory_order_release);
+        shutdown_runtime_on_game_thread("运行时初始化失败");
+        runtimeCallbackGate_->deactivate_and_wait();
+        unregister_callback(engineTickCallbackId_);
+        unregister_callback(loadMapPostCallbackId_);
+        unregister_callback(loadMapPreCallbackId_);
+        worldLifecycleCallbacksReady_.store(false, std::memory_order_release);
+        try {
+            skillQueue_.clear();
+            {
+                const std::scoped_lock lock(selectionRequestMutex_);
+                selectCurrentPalRequest_.reset();
+            }
+            skillRuntimeSnapshot_.lastResult = userMessage;
+            skillSnapshotDirty_ = true;
+            publish_skill_snapshot_if_dirty();
+        } catch (...) {
+            // 运行时已经停用且 Hook 已钝化；低内存下允许只缺失 GUI 诊断文本。
+            static_cast<void>(0);
+        }
     };
-    loadMapPostCallbackId_ = Hook::RegisterLoadMapPostCallback(
-        [this](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&, FURL,
-               UPendingNetGame*, FString&) { finish_world_transition(); },
-        loadMapPostOptions);
+
+    const auto callbackGate = runtimeCallbackGate_;
+    try {
+        const Hook::FCallbackOptions loadMapPreOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("WorldTransitionBegin"),
+        };
+        loadMapPreCallbackId_ = Hook::RegisterLoadMapPreCallback(
+            [this, callbackGate](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&,
+                                 FURL, UPendingNetGame*, FString&) {
+                if (!callbackGate->try_enter()) {
+                    return;
+                }
+                const RuntimeCallbackLease lease{*callbackGate};
+                if (!runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+                    try {
+                        begin_world_transition();
+                    } catch (...) {
+                        log_noexcept<LogLevel::Error>(
+                            STR("PalworldEditor: LoadMap pre-callback threw; runtime disabled.\n"));
+                        runtimeSafetyDisabled_.store(true, std::memory_order_release);
+                        shutdown_runtime_on_game_thread("LoadMap 前置回调异常");
+                    }
+                }
+            },
+            loadMapPreOptions);
+
+        const Hook::FCallbackOptions loadMapPostOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("WorldTransitionFinish"),
+        };
+        loadMapPostCallbackId_ = Hook::RegisterLoadMapPostCallback(
+            [this, callbackGate](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&,
+                                 FURL, UPendingNetGame*, FString&) {
+                if (!callbackGate->try_enter()) {
+                    return;
+                }
+                const RuntimeCallbackLease lease{*callbackGate};
+                if (!runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+                    try {
+                        finish_world_transition();
+                    } catch (...) {
+                        log_noexcept<LogLevel::Error>(STR(
+                            "PalworldEditor: LoadMap post-callback threw; runtime disabled.\n"));
+                        runtimeSafetyDisabled_.store(true, std::memory_order_release);
+                        shutdown_runtime_on_game_thread("LoadMap 后置回调异常");
+                    }
+                }
+            },
+            loadMapPostOptions);
+
+        const Hook::FCallbackOptions engineTickOptions{
+            .bOnce = false,
+            .bReadonly = true,
+            .OwnerModName = STR("PalworldEditor"),
+            .HookName = STR("GameThreadTick"),
+        };
+        engineTickCallbackId_ = Hook::RegisterEngineTickPreCallback(
+            [this, callbackGate](Hook::TCallbackIterationData<void>&, UEngine*,
+                                 const float deltaSeconds, bool) {
+                if (!callbackGate->try_enter()) {
+                    return;
+                }
+                const RuntimeCallbackLease lease{*callbackGate};
+                game_thread_tick(deltaSeconds);
+            },
+            engineTickOptions);
+    } catch (...) {
+        log_noexcept<LogLevel::Error>(
+            STR("PalworldEditor: registering required lifecycle callbacks threw an exception.\n"));
+    }
 
     worldLifecycleCallbacksReady_.store(loadMapPreCallbackId_ != Hook::ERROR_ID &&
                                         loadMapPostCallbackId_ != Hook::ERROR_ID);
 
-    const Hook::FCallbackOptions engineTickOptions{
-        .bOnce = false,
-        .bReadonly = true,
-        .OwnerModName = STR("PalworldEditor"),
-        .HookName = STR("GameThreadTick"),
-    };
-    engineTickCallbackId_ = Hook::RegisterEngineTickPreCallback(
-        [this](Hook::TCallbackIterationData<void>&, UEngine*, const float deltaSeconds, bool) {
-            game_thread_tick(deltaSeconds);
-        },
-        engineTickOptions);
-
-    wantProbeObject_.store(true);
-    want_scan_items_.store(true);
-    static_cast<void>(stack_limit_ledger_.begin_world(worldSession_.generation()));
-    stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
-                             std::memory_order_release);
-    baseResourceBridge_.on_world_ready(worldSession_.generation());
-    static_cast<void>(grappleLedger_.begin_world(worldSession_.generation()));
-    grappleReadinessScheduler_.begin_world(worldSession_.generation());
-    grappleRuntimePhase_.store(grappleLedger_.phase(worldSession_.generation()),
-                               std::memory_order_release);
-    captureRuntime_.on_world_begin();
-    captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
-
     if (engineTickCallbackId_ == Hook::ERROR_ID || !worldLifecycleCallbacksReady_.load()) {
-        baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
-        skillQueue_.clear();
-        {
-            const std::lock_guard lock(selectionRequestMutex_);
-            selectCurrentPalRequest_.reset();
-        }
-        skillRuntimeSnapshot_.lastResult =
-            "UE4SS 游戏线程/世界切换回调注册失败；为避免跨世界写入，技能编辑已停用。";
-        skillSnapshotDirty_ = true;
-        publish_skill_snapshot_if_dirty();
+        fail_initialization(
+            STR("PalworldEditor: required EngineTick/LoadMap callbacks could not be registered; "
+                "runtime features are disabled.\n"),
+            "UE4SS 游戏线程/世界切换回调注册失败；为避免跨世界访问，运行时功能已停用。");
+        return;
     }
 
-    // 远程终端配置：mods/<ModName>/remote_palbox.ini（缺失时回退默认值）。
-    const auto modsDirectory = UE4SSProgram::get_program().get_mods_directory();
-    const auto iniPath = (std::filesystem::path(modsDirectory) / std::filesystem::path(ModName) /
-                          L"remote_palbox.ini")
-                             .wstring();
-    remotePalboxRuntime_.load_config(text_encoding::to_utf8(iniPath));
+    try {
+        // 远程终端配置：mods/<ModName>/remote_palbox.ini（缺失时回退默认值）。
+        const auto modsDirectory = UE4SSProgram::get_program().get_mods_directory();
+        const auto iniPath = (std::filesystem::path(modsDirectory) /
+                              std::filesystem::path(ModName) / L"remote_palbox.ini")
+                                 .wstring();
+        remotePalboxRuntime_.load_config(text_encoding::to_utf8(iniPath));
+
+        wantProbeObject_.store(true);
+        want_scan_items_.store(true);
+        itemCatalogScanScheduler_.begin_world(worldSession_.generation());
+        static_cast<void>(stack_limit_ledger_.begin_world(worldSession_.generation()));
+        stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
+                                 std::memory_order_release);
+        baseResourceBridge_.on_world_ready(worldSession_.generation());
+        static_cast<void>(grappleLedger_.begin_world(worldSession_.generation()));
+        grappleReadinessScheduler_.begin_world(worldSession_.generation());
+        grappleRuntimePhase_.store(grappleLedger_.phase(worldSession_.generation()),
+                                   std::memory_order_release);
+        captureRuntime_.on_world_begin();
+        captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
+    } catch (...) {
+        fail_initialization(
+            STR("PalworldEditor: runtime initialization threw after callback registration.\n"),
+            "运行时初始化异常；已在游戏线程清理并停用全部功能。");
+    }
 }
 
 auto PalworldEditorMod::on_update() -> void {}
 
 auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
-    if (!worldSession_.can_access_unreal()) {
+    if (unloadRequested_.load(std::memory_order_acquire)) {
+        shutdown_runtime_on_game_thread("卸载");
+        signal_unload_cleanup_finished();
+        return;
+    }
+    if (runtimeSafetyDisabled_.load(std::memory_order_acquire) ||
+        !worldSession_.can_access_unreal()) {
         return;
     }
 
-    process_runtime_services(deltaSeconds);
-    const auto worldContextReady = process_inventory_requests(deltaSeconds);
-    process_stack_limit_work(worldContextReady);
-    process_pal_edit_requests();
-    process_initialization_tasks(worldContextReady);
-    process_utility_requests();
-    publish_runtime_state();
+    try {
+        process_runtime_services(deltaSeconds);
+        const auto worldContextReady = process_inventory_requests(deltaSeconds);
+        process_stack_limit_work(worldContextReady);
+        process_pal_edit_requests();
+        process_initialization_tasks();
+        process_utility_requests();
+        publish_runtime_state();
+    } catch (const std::exception&) {
+        log_noexcept<LogLevel::Error>(
+            STR("PalworldEditor: EngineTick failed with a standard exception; disabling runtime "
+                "safely.\n"));
+        runtimeSafetyDisabled_.store(true, std::memory_order_release);
+        shutdown_runtime_on_game_thread("EngineTick 异常");
+    } catch (...) {
+        log_noexcept<LogLevel::Error>(
+            STR("PalworldEditor: EngineTick failed with a non-standard exception; disabling "
+                "runtime safely.\n"));
+        runtimeSafetyDisabled_.store(true, std::memory_order_release);
+        shutdown_runtime_on_game_thread("EngineTick 异常");
+    }
+}
+
+auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view reason) noexcept
+    -> void {
+    if (!IsGameThreadInitialized() || !IsInGameThread()) {
+        return;
+    }
+
+    const auto run_cleanup = [](const auto& cleanup, const TCHAR* failure) noexcept {
+        try {
+            cleanup();
+        } catch (...) {
+            log_noexcept<LogLevel::Error>(failure);
+        }
+    };
+
+    requestedCaptureEnabled_.store(false, std::memory_order_release);
+    requestedBaseSharingEnabled_.store(false, std::memory_order_release);
+    requestedGrappleNoCooldown_.store(false, std::memory_order_release);
+    requested_stack_unlimited_.store(false, std::memory_order_release);
+    captureSettingDirty_.store(false, std::memory_order_release);
+    baseSharingSettingDirty_.store(false, std::memory_order_release);
+    grappleSettingDirty_.store(false, std::memory_order_release);
+    stack_setting_dirty_.store(false, std::memory_order_release);
+
+    run_cleanup([this] { captureRuntime_.shutdown(); },
+                STR("PalworldEditor: capture hooks could not be removed during shutdown.\n"));
+    run_cleanup([this] { baseResourceBridge_.shutdown_hooks(); },
+                STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
+    run_cleanup(
+        [this, reason] {
+            grappleLedger_.set_desired(false);
+            static_cast<void>(restore_grapple_overrides(reason));
+        },
+        STR("PalworldEditor: grapple values could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this, reason] {
+            stack_limit_ledger_.set_desired(false);
+            static_cast<void>(restore_stack_limit_overrides(reason));
+        },
+        STR("PalworldEditor: stack limits could not be restored during shutdown.\n"));
+    worldInitializationReady_ = false;
+}
+
+auto PalworldEditorMod::signal_unload_cleanup_finished() noexcept -> void {
+    {
+        const std::lock_guard lock(unloadMutex_);
+        unloadCleanupFinished_ = true;
+    }
+    unloadCondition_.notify_all();
 }
 
 auto PalworldEditorMod::process_runtime_services(const float deltaSeconds) -> void {
@@ -203,11 +392,6 @@ auto PalworldEditorMod::process_inventory_requests(const float deltaSeconds) -> 
             doGive = true;
         }
     }
-    if (doGive) {
-        pal_game::give_items(item, static_cast<int32>(count));
-        want_read_.store(true);
-    }
-
     // Modify inventory count
     int32_t modSlot = 0;
     int32_t modCount = 0;
@@ -221,16 +405,49 @@ auto PalworldEditorMod::process_inventory_requests(const float deltaSeconds) -> 
             doMod = true;
         }
     }
-    if (doMod) {
-        pal_game::set_slot_count(modSlot, modCount);
+
+    const bool scanRequested = want_scan_items_.exchange(false, std::memory_order_acq_rel);
+    if (!worldInitializationReady_ && (doGive || doMod)) {
+        worldInitializationReady_ = pal_game::is_valid(pal_game::get_main_container());
+    }
+
+    // StaticItemDataMap may become ready after LoadMap. The existing bounded scheduler also gates
+    // Common-container readiness checks, so startup retry never becomes a per-frame FindFirstOf.
+    const auto worldGeneration = worldSession_.generation();
+    if (scanRequested) {
+        itemCatalogScanScheduler_.request(worldGeneration);
+    }
+    if (itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
+        if (!worldInitializationReady_) {
+            worldInitializationReady_ = pal_game::is_valid(pal_game::get_main_container());
+        }
+        if (worldInitializationReady_) {
+            auto result = pal_game::scan_all_items();
+            static_cast<void>(
+                itemCatalogScanScheduler_.complete(worldGeneration, result.usedStaticItemDataMap));
+            const std::lock_guard lock(inv_mutex_);
+            if (result.usedStaticItemDataMap || item_db_cache_.items.empty()) {
+                item_db_cache_ = std::move(result.catalog);
+            }
+        } else {
+            static_cast<void>(itemCatalogScanScheduler_.complete(worldGeneration, false));
+        }
+    }
+
+    if (doGive && worldInitializationReady_) {
+        pal_game::give_items(item, static_cast<int32>(count));
+        want_read_.store(true);
+    }
+    if (doMod && worldInitializationReady_ && !inventoryWritesDisabled_.load()) {
+        const auto result = pal_game::set_slot_count(modSlot, modCount);
+        if (result == pal_game::SlotCountWriteStatus::rollbackFailed) {
+            inventoryWritesDisabled_.store(true, std::memory_order_release);
+        }
         want_read_.store(true);
     }
 
-    // 主菜单（无背包容器）时跳过物品扫描和背包读取，避免 fallback 日志噪音和无谓 ForEachUObject。
-    const auto worldContextReady = pal_game::is_valid(pal_game::get_main_container());
-
     // Read inventory
-    if (worldContextReady && want_read_.exchange(false)) {
+    if (worldInitializationReady_ && want_read_.exchange(false, std::memory_order_acq_rel)) {
         auto fresh = pal_game::read_inventory();
         const std::lock_guard lock(inv_mutex_);
         if (selected_ >= static_cast<int>(fresh.size())) {
@@ -239,24 +456,7 @@ auto PalworldEditorMod::process_inventory_requests(const float deltaSeconds) -> 
         inv_cache_ = std::move(fresh);
     }
 
-    // Scan items. StaticItemDataMap may become ready after LoadMap, so fallback scans retry
-    // with a bounded pure-value scheduler instead of probing UObject state every frame.
-    const auto worldGeneration = worldSession_.generation();
-    if (worldContextReady && want_scan_items_.exchange(false)) {
-        itemCatalogScanScheduler_.request(worldGeneration);
-    }
-    if (worldContextReady &&
-        itemCatalogScanScheduler_.advance(deltaSeconds, worldGeneration, true)) {
-        auto result = pal_game::scan_all_items();
-        static_cast<void>(
-            itemCatalogScanScheduler_.complete(worldGeneration, result.usedStaticItemDataMap));
-        const std::lock_guard lock(inv_mutex_);
-        if (result.usedStaticItemDataMap || item_db_cache_.items.empty()) {
-            item_db_cache_ = std::move(result.catalog);
-        }
-    }
-
-    return worldContextReady;
+    return worldInitializationReady_;
 }
 
 auto PalworldEditorMod::process_pal_edit_requests() -> void {
@@ -428,14 +628,17 @@ auto PalworldEditorMod::process_pal_edit_requests() -> void {
     }
 }
 
-auto PalworldEditorMod::process_initialization_tasks(const bool worldContextReady) -> void {
+auto PalworldEditorMod::process_initialization_tasks() -> void {
     const bool manualRefreshRequested = wantRefreshSkillCatalog_.exchange(false);
     const bool catalogReady =
         skill_editor::catalog_is_ready_for_editing(skillRuntimeSnapshot_.catalog);
     const bool refreshRequested = skillCatalogRefreshScheduler_.should_refresh(
         manualRefreshRequested, catalogReady,
-        skill_editor::SkillCatalogRefreshScheduler::clock::now(),
-        [worldContextReady] { return worldContextReady; });
+        skill_editor::SkillCatalogRefreshScheduler::clock::now(), [this] {
+            const auto ready = pal_game::is_valid(pal_game::get_main_container());
+            worldInitializationReady_ = worldInitializationReady_ || ready;
+            return ready;
+        });
     if (refreshRequested) {
         refresh_skill_catalog_on_game_thread();
     }
@@ -491,15 +694,21 @@ auto PalworldEditorMod::process_utility_requests() -> void {
     }
 }
 
-auto PalworldEditorMod::unregister_callback(Hook::GlobalCallbackId& callbackId) -> void {
+auto PalworldEditorMod::unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void {
     if (callbackId == Hook::ERROR_ID) {
         return;
     }
-    if (!Hook::UnregisterCallback(callbackId)) {
-        Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: failed to unregister callback id={}\n"), callbackId);
-    }
+    const auto ownedId = callbackId;
     callbackId = Hook::ERROR_ID;
+    try {
+        if (!Hook::UnregisterCallback(ownedId)) {
+            log_noexcept<LogLevel::Warning>(
+                STR("PalworldEditor: failed to unregister callback id={}\n"), ownedId);
+        }
+    } catch (...) {
+        log_noexcept<LogLevel::Warning>(
+            STR("PalworldEditor: unregistering callback id={} threw an exception.\n"), ownedId);
+    }
 }
 
 auto PalworldEditorMod::refresh_skill_catalog_on_game_thread() -> void {
@@ -739,6 +948,7 @@ auto PalworldEditorMod::process_grapple_work(const float deltaSeconds) -> void {
         return;
     }
     const auto commonInventoryReady = pal_game::is_valid(pal_game::get_main_container());
+    worldInitializationReady_ = worldInitializationReady_ || commonInventoryReady;
     const auto ready = grappling_hook::grapple_apply_ready(
         worldLifecycleCallbacksReady_.load(std::memory_order_acquire), worldAccessible,
         commonInventoryReady);
@@ -805,6 +1015,8 @@ auto PalworldEditorMod::restore_grapple_overrides(const std::string_view reason)
 
 auto PalworldEditorMod::begin_world_transition() -> void {
     const auto nextWorldGeneration = worldSession_.generation() + 1;
+    worldInitializationReady_ = false;
+    inventoryWritesDisabled_.store(false, std::memory_order_release);
     if (!restore_grapple_overrides("世界切换")) {
         grappleSafetyDisabled_.store(true);
         requestedGrappleNoCooldown_.store(false);
@@ -899,6 +1111,7 @@ auto PalworldEditorMod::finish_world_transition() -> void {
     give_requested_.store(false);
     modify_requested_.store(false);
     want_discover_.store(false);
+    worldInitializationReady_ = false;
 
     if (!worldLifecycleCallbacksReady_.load()) {
         worldSession_.begin_transition();
@@ -941,8 +1154,9 @@ auto PalworldEditorMod::publish_skill_snapshot_if_dirty() -> void {
     if (!std::exchange(skillSnapshotDirty_, false)) {
         return;
     }
+    auto publishedSnapshot = std::make_shared<SkillEditorSnapshot>(skillRuntimeSnapshot_);
     const std::lock_guard lock(skillSnapshotMutex_);
-    skillSnapshot_ = skillRuntimeSnapshot_;
+    skillSnapshot_ = std::move(publishedSnapshot);
 }
 
 /** @brief 把 UE4SS 所需入口符号导出到 Windows DLL。 */

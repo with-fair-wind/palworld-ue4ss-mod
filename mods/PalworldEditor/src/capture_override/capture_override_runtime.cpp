@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <string>
 #include <utility>
 
 #include <DynamicOutput/DynamicOutput.hpp>
@@ -143,6 +142,17 @@ enum class ApplyTransactionResult : std::uint8_t {
     return UObjectGlobals::StaticFindObject<UClass*>(nullptr, nullptr, path);
 }
 
+[[nodiscard]] auto classify_object(UObject* object, const TCHAR* expectedClassPath)
+    -> CapturePreparationStatus {
+    if (!pal_game::is_valid(object)) {
+        return CapturePreparationStatus::unavailable;
+    }
+    auto* const expectedClass = find_class(expectedClassPath);
+    return expectedClass != nullptr && object->GetClassPrivate()->IsChildOf(expectedClass)
+               ? CapturePreparationStatus::ready
+               : CapturePreparationStatus::incompatible;
+}
+
 [[nodiscard]] auto matches_object_class(FObjectPropertyBase* property,
                                         const TCHAR* expectedClassPath) -> bool {
     auto* const expectedClass = find_class(expectedClassPath);
@@ -191,14 +201,9 @@ enum class ApplyTransactionResult : std::uint8_t {
     }
     auto* const character =
         property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(locals));
-    if (!pal_game::is_valid(character)) {
-        return {.status = CapturePreparationStatus::unavailable};
-    }
-    auto* const expectedClass = find_class(kCharacterClassPath);
-    if (expectedClass == nullptr || !character->GetClassPrivate()->IsChildOf(expectedClass)) {
-        return {.status = CapturePreparationStatus::incompatible};
-    }
-    return {.status = CapturePreparationStatus::ready, .object = character};
+    const auto status = classify_object(character, kCharacterClassPath);
+    return {.status = status,
+            .object = status == CapturePreparationStatus::ready ? character : nullptr};
 }
 
 [[nodiscard]] auto read_object_property(UObject* object, const TCHAR* propertyName,
@@ -213,14 +218,9 @@ enum class ApplyTransactionResult : std::uint8_t {
     }
     auto* const value =
         property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
-    if (!pal_game::is_valid(value)) {
-        return {.status = CapturePreparationStatus::unavailable};
-    }
-    auto* const expectedClass = find_class(expectedClassPath);
-    if (expectedClass == nullptr || !value->GetClassPrivate()->IsChildOf(expectedClass)) {
-        return {.status = CapturePreparationStatus::incompatible};
-    }
-    return {.status = CapturePreparationStatus::ready, .object = value};
+    const auto status = classify_object(value, expectedClassPath);
+    return {.status = status,
+            .object = status == CapturePreparationStatus::ready ? value : nullptr};
 }
 
 [[nodiscard]] auto call_object_getter(UObject* object, const TCHAR* functionName,
@@ -244,14 +244,9 @@ enum class ApplyTransactionResult : std::uint8_t {
     }
     auto* const value =
         result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
-    if (!pal_game::is_valid(value)) {
-        return {.status = CapturePreparationStatus::unavailable};
-    }
-    auto* const expectedClass = find_class(expectedClassPath);
-    if (expectedClass == nullptr || !value->GetClassPrivate()->IsChildOf(expectedClass)) {
-        return {.status = CapturePreparationStatus::incompatible};
-    }
-    return {.status = CapturePreparationStatus::ready, .object = value};
+    const auto status = classify_object(value, expectedClassPath);
+    return {.status = status,
+            .object = status == CapturePreparationStatus::ready ? value : nullptr};
 }
 
 [[nodiscard]] auto find_bool_setter(UObject* object, const TCHAR* functionName,
@@ -732,7 +727,11 @@ auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
 auto CaptureOverrideRuntime::unregister_hooks() -> void {
     for (std::size_t index = impl_->callDepth; index > 0; --index) {
         auto& pending = impl_->calls[index - 1];
-        if (pending.transaction.has_value() && !restore_transaction(*pending.transaction)) {
+        try {
+            if (pending.transaction.has_value() && !restore_transaction(*pending.transaction)) {
+                state_.disable_for_world();
+            }
+        } catch (...) {
             state_.disable_for_world();
         }
         pending = {};
