@@ -1,4 +1,4 @@
-# PalworldEditor 1.6.10 — Palworld 物品、帕鲁技能与据点资源编辑器
+# PalworldEditor 1.7.0 — Palworld 物品、帕鲁技能与据点资源编辑器
 
 基于 [UE4SS](https://github.com/UE4SS-RE/RE-UE4SS) 的 C++23 mod，为 Palworld 1.0 提供游戏内
 物品/技能/属性编辑与可选的同公会跨据点材料共享。所有操作通过 UE4SS GUI 的 ImGui 窗口完成

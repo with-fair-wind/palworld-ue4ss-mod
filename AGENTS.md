@@ -7,7 +7,7 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 项目概览
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.10），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.7.0），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，数字键当前高亮、下一次按 E 会召唤的队伍
 帕鲁主动/被动技能编辑（含被动分类与四词条预设）、属性编辑、Alpha/Lucky/觉醒形态修改、队伍复活、
@@ -79,7 +79,7 @@ git diff --check
 判断、恢复账本、远程终端、捕获覆盖决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
 游戏内端到端验证。
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.10)`；打开
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.7.0)`；打开
 UE4SS GUI 的 `PalworldEditor` 页签后应能看到浮动窗口。至少验证：物品扫描与本地化标签、背包读取、
 数字键高亮队伍帕鲁后点击"选择当前帕鲁"、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能
 目录、点击"刷新技能列表"不崩溃、两个技能下拉框都可选择、主动/被动名称跟随游戏语言、已装备主动技能
