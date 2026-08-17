@@ -240,6 +240,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `bIsCompleteSyncPlayerFromServer_InClient` | PlayerState | bool | `remote_palbox_runtime.cpp:570` |
 | `BaseCampId`/`OwnerMapObjectInstanceId` | `PalHUDDispatchParameter_PalBox` | struct | `remote_palbox_runtime.cpp:747, 749` |
 | `CharacterMaxRank`/`WorkSuitabilityMaxRank` | `PalGameSetting` | int | `src/pal_stats/pal_stats.cpp:134, 136` |
+| `PalBoxReviveTime` | `PalGameSetting` | float（可逆清零，恢复账本） | `src/revive_timer/revive_timer_gateway.cpp` |
 
 ---
 

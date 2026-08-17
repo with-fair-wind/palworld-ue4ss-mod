@@ -35,6 +35,8 @@
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
 #include <pal_stats/pal_stat_editor.hpp>
 #include <pal_stats/pal_stats.hpp>
+#include <revive_timer/revive_timer_gateway.hpp>
+#include <revive_timer/revive_timer_service.hpp>
 #include <skills/pal_resolution_scheduler.hpp>
 #include <skills/pal_skills.hpp>
 #include <skills/selected_target_state.hpp>
@@ -129,6 +131,19 @@ private:
 
     /** @brief 发布堆叠上限运行阶段与面向用户的诊断文本。 */
     auto publish_stack_limit_status(std::string message) -> void;
+
+    /** @brief 在主背包安全门就绪后消费复活计时请求并执行一次性事务。 */
+    auto process_revive_timer_work(bool worldContextReady) -> void;
+
+    /**
+     * @brief 按纯值账本恢复 PalBoxReviveTime 原值。
+     * @param[in] reason 用于面向用户诊断的生命周期阶段。
+     * @return 原值是否恢复并通过重读验证，或确认无需恢复。
+     */
+    [[nodiscard]] auto restore_revive_timer_overrides(std::string_view reason) -> bool;
+
+    /** @brief 发布复活计时运行阶段与面向用户的诊断文本。 */
+    auto publish_revive_timer_status(std::string message) -> void;
 
     /**
      * @brief 在关闭开关或切图前恢复全部活动爪钩覆盖。
@@ -276,6 +291,9 @@ private:
     /** @brief 渲染捕获不可捕获帕鲁的两级开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_capture_override(PalworldEditorMod* self);
 
+    /** @brief 渲染终端复活计时移除开关与运行状态。 */
+    static void render_revive_timer(PalworldEditorMod* self);
+
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
 
@@ -374,6 +392,22 @@ private:
     std::mutex stack_limit_status_mutex_;
     /** @brief 最近一次应用或恢复事务的面向用户文本。 */
     std::string stack_limit_status_;
+
+    /** @brief GUI 提交的移除终端复活计时偏好；EngineTick 消费。 */
+    std::atomic<bool> requestedReviveTimerRemove_{false};
+    /** @brief 通知 EngineTick 消费最新的复活计时偏好。 */
+    std::atomic<bool> reviveTimerSettingDirty_{false};
+    /** @brief GUI 显式授权目标暂不可用后的下一次单次重试。 */
+    std::atomic<bool> reviveTimerRetryRequested_{false};
+    /** @brief 只保存原值 float 和事务阶段的纯值账本。 */
+    revive_timer::ReviveTimerLedger reviveTimerLedger_;
+    /** @brief 游戏线程发布、GUI 只读的复活计时运行阶段。 */
+    std::atomic<revive_timer::ReviveTimerRuntimePhase> reviveTimerPhase_{
+        revive_timer::ReviveTimerRuntimePhase::off};
+    /** @brief 保护游戏线程发布、GUI 复制的复活计时诊断。 */
+    std::mutex reviveTimerStatusMutex_;
+    /** @brief 最近一次复活计时应用或恢复结果的面向用户文本。 */
+    std::string reviveTimerStatus_;
 
     /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
     pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;
