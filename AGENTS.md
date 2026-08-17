@@ -11,8 +11,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，数字键当前高亮、下一次按 E 会召唤的队伍
 帕鲁主动/被动技能编辑（含被动分类与四词条预设）、属性编辑、Alpha/Lucky/觉醒形态修改、队伍复活、
-远程终端，以及默认关闭的爪钩无冷却、捕获限制覆盖、终端复活计时移除和仅面向单人/本地房主的同公会
-跨据点制作与建造材料共享。mod 本体通过 `/Script/Pal.*`
+远程终端，以及默认关闭的爪钩无冷却、捕获限制覆盖、终端复活计时移除、标记点传送和仅面向单人/
+本地房主的同公会跨据点制作与建造材料共享。mod 本体通过 `/Script/Pal.*`
 函数路径和 Palworld 类型进行反射调用，因此是 Palworld 专用实现；只有根目录的 CMake/RE-UE4SS
 super-build 脚手架适合扩展其他 mod。
 
@@ -52,7 +52,7 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 
 # 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
@@ -70,13 +70,13 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 提交前至少执行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-五个测试 target/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、配置、资源池、能力
-判断、恢复账本、远程终端、捕获覆盖与复活计时决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
+六个测试 target/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、配置、资源池、能力
+判断、恢复账本、远程终端、捕获覆盖、复活计时与标记传送决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
 游戏内端到端验证。
 
 构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.7.0)`；打开
@@ -118,6 +118,11 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 复活计时移除还应验证：默认关闭且关闭时零写入；开启后终端倒地帕鲁立即复活（PalBoxReviveTime=0）；
 关闭开关、切图与热卸载后原值恢复且重读一致；设置实例被世界重建时恢复按"无需恢复"处理而不是报错；
 目标暂不可用时等待重试，字段缺失时本世界安全停用。
+
+标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个；到达点为标记位置
+加 ArrivalHeightOffset（默认 +100m，落地 clipping 时在 ini 调整）；骑乘/地牢/战斗门控按配置拦截；
+无标记、世界未同步时给出对应提示；LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送成功率
+由原生 SyncTeleport 承载，本 mod 不做传送后位置回读验证。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common
 主背包就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。实际帧时间改善必须在游戏内测量。
@@ -295,6 +300,8 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 - `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩冷却覆盖与恢复；
 - `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除的单字段可逆覆盖与恢复账本；
+- `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（CustomMarkers 读取
+  + 最近标记纯值选择 + 原生 SyncTeleport）；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿
   状态机 300ms 防连点、基地选择策略）与游戏线程运行时；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：

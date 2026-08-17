@@ -38,6 +38,8 @@ add_library(${TARGET} SHARED
     src/capture_override/capture_override_ui.cpp
     src/revive_timer/revive_timer_gateway.cpp
     src/revive_timer/revive_timer_ui.cpp
+    src/waypoint_teleport/waypoint_teleport_runtime.cpp
+    src/waypoint_teleport/waypoint_teleport_ui.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
@@ -110,6 +112,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PalworldEditor.ReviveTimer
         COMMAND PalworldEditorReviveTimerTests)
+
+    add_executable(PalworldEditorWaypointTeleportTests
+        tests/waypoint_teleport_tests.cpp
+    )
+    target_include_directories(PalworldEditorWaypointTeleportTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorWaypointTeleportTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorWaypointTeleportTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.WaypointTeleport
+        COMMAND PalworldEditorWaypointTeleportTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).

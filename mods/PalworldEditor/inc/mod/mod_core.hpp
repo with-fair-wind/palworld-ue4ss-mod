@@ -43,6 +43,7 @@
 #include <skills/skill_catalog.hpp>
 #include <skills/skill_editor_service.hpp>
 #include <skills/world_session_state.hpp>
+#include <waypoint_teleport/waypoint_teleport_runtime.hpp>
 
 /**
  * @brief PalworldEditor 的 UE4SS mod 实例与全部运行时状态容器。
@@ -288,6 +289,9 @@ private:
     static void render_base_resource_sharing(PalworldEditorMod* self);
     static void render_remote_palbox(PalworldEditorMod* self);
 
+    /** @brief 渲染标记点传送配置与运行状态。 */
+    static void render_waypoint_teleport(PalworldEditorMod* self);
+
     /** @brief 渲染捕获不可捕获帕鲁的两级开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_capture_override(PalworldEditorMod* self);
 
@@ -411,6 +415,8 @@ private:
 
     /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
     pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;
+    /** @brief 游戏线程拥有的标记点传送运行时；GUI 只读取其值快照。 */
+    waypoint_teleport::WaypointTeleportRuntime waypointTeleportRuntime_;
     /** @brief 游戏线程拥有的跨据点资源反射桥；GUI 只读取其值快照。 */
     base_resource_sharing::PalBaseResourceBridge baseResourceBridge_;
     /** @brief GUI/启动阶段提交给游戏线程的资源共享偏好。 */

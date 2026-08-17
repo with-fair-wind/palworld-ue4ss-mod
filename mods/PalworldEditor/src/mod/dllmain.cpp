@@ -236,6 +236,11 @@ auto PalworldEditorMod::on_unreal_init() -> void {
                               std::filesystem::path(ModName) / L"remote_palbox.ini")
                                  .wstring();
         remotePalboxRuntime_.load_config(text_encoding::to_utf8(iniPath));
+        // 标记点传送配置：mods/<ModName>/waypoint_teleport.ini（缺失时回退默认值）。
+        const auto waypointIniPath = (std::filesystem::path(modsDirectory) /
+                                      std::filesystem::path(ModName) / L"waypoint_teleport.ini")
+                                         .wstring();
+        waypointTeleportRuntime_.load_config(text_encoding::to_utf8(waypointIniPath));
 
         wantProbeObject_.store(true);
         want_scan_items_.store(true);
@@ -379,6 +384,7 @@ auto PalworldEditorMod::process_runtime_services(const float deltaSeconds) -> vo
     baseResourceBridge_.ensure_hooks_registered();
     baseResourceBridge_.tick(deltaSeconds);
     remotePalboxRuntime_.tick(deltaSeconds, worldSession_);
+    waypointTeleportRuntime_.tick(deltaSeconds, worldSession_);
 
     if (wantProbeObject_.exchange(false)) {
         if (const auto object = UObjectGlobals::StaticFindObject<UObject*>(
@@ -1121,6 +1127,7 @@ auto PalworldEditorMod::begin_world_transition() -> void {
                                std::memory_order_release);
     baseResourceBridge_.on_world_begin(worldSession_.generation() + 1);
     remotePalboxRuntime_.begin_world_transition();
+    waypointTeleportRuntime_.begin_world_transition();
     captureRuntime_.on_world_end();
     captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
     worldSession_.begin_transition();
@@ -1219,6 +1226,7 @@ auto PalworldEditorMod::finish_world_transition() -> void {
     reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
                             std::memory_order_release);
     remotePalboxRuntime_.finish_world_transition();
+    waypointTeleportRuntime_.finish_world_transition();
     baseResourceBridge_.on_world_ready(worldSession_.generation());
     captureRuntime_.on_world_begin();
     captureRuntimePhase_.store(captureRuntime_.phase(), std::memory_order_release);
