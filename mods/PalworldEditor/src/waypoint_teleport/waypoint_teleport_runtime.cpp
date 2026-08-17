@@ -35,8 +35,7 @@ using namespace RC::Unreal;
 namespace {
 
 /** @brief 自定义标记 Map 最大索引的防御性上限（稀疏槽位不超过条目数的两倍）。 */
-inline constexpr int32 kMaximumCustomMarkerIndex{
-    static_cast<int32>(kMaximumCustomMarkers * 2)};
+inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCustomMarkers * 2)};
 
 /** @brief 游戏是否处于前台（前台窗口属于本进程）。 */
 [[nodiscard]] auto foreground_is_game() -> bool {
@@ -55,16 +54,13 @@ inline constexpr int32 kMaximumCustomMarkerIndex{
         nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
     auto* const function =
         utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(STR("GetLocationManager"));
-    auto* const input =
-        function == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(
-                  function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const output =
-        function == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(
-                  function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    auto* const input = function == nullptr ? nullptr
+                                            : CastField<FObjectPropertyBase>(function->FindProperty(
+                                                  FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const output = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(
+                                   function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
     if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
         !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
         !pal_game::is_return_parameter(output)) {
@@ -83,16 +79,15 @@ inline constexpr int32 kMaximumCustomMarkerIndex{
  * @details TMap<FGuid, FPalCustomMarkerSaveData> 经 FMapProperty 布局迭代；值结构的
  *          IconLocation/IconType 按名解析。结构不兼容返回 false（调用方安全停用）。
  */
-[[nodiscard]] auto read_marker_candidates(UObject* manager,
-                                          std::vector<MarkerCandidate>& output) -> bool {
+[[nodiscard]] auto read_marker_candidates(UObject* manager, std::vector<MarkerCandidate>& output)
+    -> bool {
     auto* const mapProperty = CastField<FMapProperty>(
         pal_game::is_valid(manager) ? manager->GetPropertyByNameInChain(STR("CustomMarkers"))
                                     : nullptr);
     auto* const keyProperty =
         mapProperty == nullptr ? nullptr : CastField<FStructProperty>(mapProperty->GetKeyProp());
-    auto* const valueProperty = mapProperty == nullptr
-                                    ? nullptr
-                                    : CastField<FStructProperty>(mapProperty->GetValueProp());
+    auto* const valueProperty =
+        mapProperty == nullptr ? nullptr : CastField<FStructProperty>(mapProperty->GetValueProp());
     auto* const map =
         mapProperty == nullptr ? nullptr : mapProperty->ContainerPtrToValuePtr<FScriptMap>(manager);
     if (mapProperty == nullptr || keyProperty == nullptr || valueProperty == nullptr ||
@@ -100,15 +95,14 @@ inline constexpr int32 kMaximumCustomMarkerIndex{
         return false;
     }
     auto* const valueStruct = valueProperty->GetStruct().Get();
-    auto* const locationProperty =
-        valueStruct == nullptr
-            ? nullptr
-            : CastField<FStructProperty>(
-                  valueStruct->FindProperty(FName(STR("IconLocation"), FNAME_Find)));
+    auto* const locationProperty = valueStruct == nullptr
+                                       ? nullptr
+                                       : CastField<FStructProperty>(valueStruct->FindProperty(
+                                             FName(STR("IconLocation"), FNAME_Find)));
     auto* const typeProperty =
-        valueStruct == nullptr
-            ? nullptr
-            : CastField<FIntProperty>(valueStruct->FindProperty(FName(STR("IconType"), FNAME_Find)));
+        valueStruct == nullptr ? nullptr
+                               : CastField<FIntProperty>(
+                                     valueStruct->FindProperty(FName(STR("IconType"), FNAME_Find)));
     if (locationProperty == nullptr || typeProperty == nullptr ||
         locationProperty->GetElementSize() != sizeof(FVector)) {
         return false;
@@ -141,28 +135,25 @@ inline constexpr int32 kMaximumCustomMarkerIndex{
 
 /** @brief 调用 UPalSyncTeleportComponent:SyncTeleport；结构不兼容返回 false。 */
 [[nodiscard]] auto call_sync_teleport(UObject* component, const FVector& destination) -> bool {
-    auto* const function =
-        pal_game::is_valid(component) ? component->GetFunctionByNameInChain(STR("SyncTeleport"))
-                                      : nullptr;
-    auto* const parameter =
-        function == nullptr
-            ? nullptr
-            : CastField<FStructProperty>(function->FindProperty(FName(STR("Parameter"), FNAME_Find)));
+    auto* const function = pal_game::is_valid(component)
+                               ? component->GetFunctionByNameInChain(STR("SyncTeleport"))
+                               : nullptr;
+    auto* const parameter = function == nullptr ? nullptr
+                                                : CastField<FStructProperty>(function->FindProperty(
+                                                      FName(STR("Parameter"), FNAME_Find)));
     if (!pal_game::has_exact_parameter_count(function, 1) ||
         !pal_game::is_input_parameter(parameter) || function->GetReturnProperty() != nullptr) {
         return false;
     }
     auto* const parameterStruct = parameter->GetStruct().Get();
-    auto* const locationProperty =
-        parameterStruct == nullptr
-            ? nullptr
-            : CastField<FStructProperty>(
-                  parameterStruct->FindProperty(FName(STR("Location"), FNAME_Find)));
-    auto* const rotationProperty =
-        parameterStruct == nullptr
-            ? nullptr
-            : CastField<FStructProperty>(
-                  parameterStruct->FindProperty(FName(STR("Rotation"), FNAME_Find)));
+    auto* const locationProperty = parameterStruct == nullptr
+                                       ? nullptr
+                                       : CastField<FStructProperty>(parameterStruct->FindProperty(
+                                             FName(STR("Location"), FNAME_Find)));
+    auto* const rotationProperty = parameterStruct == nullptr
+                                       ? nullptr
+                                       : CastField<FStructProperty>(parameterStruct->FindProperty(
+                                             FName(STR("Rotation"), FNAME_Find)));
     if (locationProperty == nullptr || rotationProperty == nullptr ||
         locationProperty->GetElementSize() != sizeof(FVector)) {
         return false;
@@ -170,8 +161,8 @@ inline constexpr int32 kMaximumCustomMarkerIndex{
     // 三项跳过标志（音效/淡入淡出）与音效对象保持 InitializeStruct 的零值。
 
     pal_game::FunctionParams params{function};
-    locationProperty->CopyCompleteValue(
-        parameter->ContainerPtrToValuePtr<void>(params.data()), &destination);
+    locationProperty->CopyCompleteValue(parameter->ContainerPtrToValuePtr<void>(params.data()),
+                                        &destination);
     // 单位四元数按引擎宽度写入：UE5 为 4×double（0x20），UE4 为 4×float（0x10）。
     auto* const rotationSlot = rotationProperty->ContainerPtrToValuePtr<void>(params.data());
     if (rotationProperty->GetElementSize() == sizeof(double) * 4) {

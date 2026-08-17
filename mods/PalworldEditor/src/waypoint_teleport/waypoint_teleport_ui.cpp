@@ -17,8 +17,7 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
     int hotkeyVk = snapshot.config.hotkeyVk;
     if (ImGui::InputInt("快捷键 VK 码", &hotkeyVk)) {
         auto config = snapshot.config;
-        config.hotkeyVk =
-            pal_game::valid_hotkey_vk(hotkeyVk) ? hotkeyVk : config.hotkeyVk;
+        config.hotkeyVk = pal_game::valid_hotkey_vk(hotkeyVk) ? hotkeyVk : config.hotkeyVk;
         self->waypointTeleportRuntime_.set_config(config);
     }
     auto config = snapshot.config;
@@ -33,9 +32,9 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
     }
     float arrivalOffset = config.arrivalHeightOffset;
     if (ImGui::InputFloat("到达高度偏移(cm)", &arrivalOffset)) {
-        config.arrivalHeightOffset =
-            waypoint_teleport::valid_arrival_offset(arrivalOffset) ? arrivalOffset
-                                                                     : config.arrivalHeightOffset;
+        config.arrivalHeightOffset = waypoint_teleport::valid_arrival_offset(arrivalOffset)
+                                         ? arrivalOffset
+                                         : config.arrivalHeightOffset;
         self->waypointTeleportRuntime_.set_config(config);
     }
 
@@ -52,8 +51,9 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
         ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
                            "标记/传送结构不兼容；本世界已停用标记传送。");
     }
-    ImGui::TextDisabled("默认 F7（VK 118），改键请编辑上方 VK 码；设置保存在 "
-                        "waypoint_teleport.ini。");
+    ImGui::TextDisabled(
+        "默认 F7（VK 118），改键请编辑上方 VK 码；设置保存在 "
+        "waypoint_teleport.ini。");
     ImGui::TextDisabled("传送到距离最近的自定义地图标记；到达点为标记位置加高度偏移。");
     ImGui::TextDisabled("成功 %llu 次；失败/拦截 %llu 次。",
                         static_cast<unsigned long long>(snapshot.teleportCount),

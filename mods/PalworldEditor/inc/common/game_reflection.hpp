@@ -295,8 +295,9 @@ template <typename T>
  * @retval true 成功调用任一位置 UFunction 并拷贝返回值。
  * @note 不尝试 GetLocation：Palworld 中该函数只存在于防御建筑模型类。
  */
-[[nodiscard]] inline auto read_actor_location(RC::Unreal::UObject* object, FVector& output)
-    -> bool {
+[[nodiscard]] inline auto read_actor_location(RC::Unreal::UObject* object,
+                                              RC::Unreal::FVector& output) -> bool {
+    using namespace RC::Unreal;
     for (const wchar_t* functionName : {L"K2_GetActorLocation", L"GetActorLocation"}) {
         auto* const function =
             is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;

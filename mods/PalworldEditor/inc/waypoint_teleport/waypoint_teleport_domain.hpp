@@ -25,10 +25,10 @@ inline constexpr std::size_t kMaximumCustomMarkers{1024};
  * @note 快捷键默认 F7（0x76=118），避开 UE4SS GUI 的 F10。
  */
 struct WaypointTeleportConfig {
-    int hotkeyVk{118};               /**< 触发快捷键 VK 码。 */
-    bool disableWhileMounted{true};  /**< 骑乘时禁用。 */
-    bool disableInDungeon{true};     /**< 地牢内禁用。 */
-    bool disableDuringCombat{true};  /**< 战斗中禁用。 */
+    int hotkeyVk{118};                   /**< 触发快捷键 VK 码。 */
+    bool disableWhileMounted{true};      /**< 骑乘时禁用。 */
+    bool disableInDungeon{true};         /**< 地牢内禁用。 */
+    bool disableDuringCombat{true};      /**< 战斗中禁用。 */
     float arrivalHeightOffset{10000.0F}; /**< 到达高度偏移（厘米）；0 = 使用标记原始 Z。 */
 };
 
@@ -45,10 +45,10 @@ enum class WaypointTeleportResult : std::uint8_t {
 
 /** @brief 标记候选：运行时读取后交给纯值选择器。 */
 struct MarkerCandidate {
-    double x{};                /**< 标记世界坐标 X。 */
-    double y{};                /**< 标记世界坐标 Y。 */
-    double z{};                /**< 标记世界坐标 Z（到达点锚定高度）。 */
-    double distanceSquared{};  /**< 玩家到标记的水平距离平方。 */
+    double x{};               /**< 标记世界坐标 X。 */
+    double y{};               /**< 标记世界坐标 Y。 */
+    double z{};               /**< 标记世界坐标 Z（到达点锚定高度）。 */
+    double distanceSquared{}; /**< 玩家到标记的水平距离平方。 */
 };
 
 /**
@@ -56,8 +56,8 @@ struct MarkerCandidate {
  * @param[in] candidates 运行时按域上限读取的标记候选。
  * @return 最近候选的下标；无候选时为空。
  */
-[[nodiscard]] inline auto select_nearest_marker(
-    const std::span<const MarkerCandidate> candidates) -> std::optional<std::size_t> {
+[[nodiscard]] inline auto select_nearest_marker(const std::span<const MarkerCandidate> candidates)
+    -> std::optional<std::size_t> {
     std::optional<std::size_t> nearest;
     for (std::size_t index{}; index < candidates.size(); ++index) {
         if (!nearest.has_value() ||
@@ -100,11 +100,13 @@ struct MarkerCandidate {
                 config.hotkeyVk = *parsed;
             }
         } else if (key == "DisableWhileMounted") {
-            config.disableWhileMounted = pal_game::parse_ini_bool(value, config.disableWhileMounted);
+            config.disableWhileMounted =
+                pal_game::parse_ini_bool(value, config.disableWhileMounted);
         } else if (key == "DisableInDungeon") {
             config.disableInDungeon = pal_game::parse_ini_bool(value, config.disableInDungeon);
         } else if (key == "DisableDuringCombat") {
-            config.disableDuringCombat = pal_game::parse_ini_bool(value, config.disableDuringCombat);
+            config.disableDuringCombat =
+                pal_game::parse_ini_bool(value, config.disableDuringCombat);
         } else if (key == "ArrivalHeightOffset") {
             const auto parsed = pal_game::parse_ini_float(value);
             if (parsed.has_value() && valid_arrival_offset(*parsed)) {
