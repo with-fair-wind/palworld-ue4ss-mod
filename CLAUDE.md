@@ -6,7 +6,7 @@
 ## 项目概览
 
 这是一个面向 **Palworld 1.0** 的 **UE4SS C++23 mod** 工程（CMake / Ninja super-build）。当前 mod
-名为 `PalworldEditor`（版本 1.6.10），构建产物为 `PalworldEditor.dll`。Palworld 的 F10 游戏控制台
+名为 `PalworldEditor`（版本 1.7.0），构建产物为 `PalworldEditor.dll`。Palworld 的 F10 游戏控制台
 不可用，所有用户交互都通过 UE4SS GUI 的 ImGui 浮动窗口完成。
 
 提供功能一览：
@@ -62,7 +62,7 @@ git diff --check
 
 - 四个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖物品目录、技能目录与编辑、配置、资源
   共享、远程终端和捕获覆盖等纯值逻辑；反射调用、ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
-- 游戏内应看到 `PalworldEditor loaded (v1.6.10)`；除物品、技能与世界切换回归外，逐项验证清单见
+- 游戏内应看到 `PalworldEditor loaded (v1.7.0)`；除物品、技能与世界切换回归外，逐项验证清单见
   `AGENTS.md` 的"验证一次改动"。
 
 ## 分支与协作流程

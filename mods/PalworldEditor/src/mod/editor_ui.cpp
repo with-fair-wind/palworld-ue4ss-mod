@@ -81,7 +81,7 @@ scoped_accent_button::~scoped_accent_button() {
 void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
     editor_ui::apply_editor_style();
     ImGui::SetNextWindowSize(ImVec2(580.0F, 640.0F), ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("PalworldEditor v1.6.10", nullptr)) {
+    if (!ImGui::Begin("PalworldEditor v1.7.0", nullptr)) {
         ImGui::End();
         return;
     }

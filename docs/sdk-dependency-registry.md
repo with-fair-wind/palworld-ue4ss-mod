@@ -271,8 +271,8 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `"Palworld 1.0.1 尚未验证安全的修理材料检查与扣除入口。"` | 同上 `:201` | 修理不可用提示文案 |
 | `"Palworld 1.0.2 可编辑的具体工作适应性值..."` | `inc/pal_stats/pal_stat_editor.hpp:29` | 枚举注释 |
 | `"Palworld 1.0.2 的 GetWorkSuitabilityRank..."` | `docs/pal-individual-field-audit.md:24` | 审计文档说明 |
-| `PalworldEditor 1.6.10` / `Palworld 1.0` | `README.md:1, 3` | README 标题与描述 |
-| `PalworldEditor loaded (v1.6.10)` | `AGENTS.md` 验证清单 | 控制台预期输出 |
+| `PalworldEditor 1.7.0` / `Palworld 1.0` | `README.md:1, 3` | README 标题与描述 |
+| `PalworldEditor loaded (v1.7.0)` | `AGENTS.md` 验证清单 | 控制台预期输出 |
 
 ---
 

@@ -68,7 +68,7 @@ auto log_noexcept(const TCHAR* format, Args&&... args) noexcept -> void {
 
 PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
     ModName = STR("PalworldEditor");
-    ModVersion = STR("1.6.10");
+    ModVersion = STR("1.7.0");
     ModDescription = STR("Item, Pal skill, and same-guild base resource editor for Palworld 1.0");
     ModAuthors = STR("with-fair-wind");
 
@@ -79,7 +79,7 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
         runtimeSafetyDisabled_.store(true, std::memory_order_release);
     }
 
-    Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.6.10)\n"));
+    Output::send<LogLevel::Verbose>(STR("PalworldEditor loaded (v1.7.0)\n"));
 
     register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
         UE4SS_ENABLE_IMGUI()
