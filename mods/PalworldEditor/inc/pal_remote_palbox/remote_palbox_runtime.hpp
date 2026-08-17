@@ -75,7 +75,9 @@ private:
     /** @brief 在 tick 内执行一次完整触发管线并返回结果；config 为 tick 内加锁拷贝的快照。 */
     auto execute_trigger(const RemotePalboxConfig& config) -> RemotePalboxTriggerResult;
 
-    /** @brief 探测关键反射点；任一不可用返回 false 并停用域。 */
+    /**
+     * @brief 探测关键反射点；服务对象尚未创建时允许重试，已创建对象缺少契约函数时停用域。
+     */
     auto probe_domain() -> bool;
 
     auto set_disabled(const std::string& message) -> void;
@@ -89,7 +91,7 @@ private:
     std::atomic<bool> requestedOpen_{false};
     /** @brief GUI 写入配置后置位；下一帧 tick 在游戏线程重置按键状态机。 */
     std::atomic<bool> configDirty_{false};
-    bool domainDisabled_{};
+    std::atomic<bool> domainDisabled_{false};
     bool domainProbed_{};
     std::string widgetPath_; /**< 终端界面类的完整路径；跨世界保留。 */
     std::string lastMessage_;

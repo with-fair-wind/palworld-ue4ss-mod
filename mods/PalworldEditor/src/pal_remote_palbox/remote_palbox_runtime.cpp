@@ -30,6 +30,7 @@
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
+#include <game/pal_base_camp_reflection.hpp>
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
 #include <windows.h>
 
@@ -41,6 +42,15 @@ namespace {
 
 /** @brief 连续触发超时的次数上限；达到后停用域。 */
 inline constexpr std::uint64_t kMaxConsecutiveTimeouts = 5;
+/** @brief HUD 可堆叠窗口数组的防御性上限。 */
+inline constexpr int32 kMaximumStackableWidgets = 4'096;
+
+/** @brief 选择策略输入与打开终端所需 GUID 的单一候选记录。 */
+struct ResolvedBaseCampCandidate {
+    BaseCampCandidate selection;
+    FGuid baseId;
+    FGuid ownerMapObjectId;
+};
 
 /** @brief 单次触发允许的软耗时上限；超过仅记录日志。 */
 inline constexpr auto kTriggerTimeBudget = std::chrono::milliseconds(2);
@@ -70,7 +80,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     auto* output = function == nullptr ? nullptr
                                        : CastField<FObjectPropertyBase>(function->FindProperty(
                                              FName(STR("ReturnValue"), FNAME_Find)));
-    if (utility == nullptr || function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return nullptr;
     }
     pal_game::FunctionParams params{function};
@@ -95,7 +107,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     auto* output = function == nullptr ? nullptr
                                        : CastField<FObjectPropertyBase>(function->FindProperty(
                                              FName(STR("ReturnValue"), FNAME_Find)));
-    if (utility == nullptr || function == nullptr || input == nullptr || output == nullptr) {
+    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
+        !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
+        !pal_game::is_return_parameter(output)) {
         return nullptr;
     }
     pal_game::FunctionParams params{function};
@@ -110,91 +124,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *  @note 不能以 GetParmsSize()!=0 判定“有入参”：UFunction::ParmsSize 包含返回值槽位，
  *        任何带返回值的无参函数都 >0。这里只按函数名调用已知的无参函数。 */
 [[nodiscard]] auto call_bool(UObject* target, const wchar_t* functionName) -> std::optional<bool> {
-    auto* function =
-        pal_game::is_valid(target) ? target->GetFunctionByNameInChain(functionName) : nullptr;
-    if (function == nullptr) {
-        return std::nullopt;
-    }
-    pal_game::FunctionParams params{function};
-    auto* const returnProperty = CastField<FBoolProperty>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return std::nullopt;
-    }
-    target->ProcessEvent(function, params.data());
-    return returnProperty->GetPropertyValueInContainer(params.data());
-}
-
-/** @brief 从 PalBaseCampManager 枚举本地玩家的基地 ID（镜像资源分享 read_base_ids）。 */
-[[nodiscard]] auto read_base_ids(UObject* manager, std::vector<FGuid>& output) -> bool {
-    output.clear();
-    auto* function =
-        manager == nullptr ? nullptr : manager->GetFunctionByNameInChain(STR("GetBaseCampIds"));
-    auto* arrayProperty =
-        function == nullptr
-            ? nullptr
-            : CastField<FArrayProperty>(function->FindProperty(FName(STR("OutIds"), FNAME_Find)));
-    auto* guidProperty =
-        arrayProperty == nullptr ? nullptr : CastField<FStructProperty>(arrayProperty->GetInner());
-    if (function == nullptr || arrayProperty == nullptr || guidProperty == nullptr) {
-        return false;
-    }
-
-    std::vector<std::byte> params(static_cast<std::size_t>(function->GetParmsSize()));
-    function->InitializeStruct(params.data());
-    struct ParamsGuard {
-        UFunction* function{};
-        void* params{};
-        ~ParamsGuard() {
-            function->DestroyStruct(params);
-        }
-    } guard{.function = function, .params = params.data()};
-
-    manager->ProcessEvent(function, params.data());
-    FScriptArrayHelper_InContainer values(arrayProperty, params.data());
-    output.reserve(static_cast<std::size_t>(std::max(values.Num(), 0)));
-    for (int32 index{}; index < values.Num(); ++index) {
-        FGuid id{};
-        guidProperty->CopyCompleteValue(&id, values.GetRawPtr(index));
-        output.push_back(id);
-    }
-    return true;
-}
-
-/** @brief 按基地 ID 取 PalBaseCampModel（镜像资源分享 try_get_base_model）。 */
-[[nodiscard]] auto try_get_base_model(UObject* manager, const FGuid& baseId, UObject*& model)
-    -> bool {
-    model = nullptr;
-    auto* function =
-        manager == nullptr ? nullptr : manager->GetFunctionByNameInChain(STR("TryGetModel"));
-    auto* idProperty = function == nullptr ? nullptr
-                                           : CastField<FStructProperty>(function->FindProperty(
-                                                 FName(STR("BaseCampId"), FNAME_Find)));
-    auto* modelProperty = function == nullptr
-                              ? nullptr
-                              : CastField<FObjectPropertyBase>(
-                                    function->FindProperty(FName(STR("OutModel"), FNAME_Find)));
-    auto* returnProperty =
-        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
-    if (function == nullptr || idProperty == nullptr || modelProperty == nullptr ||
-        returnProperty == nullptr) {
-        return false;
-    }
-
-    std::vector<std::byte> params(static_cast<std::size_t>(function->GetParmsSize()));
-    function->InitializeStruct(params.data());
-    struct ParamsGuard {
-        UFunction* function{};
-        void* params{};
-        ~ParamsGuard() {
-            function->DestroyStruct(params);
-        }
-    } guard{.function = function, .params = params.data()};
-
-    idProperty->CopyCompleteValue(idProperty->ContainerPtrToValuePtr<void>(params.data()), &baseId);
-    manager->ProcessEvent(function, params.data());
-    model = modelProperty->GetObjectPropertyValue(
-        modelProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return returnProperty->GetPropertyValueInContainer(params.data()) && model != nullptr;
+    return pal_game::invoke<bool>(target, functionName);
 }
 
 /** @brief 从模型 getter 读取 FGuid 字段。 */
@@ -203,7 +133,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         pal_game::is_valid(model) ? model->GetFunctionByNameInChain(getterName) : nullptr;
     auto* returnProperty =
         function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
-    if (function == nullptr || returnProperty == nullptr) {
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(returnProperty) ||
+        returnProperty->GetElementSize() != sizeof(FGuid)) {
         return false;
     }
     pal_game::FunctionParams params{function};
@@ -213,12 +145,8 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return output.A != 0 || output.B != 0 || output.C != 0 || output.D != 0;
 }
 
-/** @brief 读取建设圈半径（视觉圈）：优先世界设置 BaseCampAreaRange，回退据点 AreaRange。
- *  @details 视觉圈（地面蓝色建造圈）由世界设置 BaseCampAreaRange 决定，所有据点相同，
- *           随 PalWorldSettings 可配置；据点模型 AreaRange 随据点等级膨胀（可能大于视觉圈），
- *           仅作设置对象不可用时的兜底。 */
-[[nodiscard]] auto read_build_area_range(UObject* worldContext, UObject* model, float& output)
-    -> bool {
+/** @brief 从世界设置读取所有基地共用的视觉建设圈半径。 */
+[[nodiscard]] auto read_world_build_area_range(UObject* worldContext, float& output) -> bool {
     auto* const setting = get_game_setting(worldContext);
     if (pal_game::is_valid(setting)) {
         auto* const property = setting->GetPropertyByNameInChain(STR("BaseCampAreaRange"));
@@ -228,6 +156,11 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
             return output > 0.0F;
         }
     }
+    return false;
+}
+
+/** @brief 世界设置不可用时，从单个基地模型读取兼容性回退半径。 */
+[[nodiscard]] auto read_model_area_range(UObject* model, float& output) -> bool {
     auto* const property =
         pal_game::is_valid(model) ? model->GetPropertyByNameInChain(STR("AreaRange")) : nullptr;
     auto* const floatProperty = CastField<FFloatProperty>(property);
@@ -245,14 +178,15 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     for (const wchar_t* functionName : {L"K2_GetActorLocation", L"GetActorLocation"}) {
         auto* function =
             pal_game::is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;
-        if (function == nullptr) {
+        auto* const returnProperty =
+            function == nullptr ? nullptr
+                                : CastField<FStructProperty>(function->GetReturnProperty());
+        if (!pal_game::has_exact_parameter_count(function, 1) ||
+            !pal_game::is_return_parameter(returnProperty) ||
+            returnProperty->GetElementSize() != sizeof(FVector)) {
             continue;
         }
         pal_game::FunctionParams params{function};
-        auto* const returnProperty = CastField<FStructProperty>(function->GetReturnProperty());
-        if (returnProperty == nullptr) {
-            continue;
-        }
         object->ProcessEvent(function, params.data());
         returnProperty->CopyCompleteValue(
             &output, returnProperty->ContainerPtrToValuePtr<void>(params.data()));
@@ -279,19 +213,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         }
     }
     // 2) GetPawn() UFunction
-    auto* const function = controller->GetFunctionByNameInChain(STR("GetPawn"));
-    if (function == nullptr) {
-        return nullptr;
-    }
-    pal_game::FunctionParams params{function};
-    auto* const returnProperty = CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return nullptr;
-    }
-    controller->ProcessEvent(function, params.data());
-    auto* const pawnValue = returnProperty->GetObjectPropertyValue(
-        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(pawnValue) ? pawnValue : nullptr;
+    return pal_game::invoke<UObject*>(controller, STR("GetPawn")).value_or(nullptr);
 }
 
 /** @brief 玩家当前位置（Pawn → K2_GetActorLocation）。 */
@@ -342,7 +264,8 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         auto* const function = model->GetFunctionByNameInChain(STR("GetTransform"));
         if (function != nullptr) {
             auto* const returnProperty = CastField<FStructProperty>(function->GetReturnProperty());
-            if (returnProperty != nullptr) {
+            if (pal_game::has_exact_parameter_count(function, 1) &&
+                pal_game::is_return_parameter(returnProperty)) {
                 pal_game::FunctionParams params{function};
                 model->ProcessEvent(function, params.data());
                 return readTranslation(returnProperty,
@@ -357,32 +280,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         }
     }
     return false;
-}
-
-/** @brief 按实例 ID 取地图对象具体模型（PalMapObjectManager:FindConcreteModel）。 */
-[[nodiscard]] auto find_concrete_model(UObject* mapObjectManager, const FGuid& instanceId,
-                                       UObject*& concreteModel) -> bool {
-    concreteModel = nullptr;
-    auto* function = pal_game::is_valid(mapObjectManager)
-                         ? mapObjectManager->GetFunctionByNameInChain(STR("FindConcreteModel"))
-                         : nullptr;
-    auto* input = function == nullptr ? nullptr
-                                      : CastField<FStructProperty>(function->FindProperty(
-                                            FName(STR("InstanceId"), FNAME_Find)));
-    if (function == nullptr || input == nullptr) {
-        return false;
-    }
-    pal_game::FunctionParams params{function};
-    input->CopyCompleteValue(input->ContainerPtrToValuePtr<void>(params.data()), &instanceId);
-    mapObjectManager->ProcessEvent(function, params.data());
-    auto* const returnProperty = CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return false;
-    }
-    auto* const result = returnProperty->GetObjectPropertyValue(
-        returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-    concreteModel = pal_game::is_valid(result) ? result : nullptr;
-    return concreteModel != nullptr;
 }
 
 /** @brief 读取终端具体模型自带的界面类（UPalMapObjectBaseCampPoint::PalBoxWiget）。
@@ -427,20 +324,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *  @details 与 AnywherePalbox 一致：函数不可用的元素不视为打开（由调用方跳过）。
  *  @note 不能以 GetParmsSize()!=0 判定“有入参”，见 call_bool 说明。 */
 [[nodiscard]] auto widget_is_in_viewport(UObject* widget) -> std::optional<bool> {
-    if (!pal_game::is_valid(widget)) {
-        return std::nullopt;
-    }
-    auto* const function = widget->GetFunctionByNameInChain(STR("IsInViewport"));
-    if (function == nullptr) {
-        return std::nullopt;
-    }
-    pal_game::FunctionParams params{function};
-    auto* const returnProperty = CastField<FBoolProperty>(function->GetReturnProperty());
-    if (returnProperty == nullptr) {
-        return std::nullopt;
-    }
-    widget->ProcessEvent(function, params.data());
-    return returnProperty->GetPropertyValueInContainer(params.data());
+    return pal_game::invoke<bool>(widget, STR("IsInViewport"));
 }
 
 /** @brief 读取 ESlateVisibility 数值（GetVisibility 返回值）；不可用时返回 nullopt。
@@ -450,11 +334,12 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         return std::nullopt;
     }
     auto* const function = widget->GetFunctionByNameInChain(STR("GetVisibility"));
-    if (function == nullptr) {
+    auto* const returnProperty = function == nullptr ? nullptr : function->GetReturnProperty();
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(returnProperty)) {
         return std::nullopt;
     }
     pal_game::FunctionParams params{function};
-    auto* const returnProperty = function->GetReturnProperty();
     if (auto* const enumProperty = CastField<FEnumProperty>(returnProperty);
         enumProperty != nullptr) {
         auto* const underlying = CastField<FByteProperty>(enumProperty->GetUnderlyingProperty());
@@ -479,21 +364,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *           全部元素都无法检查时 fail-closed 拦截；空数组不拦截。 */
 [[nodiscard]] auto palbox_menu_is_open(UObject* controller) -> bool {
     auto* hud = [&]() -> UObject* {
-        auto* function = pal_game::is_valid(controller)
-                             ? controller->GetFunctionByNameInChain(STR("GetHUD"))
-                             : nullptr;
-        if (function != nullptr) {
-            pal_game::FunctionParams params{function};
-            auto* const returnProperty =
-                CastField<FObjectPropertyBase>(function->GetReturnProperty());
-            if (returnProperty != nullptr) {
-                controller->ProcessEvent(function, params.data());
-                auto* const value = returnProperty->GetObjectPropertyValue(
-                    returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-                if (pal_game::is_valid(value)) {
-                    return value;
-                }
-            }
+        if (auto* const value =
+                pal_game::invoke<UObject*>(controller, STR("GetHUD")).value_or(nullptr)) {
+            return value;
         }
         auto* const property = pal_game::is_valid(controller)
                                    ? controller->GetPropertyByNameInChain(STR("MyHUD"))
@@ -520,7 +393,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     }
     FScriptArrayHelper_InContainer helper{arrayProperty, hud};
     const auto count = helper.Num();
-    if (count == 0) {
+    if (count <= 0 || count > kMaximumStackableWidgets) {
         return false;
     }
     // 数组非空：逐个检查元素；IsInViewport 不可用的元素跳过（不视为打开）。
@@ -568,31 +441,37 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
 }  // namespace
 
 auto RemotePalboxRuntime::load_config(const std::string_view iniPath) -> void {
-    iniPath_ = std::string{iniPath};
     std::string content;
     if (std::ifstream stream{std::string{iniPath}, std::ios::binary}; stream) {
         content.assign(std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>());
     }
-    config_ = parse_remote_palbox_config(content);
+    const auto config = parse_remote_palbox_config(content);
+    {
+        const std::lock_guard lock(snapshotMutex_);
+        iniPath_ = std::string{iniPath};
+        config_ = config;
+        lastMessage_ = "配置已加载" + std::string{content.empty() ? "（使用默认值）" : ""};
+    }
     trigger_.reset();
-    note("配置已加载" + std::string{content.empty() ? "（使用默认值）" : ""}, false);
 }
 
 auto RemotePalboxRuntime::set_config(const RemotePalboxConfig config) -> void {
+    std::string iniPath;
     {
         const std::lock_guard lock(snapshotMutex_);
         config_ = config;
+        iniPath = iniPath_;
     }
     // 按键状态机只允许游戏线程访问：标记后由下一帧 tick 重置。
     configDirty_.store(true, std::memory_order_release);
-    if (!iniPath_.empty()) {
-        std::ofstream stream{std::string{iniPath_}, std::ios::binary | std::ios::trunc};
+    if (!iniPath.empty()) {
+        std::ofstream stream{iniPath, std::ios::binary | std::ios::trunc};
         if (stream) {
             stream << serialize_remote_palbox_config(config);
         } else {
             Output::send<LogLevel::Warning>(
                 STR("PalworldEditor: failed to write remote palbox config '{}'\n"),
-                text_encoding::widen_ascii(iniPath_));
+                text_encoding::widen_ascii(iniPath));
         }
     }
 }
@@ -631,10 +510,7 @@ auto RemotePalboxRuntime::request_open() -> void {
 
 auto RemotePalboxRuntime::begin_world_transition() -> void {
     trigger_.reset();
-    {
-        const std::lock_guard lock(snapshotMutex_);
-        domainDisabled_ = false;
-    }
+    domainDisabled_.store(false, std::memory_order_release);
     domainProbed_ = false;
     requestedOpen_.store(false);
     consecutiveTimeoutCount_ = 0;
@@ -648,7 +524,7 @@ auto RemotePalboxRuntime::snapshot() const -> RemotePalboxSnapshot {
     const std::lock_guard lock(snapshotMutex_);
     return RemotePalboxSnapshot{
         .config = config_,
-        .domainDisabled = domainDisabled_,
+        .domainDisabled = domainDisabled_.load(std::memory_order_acquire),
         .lastMessage = lastMessage_,
         .openCount = openCount_,
         .failCount = failCount_,
@@ -664,7 +540,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         trigger_.end_trigger();
         if (result == RemotePalboxTriggerResult::opened) {
             consecutiveTimeoutCount_ = 0;
-        } else if (result == RemotePalboxTriggerResult::unavailable &&
+        } else if (result == RemotePalboxTriggerResult::unavailable && domainProbed_ &&
                    elapsed > kTriggerTimeBudget) {
             // 只有结构故障（unavailable）连续超时才停用；blocked/noBase 是用户操作
             // 被门控拒绝或环境问题，即使耗时较长也不停用。
@@ -679,13 +555,9 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return result;
     };
 
-    if (domainDisabled_) {
+    if (domainDisabled_.load(std::memory_order_acquire)) {
         return finish(RemotePalboxTriggerResult::disabled);
     }
-    if (!probe_domain()) {
-        return finish(RemotePalboxTriggerResult::unavailable);
-    }
-
     auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
     auto* const controller = local_player_controller(worldContext);
     auto* const playerState = find_singleton(STR("PalPlayerState"));
@@ -722,9 +594,19 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return finish(RemotePalboxTriggerResult::blocked);
     }
 
+    if (!probe_domain()) {
+        const bool disabled = domainDisabled_.load(std::memory_order_acquire);
+        if (!disabled) {
+            note("远程终端服务尚未就绪，请稍后重试", true);
+        }
+        return finish(disabled ? RemotePalboxTriggerResult::disabled
+                               : RemotePalboxTriggerResult::unavailable);
+    }
+
     auto* const manager = find_singleton(STR("PalBaseCampManager"));
     std::vector<FGuid> baseIds;
-    if (manager == nullptr || !read_base_ids(manager, baseIds) || baseIds.empty()) {
+    if (manager == nullptr || !pal_base_camp_reflection::read_base_ids(manager, baseIds) ||
+        baseIds.empty()) {
         note("没有可用的已拥有基地", true);
         return finish(RemotePalboxTriggerResult::noBase);
     }
@@ -732,14 +614,14 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     auto* const mapObjectManager = find_singleton(STR("PalMapObjectManager"));
     FVector playerLocation{};
     const bool havePlayerLocation = read_player_location(controller, playerLocation);
-    std::vector<BaseCampCandidate> candidates;
+    float worldAreaRange{};
+    const bool haveWorldAreaRange =
+        config.onlyInsideBaseCircle && read_world_build_area_range(worldContext, worldAreaRange);
+    std::vector<ResolvedBaseCampCandidate> candidates;
     candidates.reserve(baseIds.size());
-    // 候选列表可能跳过解析失败的基地，索引与 baseIds 不对齐；用并行表保留来源 GUID。
-    std::vector<FGuid> candidateBaseIds;
-    candidateBaseIds.reserve(baseIds.size());
     for (const auto& baseId : baseIds) {
         UObject* model{};
-        if (!try_get_base_model(manager, baseId, model)) {
+        if (!pal_base_camp_reflection::try_get_base_model(manager, baseId, model)) {
             continue;
         }
         FGuid ownerMapObjectId{};
@@ -762,37 +644,38 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         bool playerInside = false;
         if (config.onlyInsideBaseCircle) {
             float areaRange{};
+            const bool haveAreaRange =
+                haveWorldAreaRange || read_model_area_range(model, areaRange);
+            if (haveWorldAreaRange) {
+                areaRange = worldAreaRange;
+            }
             playerInside =
-                haveCenter && havePlayerLocation &&
-                read_build_area_range(worldContext, model, areaRange) &&
+                haveCenter && havePlayerLocation && haveAreaRange &&
                 distanceSquared <= static_cast<double>(areaRange) * static_cast<double>(areaRange);
         }
-        candidates.push_back({.id = std::to_string(baseId.A) + std::to_string(baseId.B),
-                              .playerInside = playerInside,
-                              .distanceSquared = distanceSquared});
-        candidateBaseIds.push_back(baseId);
+        candidates.push_back({
+            .selection = {.playerInside = playerInside, .distanceSquared = distanceSquared},
+            .baseId = baseId,
+            .ownerMapObjectId = ownerMapObjectId,
+        });
     }
-    const auto pick = select_remote_base_camp(candidates);
+    std::vector<BaseCampCandidate> selectionCandidates;
+    selectionCandidates.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        selectionCandidates.push_back(candidate.selection);
+    }
+    const auto pick = select_remote_base_camp(selectionCandidates);
     if (!pick.has_value()) {
         note("没有可用的已拥有基地", true);
         return finish(RemotePalboxTriggerResult::noBase);
     }
-    if (config.onlyInsideBaseCircle && !candidates[*pick].playerInside) {
+    if (config.onlyInsideBaseCircle && !candidates[*pick].selection.playerInside) {
         // 与配置项"仅基地圈内可用"语义一致：圈外不打开任何基地的终端。
         note("仅基地圈内可用，请站到基地圈内再使用", true);
         return finish(RemotePalboxTriggerResult::blocked);
     }
-    const auto& selectedBase = candidateBaseIds[*pick];
-    UObject* selectedModel{};
-    if (!try_get_base_model(manager, selectedBase, selectedModel)) {
-        note("基地模型解析失败", true);
-        return finish(RemotePalboxTriggerResult::unavailable);
-    }
-    FGuid ownerMapObjectId{};
-    if (!read_guid(selectedModel, STR("GetOwnerMapObjectInstanceId"), ownerMapObjectId)) {
-        note("终端实例解析失败", true);
-        return finish(RemotePalboxTriggerResult::unavailable);
-    }
+    const auto& selectedBase = candidates[*pick].baseId;
+    const auto& ownerMapObjectId = candidates[*pick].ownerMapObjectId;
 
     // 界面类解析优先级：缓存路径（跨世界保留）→ 终端模型自带的 PalBoxWiget →
     // 按资产路径主动加载。任一路径得到 UClass* 后仅在本次触发内使用，跨帧只保留路径字符串。
@@ -803,7 +686,8 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     }
     if (widgetClass == nullptr && mapObjectManager != nullptr) {
         UObject* terminalConcrete{};
-        if (find_concrete_model(mapObjectManager, ownerMapObjectId, terminalConcrete) &&
+        if (pal_base_camp_reflection::find_concrete_model(mapObjectManager, ownerMapObjectId,
+                                                          terminalConcrete) &&
             read_terminal_widget_class(terminalConcrete, widgetClass)) {
             widgetPath_ = text_encoding::to_utf8(std::wstring{widgetClass->GetPathName()});
         }
@@ -906,16 +790,17 @@ auto RemotePalboxRuntime::probe_domain() -> bool {
     if (domainProbed_) {
         return true;
     }
-    domainProbed_ = true;
     auto* const hudService = find_singleton(STR("PalHUDService"));
     auto* const manager = find_singleton(STR("PalBaseCampManager"));
+    if (hudService == nullptr || manager == nullptr) {
+        return false;
+    }
     const bool hudOk =
-        hudService != nullptr &&
         hudService->GetFunctionByNameInChain(STR("CreateDispatchParameterForK2Node")) != nullptr &&
         hudService->GetFunctionByNameInChain(STR("Push")) != nullptr;
-    const bool managerOk = manager != nullptr &&
-                           manager->GetFunctionByNameInChain(STR("GetBaseCampIds")) != nullptr &&
+    const bool managerOk = manager->GetFunctionByNameInChain(STR("GetBaseCampIds")) != nullptr &&
                            manager->GetFunctionByNameInChain(STR("TryGetModel")) != nullptr;
+    domainProbed_ = true;
     if (!hudOk || !managerOk) {
         set_disabled("关键反射点不可用，本世界已停用远程终端");
         return false;
@@ -924,7 +809,7 @@ auto RemotePalboxRuntime::probe_domain() -> bool {
 }
 
 auto RemotePalboxRuntime::set_disabled(const std::string& message) -> void {
-    domainDisabled_ = true;
+    domainDisabled_.store(true, std::memory_order_release);
     note(message, true);
     Output::send<LogLevel::Warning>(STR("PalworldEditor: remote palbox disabled - {}\n"),
                                     text_encoding::widen_ascii(message));

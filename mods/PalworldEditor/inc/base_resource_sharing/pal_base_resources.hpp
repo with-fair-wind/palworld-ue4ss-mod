@@ -60,6 +60,10 @@ public:
     auto on_world_ready(std::uint64_t generation) -> void;
     auto tick(float deltaSeconds) -> void;
     auto ensure_hooks_registered() -> void;
+    /**
+     * @brief 恢复持久登记边并注销本模块全部 Hook。
+     * @warning 只允许在游戏线程调用；完成后对象析构不再访问 Unreal。
+     */
     auto shutdown_hooks() -> void;
     [[nodiscard]] auto snapshot() const -> BaseResourceSharingSnapshot;
 

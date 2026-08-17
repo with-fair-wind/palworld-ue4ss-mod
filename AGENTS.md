@@ -7,11 +7,12 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 项目概览
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.6.10），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.7.0），构建产物是 `PalworldEditor.dll`。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，数字键当前高亮、下一次按 E 会召唤的队伍
-帕鲁主动/被动技能编辑（含被动分类与四词条预设）、属性编辑、Alpha/Lucky/觉醒形态修改、远程终端，
-以及默认关闭、仅面向单人/本地房主的同公会跨据点制作与建造材料共享。mod 本体通过 `/Script/Pal.*`
+帕鲁主动/被动技能编辑（含被动分类与四词条预设）、属性编辑、Alpha/Lucky/觉醒形态修改、队伍复活、
+远程终端，以及默认关闭的爪钩无冷却、捕获限制覆盖和仅面向单人/本地房主的同公会跨据点制作与建造
+材料共享。mod 本体通过 `/Script/Pal.*`
 函数路径和 Palworld 类型进行反射调用，因此是 Palworld 专用实现；只有根目录的 CMake/RE-UE4SS
 super-build 脚手架适合扩展其他 mod。
 
@@ -51,7 +52,7 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 
 # 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests
 ctest --test-dir build --output-on-failure
 
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
@@ -69,17 +70,16 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 提交前至少执行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-`PalworldEditorTests`、`PalworldEditorBaseResourceSharingTests` 和
-`PalworldEditorRemotePalboxTests`/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、
-配置、资源池、能力判断、恢复账本、远程终端和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果
-仍需游戏内端到端验证。
+四个测试 target/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、配置、资源池、能力
+判断、恢复账本、远程终端、捕获覆盖决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
+游戏内端到端验证。
 
-构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.6.10)`；打开
+构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.7.0)`；打开
 UE4SS GUI 的 `PalworldEditor` 页签后应能看到浮动窗口。至少验证：物品扫描与本地化标签、背包读取、
 数字键高亮队伍帕鲁后点击"选择当前帕鲁"、切换高亮目标时保持锁定但暂停写入、启动后自动加载完整技能
 目录、点击"刷新技能列表"不崩溃、两个技能下拉框都可选择、主动/被动名称跟随游戏语言、已装备主动技能
@@ -108,8 +108,18 @@ UE4SS GUI 的 `PalworldEditor` 页签后应能看到浮动窗口。至少验证�
 已注入边再次识别为原生来源；关闭、LoadMap 和重新进入存档后所有本 Mod 登记边都被恢复。不要与
 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时测试。
 
+捕获覆盖还应验证：默认关闭且关闭时没有捕获 Hook；开启后普通帕鲁仍可正常捕获，Boss/不可捕获目标
+能够进入捕获流程，启用强制成功率后实际捕获成功；一次投球结束、关闭开关、LoadMap 和热卸载时原字段
+均被恢复且 Hook 被注销。由于 `SetupInternal` 与最终捕获判定的实际时序无法由 dump 证明，必须在游戏
+内确认瞬时事务覆盖窗口确实包含游戏读取点；若无效，不得仅凭静态构建宣称功能完成。
+
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common
 主背包就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。实际帧时间改善必须在游戏内测量。
+还应在分别启用捕获覆盖、爪钩覆盖、无限堆叠与资源共享后执行 UE4SS 热重载：卸载线程必须等待下一次
+EngineTick 在游戏线程恢复覆盖并注销业务 Hook，随后正常重新加载；日志不得出现非游戏线程
+`ProcessEvent`、残留回调、死锁或访问已卸载 DLL。由于 UE4SS 将失效的全局回调闭包交给独立 GC 线程
+延迟销毁，而 `CppMod` 会立即 `FreeLibrary`，本 Mod 在构造时固定自身 DLL 到进程退出；热重载只重建
+实例与 Hook，不承诺重新映射已替换的 DLL 文件。进程退出路径不以热重载结果替代验证。
 
 ## 分支与协作流程
 
@@ -139,6 +149,92 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
   纯查询函数标记 `[[nodiscard]]`；
 - 分层约束：纯值领域层只依赖标准库（`<chrono>`、`<optional>`、`<string>` 等），不包含任何 Unreal
   头；Unreal 类型只在游戏线程适配层出现。
+
+### Palworld 运行时反射安全编码规则（强制）
+
+- **运行时元数据是调用依据**：UHT/SDK dump 只用于确认函数名、属性名和生成静态定义，不能作为当前
+  进程内存布局仍然兼容的证明。每个 `ProcessEvent` 调用前都必须从实际 `UFunction` 校验完整签名；
+  缺少函数、属性或类型不匹配时 fail-closed，不得尝试兼容性猜测或部分调用；
+- **禁止手写固定参数布局**：新增或修改反射调用时，不得声明本地 `struct Params` 后直接把地址传给
+  `ProcessEvent`，也不得用 `reinterpret_cast`、固定偏移、`memcpy` 模拟参数结构。统一使用
+  `pal_game::FunctionParams` 按 `GetParmsSize()` 分配，并由 `InitializeStruct` / `DestroyStruct` 以 RAII
+  管理其中的 `FString`、`TArray`、结构体等非平凡字段；
+- **签名必须精确验证**：调用前使用 `has_exact_parameter_count` 校验全部 `CPF_Parm` 数量（包括返回
+  值），再按属性名、输入/输出/返回方向和具体 `FProperty` 子类逐项验证。整数必须匹配宽度与有无符号，
+  枚举必须验证底层数值属性，对象必须验证 `FObjectPropertyBase`，结构体应验证身份与大小，数组还必须
+  验证 Inner 类型和不受支持的 allocator 标志；
+- **正确解释 Unreal 参数标志**：`const T&` 可能同时带 `CPF_ConstParm`、`CPF_ReferenceParm` 与
+  `CPF_OutParm`，语义仍是只读输入；不得把任意 `OutParm` 直接认作可写输出。输入、输出与返回值统一
+  通过 `is_input_parameter` / `is_output_parameter` / `is_return_parameter` 和预期属性类型共同判断；
+- **通过属性 API 读写**：输入使用 `SetPropertyValueInContainer` 或 `CopyCompleteValue`，输出和返回值
+  使用对应 Property getter；动态数组使用 `FScriptArrayHelper_InContainer`，不得把参数缓冲区强转为
+  `TArray<T>`。读取数组前验证 `Num()` 非负且不超过领域上限，完成范围校验后才能 `reserve`、遍历或做
+  窄化转换；
+- **反射对象都是短期非拥有句柄**：`UObject*`、`UFunction*`、`FProperty*` 与 Unreal 容器地址只在
+  当前游戏线程调用链内有效；跨帧只保存 GUID、对象全名和标准库纯值。每次 `ProcessEvent` 后若还要
+  继续修改，必须重新解析或至少重新验证目标；对象返回值在使用前再次执行 `pal_game::is_valid`；
+- **反射边界不传播异常**：适配层使用 `std::optional`、明确的结果结构或状态枚举报告失败，不让 C++
+  异常穿过 UE4SS/Unreal Hook。输出参数在入口先清空，失败不得留下看似可用的半成品结果。
+
+### 反射写事务与回滚规则（强制）
+
+- 所有多步写操作采用“预检并读取原值 → 最小差量写入 → 调用原生 setter/OnRep 通知 → 完整重读验证”
+  的顺序；任一步缺少读取能力或签名验证失败时，禁止开始写入；
+- 写入后必须比较可观察值，而不是仅以 `ProcessEvent` 已返回作为成功依据。失败时只恢复本事务实际改动
+  的字段或数组尾部，再重新通知并验证原快照；不得用清空整个容器等扩大影响面的方式回滚；
+- 结果必须区分预检失败、写入成功、已验证回滚和回滚失败。回滚无法验证时保留恢复责任，并安全停用
+  对应功能域；不得通过重复点击或切换开关绕过安全停用；
+- 基础属性、工作适应性、形态、技能和资源共享等事务保持独立安全域。一个领域失败不能静默污染其他
+  领域，也不能把旧快照发布为本次成功结果。
+
+### 性能优化与封装规则
+
+- UObject 查找、函数解析、目录扫描和 `ProcessEvent` 只放在游戏线程的显式请求、初始化安全门或结构
+  事件路径；空闲 EngineTick 和 UI 绘制不得反射轮询。批量工作必须设置每帧条数上限与软时间预算，并
+  在每次 `ProcessEvent` 后检查预算；
+- 跨线程、跨帧缓存只保存经过验证的标准库纯值；不得为减少查找而缓存 UObject、UFunction、FProperty
+  或 Unreal 数组地址。低频失败采用有上限、可停止的重试，成功后立即取消；稳定状态不保留定时扫描；
+- 只抽取稳定且重复的底层原语：参数 RAII、签名/类型验证和基地管理器等单次公共调用可共享；领域层的
+  容错、事务与诊断继续留在各模块。禁止建立可执行任意反射调用的庞大通用框架或“通用事务引擎”；
+- 同一实体的关联字段使用单个值结构和单个容器，禁止依靠多个并行 `vector` 的相同索引维持关系。先做
+  数量上限校验再预留容量，优先差量更新、值比较和事件驱动，避免无变化快照、重复日志与全量重建；
+- 优化必须有游戏内帧时间、调用次数或日志计数依据。没有测量数据时，不新增目录缓存层、UI 过滤缓存或
+  主动/被动接口层级；低频代码优先保持直接、可审计，避免以抽象数量代替实际性能收益。
+
+### 新增功能的模块化与复用规则（强制）
+
+- **实现前先做能力盘点**：新增类型、helper、反射适配器、状态机、缓存、配置解析或 UI 控件前，必须用
+  `rg` 检查 `inc/`、`src/`、测试、CMake 和本文档中是否已有同类能力。先记录可直接复用、可小幅扩展
+  和必须新增的部分；不得通过改名或换目录复制已有逻辑；
+- **按三层架构确定唯一归属**：可脱离 Unreal 的规则、状态、请求、快照和算法放在 `inc/<feature>/`；
+  UObject 查找、反射读写、Hook 和事务适配放在 `src/<feature>/` 或对应 gateway；ImGui 文件只负责展示
+  与收集输入。`dllmain.cpp` 只做生命周期注册、游戏线程编排和模块间请求交接，不得新增领域判断、复杂
+  反射流程或大段 UI；
+- **依赖只能朝既定方向流动**：纯值领域层不得包含 Unreal/UE4SS/ImGui 头；UI 与其他线程不得直接调用
+  `ProcessEvent`；游戏适配层把 Unreal 状态转换为标准库值后再进入领域层。模块之间通过小型、强类型的
+  请求/结果/快照接口协作，禁止共享可变全局状态、跨模块访问内部容器或形成循环 include；
+- **单一状态所有者**：每项功能的运行状态、世界代次、待处理请求、错误和能力标志必须有唯一所有者。
+  UI 显示值从发布快照派生，不另建第二套可写状态；不要在多个 bool、并行容器或不同模块中重复表达同一
+  阶段。需要一起传递的关联字段组合成领域结构，返回多个结果时使用命名结果结构而非松散输出参数；
+- **优先复用现有最小原语**：对象有效性、`FunctionParams`、签名验证、文本编码、基地反射、目标锁定、
+  生命周期门、请求/快照交接和帧预算等已有能力必须优先调用。现有接口只缺少一种受支持类型或一个稳定
+  操作时，扩展原组件并补测试，不得在新模块私建近似 helper；
+- **抽取公共代码必须语义相同**：只有当两个以上模块具有相同输入输出、线程/生命周期前提、错误语义和
+  安全策略时，才抽取公共底层组件。仅代码形状相似但容错或事务不同的流程保留领域适配器，共享更底层
+  的单次操作；公共层不得通过大量开关、回调或模板参数同时承载互斥业务；
+- **防止公共目录变成杂项箱**：`common/` 只接收无业务归属、契约稳定、被多个模块实际使用的原语；
+  单模块 helper 留在该模块的匿名 namespace 或私有实现文件。禁止新增 `utils.hpp`、`helpers.hpp`、
+  `manager`、`service locator` 等边界模糊的万能入口；公共 API 保持最小，自包含头文件不泄露实现细节；
+- **生命周期接入必须成对**：新 Hook、缓存、事务账本和运行时开关必须明确初始化、LoadMap 前清理、
+  LoadMap 后恢复条件、关闭和卸载路径；注册与注销、应用与恢复必须由同一模块负责。不得把清理责任留给
+  调用者猜测，也不得因新增功能改变其他模块的安全停用域；
+- **优先扩展现有编排，不新增基础设施**：一个功能不得单独引入事件总线、插件注册表、通用仓库层、通用
+  状态机或通用事务框架。先用现有请求标志、快照发布、EngineTick 初始化任务和模块私有流程实现；只有
+  多个已存在功能出现稳定且可测试的共同契约，并能实际删除重复代码时才升级抽象；
+- **测试与构建属于模块的一部分**：纯值决策必须加入现有对应测试 target，或在确有独立生命周期和依赖
+  时新增测试 target；新增源文件同步更新 `mods/PalworldEditor/CMakeLists.txt`。反射/Hook 无法纯测的
+  路径必须记录游戏内验证项。完成前检查没有把 UObject 带入纯值头、没有重复 helper、没有新增空闲帧
+  轮询、没有遗留未对称清理，并运行格式、相关测试与端到端验证。
 
 ## 项目架构
 
@@ -189,11 +285,14 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 - `inc/pal_stats/pal_stat_editor.hpp` + `src/pal_stats.cpp`：属性编辑领域与 `SaveParameter`/原生
   setter 的事务适配；
 - `inc/pal_identity/` + `src/pal_identity.cpp`：Alpha、Lucky、觉醒三维形态编辑；
+- `inc/pal_revive/` + `src/pal_revive.cpp`：队伍帕鲁复活的反射适配与结果分类；
 - `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩冷却覆盖与恢复；
+- `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿
   状态机 300ms 防连点、基地选择策略）与游戏线程运行时；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：
   同公会跨据点制作/建造材料共享；
+- `inc/common/` + `src/common/`：多个模块实际复用的反射参数 RAII、签名判断和 Hook 登记原语；
 - `src/dllmain.cpp`：mod 生命周期、ImGui 和线程间请求交接；
 - `src/*_ui.cpp`：各业务模块的 ImGui 界面。
 
@@ -297,8 +396,8 @@ UObject 查找、目录发现、数组读写或日志。所有必需 Hook 已注
 登记，再注销资源 Hook。制作、建造、修理能力独立显示；修理在 Palworld 1.0.1 中保持不可用。Verbose
 日志只记录目录发现和持久图差量准备/恢复耗时。资源共享与爪钩无冷却都是本次游戏进程内的动态开关，
 每次 DLL 加载默认关闭，不读取、创建或写入 `config.ini`。不要与 IntegratedStorage、UBIM Lite、
-BlueprintResearch 或等价的仓储登记/材料路径 mod 同时启用。热卸载前必须先关闭开关，析构不得访问
-Unreal。
+BlueprintResearch 或等价的仓储登记/材料路径 mod 同时启用。热卸载无需用户预先关闭开关；卸载线程
+只请求并等待下一次 EngineTick，由游戏线程恢复账本并注销业务 Hook，析构线程自身不得访问 Unreal。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建
 出的 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，

@@ -18,7 +18,6 @@ enum class HookEvent : std::uint8_t {
 
 enum class HookPhase : std::uint8_t { pre, post };
 enum class HookRequirement : std::uint8_t { optional, required };
-enum class ResourceHookBackend : std::uint8_t { nativeFunction, scriptFunction, unsupported };
 
 /** @brief 标识结构 Hook 的语义来源，避免把无变化复制通知当成容器变更。 */
 enum class StructureChangeSource : std::uint8_t {
@@ -97,28 +96,6 @@ inline constexpr std::array kPalworld101HookManifest{
 
 [[nodiscard]] constexpr auto palworld_1_0_1_hook_manifest() noexcept -> std::span<const HookSpec> {
     return kPalworld101HookManifest;
-}
-
-/**
- * @brief 选择不会经过 UObjectGlobals 全名散列表分发的 Hook 后端。
- * @param hasFunctionPointer UFunction 是否具有底层调用入口。
- * @param usesProcessInternal 底层入口是否为 Blueprint VM 的 ProcessInternal。
- * @param nativeFlag UFunction 是否带 FUNC_Native。
- */
-[[nodiscard]] constexpr auto select_resource_hook_backend(const bool hasFunctionPointer,
-                                                          const bool usesProcessInternal,
-                                                          const bool nativeFlag) noexcept
-    -> ResourceHookBackend {
-    if (!hasFunctionPointer) {
-        return ResourceHookBackend::unsupported;
-    }
-    if (!usesProcessInternal && nativeFlag) {
-        return ResourceHookBackend::nativeFunction;
-    }
-    if (usesProcessInternal && !nativeFlag) {
-        return ResourceHookBackend::scriptFunction;
-    }
-    return ResourceHookBackend::unsupported;
 }
 
 [[nodiscard]] constexpr auto event_for_phase(const HookSpec& spec, const HookPhase phase) noexcept
