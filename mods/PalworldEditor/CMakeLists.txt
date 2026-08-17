@@ -36,6 +36,8 @@ add_library(${TARGET} SHARED
     src/pal_revive/pal_revive.cpp
     src/capture_override/capture_override_runtime.cpp
     src/capture_override/capture_override_ui.cpp
+    src/revive_timer/revive_timer_gateway.cpp
+    src/revive_timer/revive_timer_ui.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
@@ -95,6 +97,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PalworldEditor.CaptureOverride
         COMMAND PalworldEditorCaptureOverrideTests)
+
+    add_executable(PalworldEditorReviveTimerTests
+        tests/revive_timer_tests.cpp
+    )
+    target_include_directories(PalworldEditorReviveTimerTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorReviveTimerTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorReviveTimerTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.ReviveTimer
+        COMMAND PalworldEditorReviveTimerTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).

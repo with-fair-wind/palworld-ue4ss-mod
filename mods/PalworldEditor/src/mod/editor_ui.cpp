@@ -102,6 +102,7 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
         }
         if (ImGui::BeginTabItem("帕鲁")) {
             render_pal_editor(self);
+            render_revive_timer(self);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("据点")) {

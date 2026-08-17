@@ -243,6 +243,9 @@ auto PalworldEditorMod::on_unreal_init() -> void {
         static_cast<void>(stack_limit_ledger_.begin_world(worldSession_.generation()));
         stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
                                  std::memory_order_release);
+        static_cast<void>(reviveTimerLedger_.begin_world(worldSession_.generation()));
+        reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
+                                std::memory_order_release);
         baseResourceBridge_.on_world_ready(worldSession_.generation());
         static_cast<void>(grappleLedger_.begin_world(worldSession_.generation()));
         grappleReadinessScheduler_.begin_world(worldSession_.generation());
@@ -274,6 +277,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         process_runtime_services(deltaSeconds);
         const auto worldContextReady = process_inventory_requests(deltaSeconds);
         process_stack_limit_work(worldContextReady);
+        process_revive_timer_work(worldContextReady);
         process_pal_edit_requests();
         process_initialization_tasks();
         process_utility_requests();
@@ -332,6 +336,12 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
             static_cast<void>(restore_stack_limit_overrides(reason));
         },
         STR("PalworldEditor: stack limits could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this, reason] {
+            reviveTimerLedger_.set_desired(false);
+            static_cast<void>(restore_revive_timer_overrides(reason));
+        },
+        STR("PalworldEditor: revive timer could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
 }
 
@@ -907,6 +917,70 @@ auto PalworldEditorMod::publish_stack_limit_status(std::string message) -> void 
     stack_limit_status_ = std::move(message);
 }
 
+auto PalworldEditorMod::process_revive_timer_work(const bool worldContextReady) -> void {
+    if (worldContextReady && reviveTimerSettingDirty_.exchange(false, std::memory_order_acq_rel)) {
+        reviveTimerLedger_.set_desired(requestedReviveTimerRemove_.load(std::memory_order_acquire));
+    }
+    if (reviveTimerRetryRequested_.exchange(false, std::memory_order_acq_rel)) {
+        reviveTimerLedger_.request_retry();
+    }
+
+    const auto generation = worldSession_.generation();
+    switch (reviveTimerLedger_.next_work(generation, worldContextReady)) {
+        case revive_timer::ReviveTimerWork::none:
+            break;
+        case revive_timer::ReviveTimerWork::apply: {
+            if (!reviveTimerLedger_.begin_apply(generation)) {
+                break;
+            }
+            reviveTimerPhase_.store(revive_timer::ReviveTimerRuntimePhase::applying,
+                                    std::memory_order_release);
+            auto result = revive_timer::apply_revive_timer_override();
+            static_cast<void>(reviveTimerLedger_.complete_apply(
+                generation, revive_timer::to_apply_outcome(result.status), result.original));
+            if (!reviveTimerLedger_.desired()) {
+                requestedReviveTimerRemove_.store(false, std::memory_order_release);
+            }
+            publish_revive_timer_status(std::move(result.message));
+            break;
+        }
+        case revive_timer::ReviveTimerWork::restore:
+            static_cast<void>(restore_revive_timer_overrides("关闭开关"));
+            break;
+    }
+
+    reviveTimerPhase_.store(reviveTimerLedger_.phase(generation), std::memory_order_release);
+}
+
+auto PalworldEditorMod::restore_revive_timer_overrides(const std::string_view reason) -> bool {
+    reviveTimerLedger_.set_desired(false);
+    requestedReviveTimerRemove_.store(false, std::memory_order_release);
+    const auto original = reviveTimerLedger_.original();
+    if (!original.has_value()) {
+        reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
+                                std::memory_order_release);
+        return true;
+    }
+
+    auto result = revive_timer::restore_revive_timer_override(*original);
+    const bool succeeded =
+        result.status == revive_timer::ReviveTimerGatewayStatus::succeeded ||
+        result.status == revive_timer::ReviveTimerGatewayStatus::verifiedRollback;
+    static_cast<void>(reviveTimerLedger_.complete_restore(succeeded));
+    std::string message{reason};
+    message.append("：");
+    message.append(result.message);
+    publish_revive_timer_status(std::move(message));
+    reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
+                            std::memory_order_release);
+    return succeeded;
+}
+
+auto PalworldEditorMod::publish_revive_timer_status(std::string message) -> void {
+    const std::lock_guard lock(reviveTimerStatusMutex_);
+    reviveTimerStatus_ = std::move(message);
+}
+
 auto PalworldEditorMod::process_grapple_work(const float deltaSeconds) -> void {
     if (!worldLifecycleCallbacksReady_.load(std::memory_order_acquire)) {
         grappleRuntimePhase_.store(grappling_hook::CooldownRuntimePhase::waitingForWorld,
@@ -1032,6 +1106,15 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     if (stack_limit_ledger_.records().empty()) {
         static_cast<void>(stack_limit_ledger_.begin_world(nextWorldGeneration));
     }
+    // 游戏设置实例随世界重建；切图前恢复原值，不可解析时由新世界实例的原生值接管。
+    reviveTimerLedger_.set_desired(false);
+    static_cast<void>(restore_revive_timer_overrides("世界切换"));
+    requestedReviveTimerRemove_.store(false, std::memory_order_release);
+    reviveTimerSettingDirty_.store(false, std::memory_order_release);
+    reviveTimerRetryRequested_.store(false, std::memory_order_release);
+    static_cast<void>(reviveTimerLedger_.begin_world(nextWorldGeneration));
+    reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
+                            std::memory_order_release);
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
     grappleReadinessScheduler_.begin_world(nextWorldGeneration);
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
@@ -1127,6 +1210,14 @@ auto PalworldEditorMod::finish_world_transition() -> void {
     }
     stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
                              std::memory_order_release);
+    if (reviveTimerLedger_.original().has_value()) {
+        // 对切图前已不可解析的设置实例只在新世界就绪事件再尝试一次，禁止退化为 EngineTick 轮询。
+        reviveTimerLedger_.allow_restore_retry();
+        static_cast<void>(restore_revive_timer_overrides("新世界就绪"));
+    }
+    static_cast<void>(reviveTimerLedger_.begin_world(worldSession_.generation()));
+    reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
+                            std::memory_order_release);
     remotePalboxRuntime_.finish_world_transition();
     baseResourceBridge_.on_world_ready(worldSession_.generation());
     captureRuntime_.on_world_begin();
