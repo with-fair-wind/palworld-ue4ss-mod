@@ -13,13 +13,19 @@ namespace capture_override {
 
 /**
  * @brief GUI 提交、游戏线程消费的配置镜像。
- * @note 仅保存在进程内原子量中，不跨进程持久化。
+ * @note 仅保存在进程内原子量中，不跨进程持久化。两个开关语义正交：解锁改变
+ *       捕获资格，强制改变捕获概率，可各自独立启用。
  */
 struct CaptureOverrideConfig {
-    /** @brief 主开关：清除不可捕获/Boss 标志使捕获判定通过。 */
-    bool enabled{false};
-    /** @brief 子选项：额外强制接近 100% 捕获成功率与强制可捕获。 */
+    /** @brief 解锁开关：临时清除不可捕获/Boss/NPC 门控，使目标进入捕获判定。 */
+    bool unlockUncapturable{false};
+    /** @brief 强制开关：临时强制接近 100% 捕获成功率与强制可捕获。 */
     bool forceHundredPercent{false};
+
+    /** @retval true 任一开关启用，投球 Hook 应保持登记。 */
+    [[nodiscard]] constexpr auto any_active() const noexcept -> bool {
+        return unlockUncapturable || forceHundredPercent;
+    }
 };
 
 /** @brief 游戏线程发布、GUI 只读的运行阶段。 */
@@ -82,13 +88,13 @@ public:
 
     /** @retval true 当前应尝试登记全部 Hook。 */
     [[nodiscard]] auto should_register_hooks() const noexcept -> bool {
-        return worldAccessible_ && config_.enabled && phase_ == CaptureRuntimePhase::off;
+        return worldAccessible_ && config_.any_active() && phase_ == CaptureRuntimePhase::off;
     }
 
     /** @retval true 已登记 Hook 不再应保持。 */
     [[nodiscard]] auto should_remove_hooks() const noexcept -> bool {
         return phase_ == CaptureRuntimePhase::hooksRegistered &&
-               (!worldAccessible_ || !config_.enabled);
+               (!worldAccessible_ || !config_.any_active());
     }
 
     /** @return 当前配置。 */

@@ -77,13 +77,15 @@ pre 回调完整校验签名并临时覆盖捕获字段，post 回调恢复精�
 | `PalPlayerController:SetupInternalForSphere_ToServer` | `TargetCharacter`（末参） | 同上 |
 | `PalPlayerController:SetupInternalForSphere_ToALL` | `TargetCharacter`（末参） | 同上 |
 
-pre 回调临时写入、post 回调恢复的字段（主开关）：`StaticCharacterParameterComponent` 的 `IsUncapturable`、
-`IsBoss_Database`、`IsTowerBoss_Database`、`IsRaidBoss_Database`、`IsPredatorBoss_Database`、
-`IsRaidBoss_BP`（均 bool=false）与 `IsPal`（bool=true；对人类 NPC 是独立捕获门控，对真帕鲁为
-无变化空操作）；个体参数 `bIsUncapturable`（bool=false）。
-强制 100% 子选项额外写：`CaptureSuccessRate`（float=9999.0）、`SetSpawnedCharacterType(0)`、
-`bIsForceCapturable`（bool=true）。个体字段同时通过 `SetUncapturable(bool)` /
-`SetForceCapturable(bool)` 原生 setter 通知；形态类型通过 `SetSpawnedCharacterType(enum)` 写入。
+pre 回调临时写入、post 回调恢复的字段按开关分组（两开关相互独立，任一启用即登记 Hook）：
+
+- **解锁开关**：`StaticCharacterParameterComponent` 的 `IsUncapturable`、`IsBoss_Database`、
+  `IsTowerBoss_Database`、`IsRaidBoss_Database`、`IsPredatorBoss_Database`、`IsRaidBoss_BP`
+  （均 bool=false）与 `IsPal`（bool=true；对人类 NPC 是独立捕获门控，对真帕鲁为无变化空操作）；
+  个体参数 `bIsUncapturable`（bool=false，经 `SetUncapturable(bool)` 原生 setter 通知）。
+- **强制开关**：`CaptureSuccessRate`（float=9999.0）、`SetSpawnedCharacterType(0)`、
+  `bIsForceCapturable`（bool=true，经 `SetForceCapturable(bool)` 原生 setter 通知）。
+
 角色→组件路径：`CharacterParameterComponent` 字段 → `GetIndividualParameter()` UFunction。
 
 ---

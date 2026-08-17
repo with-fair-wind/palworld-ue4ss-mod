@@ -405,9 +405,9 @@ private:
     /** @brief 最近一次爪钩应用或恢复结果的面向用户文本。 */
     std::string grappleRuntimeStatus_;
 
-    /** @brief GUI 提交的主开关：解锁不可捕获帕鲁；EngineTick 消费。 */
-    std::atomic<bool> requestedCaptureEnabled_{false};
-    /** @brief GUI 提交的强制 100% 成功率子选项；EngineTick 消费。 */
+    /** @brief GUI 提交的解锁开关：解除不可捕获目标门控；EngineTick 消费。 */
+    std::atomic<bool> requestedCaptureUnlock_{false};
+    /** @brief GUI 提交的强制 100% 成功率开关；与解锁开关相互独立。 */
     std::atomic<bool> requestedCaptureForcePercent_{false};
     /** @brief 通知 EngineTick 消费最新捕获覆盖配置。 */
     std::atomic<bool> captureSettingDirty_{false};

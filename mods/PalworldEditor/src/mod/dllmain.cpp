@@ -307,7 +307,7 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
         }
     };
 
-    requestedCaptureEnabled_.store(false, std::memory_order_release);
+    requestedCaptureUnlock_.store(false, std::memory_order_release);
     requestedBaseSharingEnabled_.store(false, std::memory_order_release);
     requestedGrappleNoCooldown_.store(false, std::memory_order_release);
     requested_stack_unlimited_.store(false, std::memory_order_release);
@@ -360,7 +360,7 @@ auto PalworldEditorMod::process_runtime_services(const float deltaSeconds) -> vo
     }
     if (captureSettingDirty_.exchange(false)) {
         captureRuntime_.set_config(
-            {.enabled = requestedCaptureEnabled_.load(std::memory_order_acquire),
+            {.unlockUncapturable = requestedCaptureUnlock_.load(std::memory_order_acquire),
              .forceHundredPercent = requestedCaptureForcePercent_.load(std::memory_order_acquire)});
     }
     captureRuntime_.tick();
