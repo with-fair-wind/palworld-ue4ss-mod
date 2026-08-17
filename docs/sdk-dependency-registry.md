@@ -85,6 +85,7 @@ pre 回调临时写入、post 回调恢复的字段按开关分组（两开关�
   个体参数 `bIsUncapturable`（bool=false，经 `SetUncapturable(bool)` 原生 setter 通知）。
 - **强制开关**：`CaptureSuccessRate`（float=9999.0）、`SetSpawnedCharacterType(0)`、
   `bIsForceCapturable`（bool=true，经 `SetForceCapturable(bool)` 原生 setter 通知）。
+  仅强制模式会先读 `IsPal` 并跳过非帕鲁目标（资格门控属解锁职责，写概率字段无意义）。
 
 角色→组件路径：`CharacterParameterComponent` 字段 → `GetIndividualParameter()` UFunction。
 

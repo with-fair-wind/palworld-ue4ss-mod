@@ -375,6 +375,18 @@ enum class ApplyTransactionResult : std::uint8_t {
     if (staticComponentResult.status != CapturePreparationStatus::ready) {
         return {.status = staticComponentResult.status};
     }
+    // 仅强制模式跳过非帕鲁目标：IsPal 资格门控属于解锁职责，强制不改资格，
+    // 非帕鲁目标注定无法捕获；提前跳过可省去后续组件解析与 3 次瞬时写入。
+    if (!unlockUncapturable) {
+        auto* const isPalProperty = CastField<FBoolProperty>(
+            staticComponentResult.object->GetPropertyByNameInChain(STR("IsPal")));
+        if (isPalProperty == nullptr) {
+            return {.status = CapturePreparationStatus::incompatible};
+        }
+        if (!isPalProperty->GetPropertyValueInContainer(staticComponentResult.object)) {
+            return {.status = CapturePreparationStatus::unavailable};
+        }
+    }
     const auto parameterComponentResult = read_object_property(
         character, STR("CharacterParameterComponent"), kParameterComponentClassPath);
     if (parameterComponentResult.status != CapturePreparationStatus::ready) {

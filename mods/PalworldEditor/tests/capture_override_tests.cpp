@@ -59,7 +59,8 @@ void test_force_only_registers_hooks_without_unlock() {
     CHECK(state.should_register_hooks());
     state.hooks_registered();
 
-    // 解锁与强制相互独立：仅关闭解锁不应注销 Hook。
+    // 双开 → 只关解锁：强制仍启用，Hook 不应注销（防止条件退回耦合形态）。
+    state.set_config({.unlockUncapturable = true, .forceHundredPercent = true});
     state.set_config({.forceHundredPercent = true});
     CHECK(!state.should_remove_hooks());
 
