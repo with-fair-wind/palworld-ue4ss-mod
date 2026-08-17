@@ -361,8 +361,12 @@ enum class ApplyTransactionResult : std::uint8_t {
     return true;
 }
 
-[[nodiscard]] auto prepare_transaction(UObject* character, const bool forceHundredPercent)
-    -> TransactionPreparation {
+[[nodiscard]] auto prepare_transaction(UObject* character, const bool unlockUncapturable,
+                                       const bool forceHundredPercent) -> TransactionPreparation {
+    // 两开关皆关时 Hook 已被 reconcile 注销；此出口仅作防御性跳过。
+    if (!unlockUncapturable && !forceHundredPercent) {
+        return {.status = CapturePreparationStatus::unavailable};
+    }
     if (!pal_game::is_valid(character)) {
         return {.status = CapturePreparationStatus::unavailable};
     }
@@ -370,6 +374,18 @@ enum class ApplyTransactionResult : std::uint8_t {
         character, STR("StaticCharacterParameterComponent"), kStaticComponentClassPath);
     if (staticComponentResult.status != CapturePreparationStatus::ready) {
         return {.status = staticComponentResult.status};
+    }
+    // 仅强制模式跳过非帕鲁目标：IsPal 资格门控属于解锁职责，强制不改资格，
+    // 非帕鲁目标注定无法捕获；提前跳过可省去后续组件解析与 3 次瞬时写入。
+    if (!unlockUncapturable) {
+        auto* const isPalProperty = CastField<FBoolProperty>(
+            staticComponentResult.object->GetPropertyByNameInChain(STR("IsPal")));
+        if (isPalProperty == nullptr) {
+            return {.status = CapturePreparationStatus::incompatible};
+        }
+        if (!isPalProperty->GetPropertyValueInContainer(staticComponentResult.object)) {
+            return {.status = CapturePreparationStatus::unavailable};
+        }
     }
     const auto parameterComponentResult = read_object_property(
         character, STR("CharacterParameterComponent"), kParameterComponentClassPath);
@@ -386,40 +402,42 @@ enum class ApplyTransactionResult : std::uint8_t {
     auto* const individualParameter = individualParameterResult.object;
 
     CaptureTransaction transaction;
-    for (const auto* fieldName :
-         {STR("IsUncapturable"), STR("IsBoss_Database"), STR("IsTowerBoss_Database"),
-          STR("IsRaidBoss_Database"), STR("IsPredatorBoss_Database"), STR("IsRaidBoss_BP")}) {
-        if (!append_bool(transaction, make_bool_override(staticComponent, fieldName, false))) {
+    if (unlockUncapturable) {
+        for (const auto* fieldName :
+             {STR("IsUncapturable"), STR("IsBoss_Database"), STR("IsTowerBoss_Database"),
+              STR("IsRaidBoss_Database"), STR("IsPredatorBoss_Database"), STR("IsRaidBoss_BP")}) {
+            if (!append_bool(transaction, make_bool_override(staticComponent, fieldName, false))) {
+                return {.status = pal_game::is_valid(staticComponent)
+                                      ? CapturePreparationStatus::incompatible
+                                      : CapturePreparationStatus::unavailable};
+            }
+        }
+
+        // 人类 NPC（如商人）的 IsPal=false 是独立于不可捕获标志的捕获门控；对真帕鲁是无变化
+        // 的空操作，仅在投球调用窗口内临时翻转为 true 并在 post-hook 恢复。
+        const auto isPalOverride = make_bool_override(staticComponent, STR("IsPal"), true);
+        if (!isPalOverride.has_value()) {
             return {.status = pal_game::is_valid(staticComponent)
                                   ? CapturePreparationStatus::incompatible
                                   : CapturePreparationStatus::unavailable};
         }
-    }
+        transaction.nonPalTarget = !isPalOverride->original;
+        if (!append_bool(transaction, isPalOverride)) {
+            return {.status = CapturePreparationStatus::incompatible};
+        }
 
-    // 人类 NPC（如商人）的 IsPal=false 是独立于不可捕获标志的捕获门控；对真帕鲁是无变化的
-    // 空操作，仅在投球调用窗口内临时翻转为 true 并在 post-hook 恢复。
-    const auto isPalOverride = make_bool_override(staticComponent, STR("IsPal"), true);
-    if (!isPalOverride.has_value()) {
-        return {.status = pal_game::is_valid(staticComponent)
-                              ? CapturePreparationStatus::incompatible
-                              : CapturePreparationStatus::unavailable};
-    }
-    transaction.nonPalTarget = !isPalOverride->original;
-    if (!append_bool(transaction, isPalOverride)) {
-        return {.status = CapturePreparationStatus::incompatible};
-    }
-
-    auto uncapturable = make_bool_override(individualParameter, STR("bIsUncapturable"), false);
-    const auto uncapturableSetter =
-        find_bool_setter(individualParameter, STR("SetUncapturable"), STR("bInUncapturable"));
-    if (!uncapturable.has_value() || !uncapturableSetter.has_value()) {
-        return {.status = pal_game::is_valid(individualParameter)
-                              ? CapturePreparationStatus::incompatible
-                              : CapturePreparationStatus::unavailable};
-    }
-    uncapturable->setter = uncapturableSetter;
-    if (!append_bool(transaction, uncapturable)) {
-        return {.status = CapturePreparationStatus::incompatible};
+        auto uncapturable = make_bool_override(individualParameter, STR("bIsUncapturable"), false);
+        const auto uncapturableSetter =
+            find_bool_setter(individualParameter, STR("SetUncapturable"), STR("bInUncapturable"));
+        if (!uncapturable.has_value() || !uncapturableSetter.has_value()) {
+            return {.status = pal_game::is_valid(individualParameter)
+                                  ? CapturePreparationStatus::incompatible
+                                  : CapturePreparationStatus::unavailable};
+        }
+        uncapturable->setter = uncapturableSetter;
+        if (!append_bool(transaction, uncapturable)) {
+            return {.status = CapturePreparationStatus::incompatible};
+        }
     }
 
     if (!forceHundredPercent) {
@@ -691,8 +709,9 @@ auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
             if (target.status != CapturePreparationStatus::ready) {
                 return;
             }
-            auto preparation =
-                prepare_transaction(target.object, state_.config().forceHundredPercent);
+            const auto config = state_.config();
+            auto preparation = prepare_transaction(target.object, config.unlockUncapturable,
+                                                   config.forceHundredPercent);
             state_.observe_preparation_status(preparation.status);
             if (preparation.status != CapturePreparationStatus::ready) {
                 return;
