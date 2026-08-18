@@ -37,6 +37,14 @@ namespace {
 
 /** @brief 自定义标记 Map 最大索引的防御性上限（稀疏槽位不超过条目数的两倍）。 */
 inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCustomMarkers * 2)};
+/** @brief 超过此水平距离（cm）的目标按"远距两段式"处理：目标区块大概率未流送。 */
+inline constexpr double kDirectPlaceDistanceCm{10000.0};
+/** @brief 远距第一段：空投锚点在当前最佳 Z 线索之上的高度（cm）。 */
+inline constexpr double kSkyAnchorLiftCm{3000.0};
+/** @brief 第二段贴地等待时长：给区块流送留出时间。 */
+inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
+/** @brief 校正 Z 与第一段锚点的最小差值（cm）：小于该值视为已正确、免二次放置。 */
+inline constexpr double kRefinementMinDeltaCm{100.0};
 
 /** @brief 游戏是否处于前台（前台窗口属于本进程）。 */
 [[nodiscard]] auto foreground_is_game() -> bool {
@@ -318,6 +326,9 @@ auto WaypointTeleportRuntime::tick(const float deltaSeconds,
     const bool foreground = foreground_is_game();
     // 状态机每帧无条件推进，避免丢失松开的下降沿（同远程终端）。
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
+    if (session.can_access_unreal()) {
+        run_pending_refinement();  // 远距两段式的到期贴地（空计划为常量时间）。
+    }
     const bool triggered = guiRequest || edge;
     if (!triggered) {
         return;
@@ -338,6 +349,7 @@ auto WaypointTeleportRuntime::request_teleport() -> void {
 
 auto WaypointTeleportRuntime::begin_world_transition() -> void {
     trigger_.reset();
+    pendingRefinement_.active = false;
     domainDisabled_.store(false, std::memory_order_release);
     requestedTeleport_.store(false);
 }
@@ -439,11 +451,46 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::unavailable, "标记点无法探测地面（可能在水下/洞顶）",
                       true);
     }
+    // 离地间隙高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。
+    constexpr double kArrivalClearance = 150.0;  // cm
+    const double distanceCm = std::sqrt(candidates[*nearest].distanceSquared);
+    if (distanceCm > kDirectPlaceDistanceCm) {
+        // 远距两段式：目标区块大概率未流送（实测：远距首追踪命中未加载占位高度，
+        // 到达后第二次追踪才是真实地面）。第一段空投至当前最佳 Z 线索上方，玩家
+        // 临近驱动区块加载，到期后由 run_pending_refinement 贴地。
+        const double anchorZ = std::max(**groundZ, candidates[*nearest].z) + kSkyAnchorLiftCm;
+        FVector anchor{};
+        anchor.SetX(candidates[*nearest].x);
+        anchor.SetY(candidates[*nearest].y);
+        anchor.SetZ(anchorZ + kArrivalClearance + static_cast<double>(config.arrivalHeightOffset));
+        const auto anchorResult = call_set_actor_location(pawn, anchor);
+        if (!anchorResult.has_value()) {
+            set_disabled("K2_SetActorLocation 签名不兼容，已停用标记传送");
+            return WaypointTeleportResult::disabled;
+        }
+        if (!*anchorResult) {
+            return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）",
+                          true);
+        }
+        pendingRefinement_ = {.active = true,
+                              .x = candidates[*nearest].x,
+                              .y = candidates[*nearest].y,
+                              .anchorZ = anchorZ,
+                              .deadline = std::chrono::steady_clock::now() + kRefinementDelay};
+        {
+            const std::lock_guard lock(snapshotMutex_);
+            teleportCount_ += 1;
+        }
+        return finish(WaypointTeleportResult::teleported,
+                      "目标较远：已空投至上空，" +
+                          std::to_string(kRefinementDelay.count() / 1000.0).substr(0, 3) +
+                          " 秒后自动贴地…",
+                      false);
+    }
+
     FVector destination{};
     destination.SetX(candidates[*nearest].x);
     destination.SetY(candidates[*nearest].y);
-    // 离地间隙高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。
-    constexpr double kArrivalClearance = 150.0;  // cm
     destination.SetZ(**groundZ + kArrivalClearance +
                      static_cast<double>(config.arrivalHeightOffset));
     const auto teleportResult = call_set_actor_location(pawn, destination);
@@ -465,6 +512,41 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
                           std::sqrt(candidates[*nearest].distanceSquared) / 100.0)) +
                       " 米）",
                   false);
+}
+
+auto WaypointTeleportRuntime::run_pending_refinement() -> void {
+    if (!pendingRefinement_.active) {
+        return;
+    }
+    if (std::chrono::steady_clock::now() < pendingRefinement_.deadline) {
+        return;
+    }
+    pendingRefinement_.active = false;
+
+    // best-effort：任何一步失败都只放弃本次校正（玩家保持空投点下落状态，可滑翔）。
+    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
+    auto* const controller = pal_game::local_player_controller(worldContext);
+    auto* const pawn = controller == nullptr ? nullptr : pal_game::player_pawn(controller);
+    if (!pal_game::is_valid(pawn)) {
+        return;
+    }
+    const auto groundZ = trace_ground_z(worldContext, pendingRefinement_.x, pendingRefinement_.y,
+                                        pendingRefinement_.anchorZ);
+    if (!groundZ.has_value() || !groundZ->has_value()) {
+        note("贴地校正失败：无法探测地面", true);
+        return;
+    }
+    const double correctedZ = **groundZ + 150.0;
+    if (std::abs(correctedZ - pendingRefinement_.anchorZ) < kRefinementMinDeltaCm) {
+        return;  // 首次追踪已正确（或玩家已自行落地），无需二次放置。
+    }
+    FVector destination{};
+    destination.SetX(pendingRefinement_.x);
+    destination.SetY(pendingRefinement_.y);
+    destination.SetZ(correctedZ);
+    if (call_set_actor_location(pawn, destination).value_or(false)) {
+        note("已自动贴地", false);
+    }
 }
 
 auto WaypointTeleportRuntime::set_disabled(const std::string& message) -> void {

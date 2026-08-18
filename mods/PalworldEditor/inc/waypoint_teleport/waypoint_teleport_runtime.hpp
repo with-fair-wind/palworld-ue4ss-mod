@@ -8,6 +8,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -63,8 +64,20 @@ public:
     [[nodiscard]] auto snapshot() const -> WaypointTeleportSnapshot;
 
 private:
+    /** @brief 远距目标的第二段贴地计划（等待目标区块随玩家流送加载）。 */
+    struct PendingRefinement {
+        bool active{};
+        double x{};
+        double y{};
+        double anchorZ{};
+        std::chrono::steady_clock::time_point deadline{};
+    };
+
     /** @brief 在 tick 内执行一次完整触发管线并返回结果。 */
     auto execute_trigger(const WaypointTeleportConfig& config) -> WaypointTeleportResult;
+
+    /** @brief 到期执行远距目标的贴地校正（best-effort，失败仅取消计划）。 */
+    auto run_pending_refinement() -> void;
 
     auto set_disabled(const std::string& message) -> void;
 
@@ -73,6 +86,7 @@ private:
 
     WaypointTeleportConfig config_{kDefaultWaypointTeleportConfig};
     pal_game::HotkeyEdgeTrigger trigger_;
+    PendingRefinement pendingRefinement_;
     std::string iniPath_;
     std::atomic<bool> requestedTeleport_{false};
     /** @brief GUI 写入配置后置位；下一帧 tick 在游戏线程重置按键状态机。 */
