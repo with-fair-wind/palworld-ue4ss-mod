@@ -326,6 +326,48 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
     return resultProperty->GetPropertyValueInContainer(params.data());
 }
 
+/** @brief 从地图点击事件参数中探测自定义图钉图标对象（类名含 Map_IconCustom）。 */
+[[nodiscard]] auto custom_icon_from_params(UFunction* function, void* locals) -> UObject* {
+    if (function == nullptr || locals == nullptr) {
+        return nullptr;
+    }
+    for (auto* property :
+         TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
+        if (!property->HasAnyPropertyFlags(CPF_Parm) ||
+            property->HasAnyPropertyFlags(CPF_ReturnParm)) {
+            continue;
+        }
+        auto* const objectProperty = CastField<FObjectPropertyBase>(property);
+        if (objectProperty == nullptr) {
+            continue;
+        }
+        auto* const value = objectProperty->GetObjectPropertyValue(
+            objectProperty->ContainerPtrToValuePtr<void>(locals));
+        if (!pal_game::is_valid(value)) {
+            continue;
+        }
+        const auto className = text_encoding::to_utf8(value->GetClassPrivate()->GetName());
+        if (className.find("Map_IconCustom") != std::string::npos) {
+            return value;
+        }
+    }
+    return nullptr;
+}
+
+/** @brief 读取图钉图标的 LocationId（FGuid 的 4 个字）。 */
+[[nodiscard]] auto icon_marker_guid(UObject* icon) -> std::optional<std::array<std::uint32_t, 4>> {
+    auto* const property =
+        pal_game::is_valid(icon)
+            ? CastField<FStructProperty>(icon->GetPropertyByNameInChain(STR("LocationId")))
+            : nullptr;
+    if (property == nullptr || property->GetElementSize() != sizeof(std::uint32_t) * 4) {
+        return std::nullopt;
+    }
+    std::array<std::uint32_t, 4> guid{};
+    property->CopyCompleteValue(guid.data(), property->ContainerPtrToValuePtr<void>(icon));
+    return guid;
+}
+
 }  // namespace
 
 auto WaypointTeleportRuntime::load_config(const std::string_view iniPath) -> void {
@@ -382,6 +424,7 @@ auto WaypointTeleportRuntime::tick(const float deltaSeconds,
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
     if (session.can_access_unreal()) {
         run_pending_refinement();  // 远距两段式的到期贴地（空计划为常量时间）。
+        ensure_map_click_hook(config);
     }
     const bool triggered = guiRequest || edge;
     if (!triggered) {
@@ -404,13 +447,20 @@ auto WaypointTeleportRuntime::request_teleport() -> void {
 auto WaypointTeleportRuntime::begin_world_transition() -> void {
     trigger_.reset();
     pendingRefinement_.active = false;
+    mapClickRegistry_.unregister_all();
+    mapClickHookTried_ = false;
     domainDisabled_.store(false, std::memory_order_release);
     requestedTeleport_.store(false);
 }
 
 auto WaypointTeleportRuntime::finish_world_transition() -> void {}
 
-auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& config)
+auto WaypointTeleportRuntime::shutdown() -> void {
+    mapClickRegistry_.unregister_all();
+}
+
+auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig& config,
+                                                    UObject* manager, const MarkerCandidate& target)
     -> WaypointTeleportResult {
     const auto finish = [this](const WaypointTeleportResult result, const std::string& message,
                                const bool isFailure) -> WaypointTeleportResult {
@@ -426,9 +476,8 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     if (controller == nullptr) {
         return finish(WaypointTeleportResult::unavailable, "无法解析本地玩家", true);
     }
-    // 与参考实现同源：PlayerState 必须取控制器自身的（AController::PlayerState 属性）。
-    // FindFirstOf("PalPlayerState") 可能命中非本地实例（远端/模板），其传送组件的
-    // 内部归属为空，SyncTeleport 会在游戏内部走非法索引路径（实测崩溃形态 -1）。
+    // PlayerState 必须取控制器自身的（AController::PlayerState 属性）；FindFirstOf
+    // 可能命中非本地实例（远端/模板）。
     auto* const playerStateProperty =
         CastField<FObjectPropertyBase>(controller->GetPropertyByNameInChain(STR("PlayerState")));
     auto* const playerState =
@@ -459,44 +508,15 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::blocked, "战斗中已禁用", true);
     }
 
-    FVector playerLocation{};
-    if (!pal_game::read_actor_location(pal_game::player_pawn(controller), playerLocation)) {
-        return finish(WaypointTeleportResult::unavailable, "无法读取玩家位置", true);
-    }
-    auto* const manager = location_manager(worldContext);
-    if (manager == nullptr) {
-        return finish(WaypointTeleportResult::unavailable, "无法解析位置管理器", true);
-    }
-
-    std::vector<MarkerCandidate> candidates;
-    if (!read_marker_candidates(manager, candidates)) {
-        set_disabled("CustomMarkers 结构不兼容，已停用标记传送");
-        return WaypointTeleportResult::disabled;
-    }
-    if (candidates.empty()) {
-        return finish(WaypointTeleportResult::noMarker, "没有自定义地图标记", true);
-    }
-    for (auto& candidate : candidates) {
-        const auto dx = candidate.x - playerLocation.X();
-        const auto dy = candidate.y - playerLocation.Y();
-        candidate.distanceSquared = dx * dx + dy * dy;
-    }
-    const auto nearest = select_nearest_marker(candidates);
-    if (!nearest.has_value()) {
-        return finish(WaypointTeleportResult::noMarker, "没有自定义地图标记", true);
-    }
-
     // 传送原语：K2_SetActorLocation(bSweep=false) 精确放置于玩家 Pawn——无序列
-    // 状态机、无路径扫掠（前两版原语的崩溃/入地教训见函数头注释）。
+    // 状态机、无路径扫掠（前几版原语的崩溃/入地教训见函数头注释）。
     auto* const pawn = pal_game::player_pawn(controller);
     if (!pal_game::is_valid(pawn)) {
         return finish(WaypointTeleportResult::unavailable, "无法解析玩家 Pawn", true);
     }
-    // 地图标记 Z 不可靠（实测会落在地表下方传送入地）：先以标记 Z 为中心 ±1km
-    // 向下射线追踪取真实地面高度，偏移叠加在地面之上；追踪未命中或结构不兼容
-    // 时拒绝传送，绝不使用未经校正的标记 Z。
-    const auto groundZ = trace_ground_z(worldContext, candidates[*nearest].x,
-                                        candidates[*nearest].y, candidates[*nearest].z);
+    // 地图标记 Z 不可靠（实测会落在地表下方传送入地）：以标记 Z 为中心 ±1km 向下
+    // 射线追踪取真实地面；未命中或结构不兼容时拒绝传送。
+    const auto groundZ = trace_ground_z(worldContext, target.x, target.y, target.z);
     if (!groundZ.has_value()) {
         set_disabled("LineTraceSingle 签名不兼容，已停用标记传送");
         return WaypointTeleportResult::disabled;
@@ -507,16 +527,15 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     }
     // 离地间隙高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。
     constexpr double kArrivalClearance = 150.0;  // cm
-    const double distanceCm = std::sqrt(candidates[*nearest].distanceSquared);
+    const double distanceCm = std::sqrt(target.distanceSquared);
     if (distanceCm > kDirectPlaceDistanceCm) {
         // 远距两段式：目标区块大概率未流送（实测：远距首追踪命中未加载占位高度，
         // 到达后第二次追踪才是真实地面）。第一段直接落在最佳已知高度 + 离地间隙
-        // （常见情况即真实地面，零降落；估计偏差由下落起点重置兜底），玩家临近
-        // 驱动区块加载，到期后由 run_pending_refinement 静默校正。
-        const double anchorZ = std::max(**groundZ, candidates[*nearest].z);
+        // （常见情况即真实地面，零降落；估计偏差由下落起点重置兜底）。
+        const double anchorZ = std::max(**groundZ, target.z);
         FVector anchor{};
-        anchor.SetX(candidates[*nearest].x);
-        anchor.SetY(candidates[*nearest].y);
+        anchor.SetX(target.x);
+        anchor.SetY(target.y);
         anchor.SetZ(anchorZ + kArrivalClearance + static_cast<double>(config.arrivalHeightOffset));
         const auto anchorResult = call_set_actor_location(pawn, anchor);
         if (!anchorResult.has_value()) {
@@ -529,11 +548,11 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         }
         static_cast<void>(reset_fall_origin(pawn));
         if (config.deleteMarkerAfterTeleport) {
-            static_cast<void>(remove_custom_marker(manager, candidates[*nearest].guid));
+            static_cast<void>(remove_custom_marker(manager, target.guid));
         }
         pendingRefinement_ = {.active = true,
-                              .x = candidates[*nearest].x,
-                              .y = candidates[*nearest].y,
+                              .x = target.x,
+                              .y = target.y,
                               .anchorZ = anchorZ,
                               .deadline = std::chrono::steady_clock::now() + kRefinementDelay};
         {
@@ -548,8 +567,8 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     }
 
     FVector destination{};
-    destination.SetX(candidates[*nearest].x);
-    destination.SetY(candidates[*nearest].y);
+    destination.SetX(target.x);
+    destination.SetY(target.y);
     destination.SetZ(**groundZ + kArrivalClearance +
                      static_cast<double>(config.arrivalHeightOffset));
     const auto teleportResult = call_set_actor_location(pawn, destination);
@@ -561,22 +580,140 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）", true);
     }
     static_cast<void>(reset_fall_origin(pawn));
-    const bool markerRemoved = !config.deleteMarkerAfterTeleport ||
-                               remove_custom_marker(manager, candidates[*nearest].guid);
+    const bool markerRemoved =
+        !config.deleteMarkerAfterTeleport || remove_custom_marker(manager, target.guid);
 
     {
         const std::lock_guard lock(snapshotMutex_);
         teleportCount_ += 1;
     }
-    std::string message{"已传送到最近的地图标记（水平距离 "};
-    message +=
-        std::to_string(static_cast<int>(std::sqrt(candidates[*nearest].distanceSquared) / 100.0));
+    std::string message{"已传送（水平距离 "};
+    message += std::to_string(static_cast<int>(distanceCm / 100.0));
     message += " 米";
     if (config.deleteMarkerAfterTeleport) {
         message += markerRemoved ? "，标记已删除" : "，标记删除失败";
     }
     message += "）";
     return finish(WaypointTeleportResult::teleported, std::move(message), false);
+}
+
+auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& config)
+    -> WaypointTeleportResult {
+    if (domainDisabled_.load(std::memory_order_acquire)) {
+        note("结构故障已停用标记传送", true);
+        return WaypointTeleportResult::disabled;
+    }
+    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
+    auto* const controller = pal_game::local_player_controller(worldContext);
+    auto* const pawn = controller == nullptr ? nullptr : pal_game::player_pawn(controller);
+    FVector playerLocation{};
+    if (!pal_game::read_actor_location(pawn, playerLocation)) {
+        note("无法读取玩家位置", true);
+        return WaypointTeleportResult::unavailable;
+    }
+    auto* const manager = location_manager(worldContext);
+    if (manager == nullptr) {
+        note("无法解析位置管理器", true);
+        return WaypointTeleportResult::unavailable;
+    }
+
+    std::vector<MarkerCandidate> candidates;
+    if (!read_marker_candidates(manager, candidates)) {
+        set_disabled("CustomMarkers 结构不兼容，已停用标记传送");
+        return WaypointTeleportResult::disabled;
+    }
+    if (candidates.empty()) {
+        note("没有自定义地图标记", true);
+        return WaypointTeleportResult::noMarker;
+    }
+    for (auto& candidate : candidates) {
+        const auto dx = candidate.x - playerLocation.X();
+        const auto dy = candidate.y - playerLocation.Y();
+        candidate.distanceSquared = dx * dx + dy * dy;
+    }
+    const auto nearest = select_nearest_marker(candidates);
+    if (!nearest.has_value()) {
+        note("没有自定义地图标记", true);
+        return WaypointTeleportResult::noMarker;
+    }
+    return teleport_to_candidate(config, manager, candidates[*nearest]);
+}
+
+void WaypointTeleportRuntime::handle_map_click(
+    RC::Unreal::UnrealScriptFunctionCallableContext& context) {
+    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0) {
+        return;  // 未按 Shift：保持原版点击行为。
+    }
+    WaypointTeleportConfig config;
+    {
+        const std::lock_guard lock(snapshotMutex_);
+        config = config_;
+    }
+    if (!config.teleportFromMapClick || domainDisabled_.load(std::memory_order_acquire)) {
+        return;
+    }
+    auto* const icon = custom_icon_from_params(context.TheStack.Node(), context.TheStack.Locals());
+    const auto guid = icon == nullptr ? std::nullopt : icon_marker_guid(icon);
+    if (!guid.has_value()) {
+        return;  // 点击的不是自定义图钉（或无标记数据）：保持原版行为。
+    }
+
+    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
+    auto* const controller = pal_game::local_player_controller(worldContext);
+    FVector playerLocation{};
+    if (controller == nullptr ||
+        !pal_game::read_actor_location(pal_game::player_pawn(controller), playerLocation)) {
+        return;
+    }
+    auto* const manager = location_manager(worldContext);
+    if (manager == nullptr) {
+        return;
+    }
+    std::vector<MarkerCandidate> candidates;
+    if (!read_marker_candidates(manager, candidates)) {
+        set_disabled("CustomMarkers 结构不兼容，已停用标记传送");
+        return;
+    }
+    const auto matched = std::ranges::find_if(
+        candidates, [&](const MarkerCandidate& candidate) { return candidate.guid == *guid; });
+    if (matched == candidates.end()) {
+        return;
+    }
+    const auto dx = matched->x - playerLocation.X();
+    const auto dy = matched->y - playerLocation.Y();
+    matched->distanceSquared = dx * dx + dy * dy;
+    static_cast<void>(teleport_to_candidate(config, manager, *matched));
+}
+
+auto WaypointTeleportRuntime::ensure_map_click_hook(const WaypointTeleportConfig& config) -> void {
+    if (!config.teleportFromMapClick) {
+        if (!mapClickRegistry_.empty()) {
+            mapClickRegistry_.unregister_all();
+            mapClickHookTried_ = false;
+        }
+        return;
+    }
+    if (!mapClickRegistry_.empty()) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (mapClickHookTried_ && now < nextHookAttempt_) {
+        return;
+    }
+    mapClickHookTried_ = true;
+    nextHookAttempt_ = now + std::chrono::seconds{5};
+
+    auto* const function = UObjectGlobals::StaticFindObject<UFunction*>(
+        nullptr, nullptr,
+        STR("/Game/Pal/Blueprint/UI/UserInterface/Map/WBP_Map_Base.WBP_Map_Base_C:"
+            "On Icon Clicked"));
+    if (function == nullptr) {
+        return;  // 蓝图类尚未加载；稍后有界重试。
+    }
+    static_cast<void>(mapClickRegistry_.register_hook(
+        function,
+        [this](UnrealScriptFunctionCallableContext& context, void*) { handle_map_click(context); },
+        {}));
 }
 
 auto WaypointTeleportRuntime::run_pending_refinement() -> void {

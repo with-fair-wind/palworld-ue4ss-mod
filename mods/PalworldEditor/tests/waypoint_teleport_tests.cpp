@@ -58,6 +58,7 @@ void test_config_defaults_and_round_trip() {
     CHECK(parsed.disableInDungeon == config.disableInDungeon);
     CHECK(parsed.disableDuringCombat == config.disableDuringCombat);
     CHECK(parsed.deleteMarkerAfterTeleport == config.deleteMarkerAfterTeleport);
+    CHECK(parsed.teleportFromMapClick == config.teleportFromMapClick);
     CHECK(parsed.arrivalHeightOffset == config.arrivalHeightOffset);
 }
 

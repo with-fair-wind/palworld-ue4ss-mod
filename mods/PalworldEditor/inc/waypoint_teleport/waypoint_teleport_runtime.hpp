@@ -14,6 +14,7 @@
 #include <string>
 #include <string_view>
 
+#include <common/function_hook_registry.hpp>
 #include <common/hotkey_edge_trigger.hpp>
 #include <skills/world_session_state.hpp>
 #include <waypoint_teleport/waypoint_teleport_domain.hpp>
@@ -60,6 +61,9 @@ public:
     /** @brief LoadMap 完成后调用：无操作（无跨世界缓存）。 */
     auto finish_world_transition() -> void;
 
+    /** @brief 卸载前注销地图点击 Hook。 */
+    auto shutdown() -> void;
+
     /** @brief 读取供 GUI 显示的纯值快照（线程安全）。 */
     [[nodiscard]] auto snapshot() const -> WaypointTeleportSnapshot;
 
@@ -79,6 +83,16 @@ private:
     /** @brief 到期执行远距目标的贴地校正（best-effort，失败仅取消计划）。 */
     auto run_pending_refinement() -> void;
 
+    /** @brief 有界重试解析并注册地图点击蓝图事件；已注册或未启用为常量时间。 */
+    auto ensure_map_click_hook(const WaypointTeleportConfig& config) -> void;
+
+    /** @brief 地图点击回调：Shift+自定义图钉时走共用传送管线。 */
+    auto handle_map_click(RC::Unreal::UnrealScriptFunctionCallableContext& context) -> void;
+
+    /** @brief 门控 + 地面追踪 + 放置 + 删除的共用传送核心（F7 与地图点击共用）。 */
+    auto teleport_to_candidate(const WaypointTeleportConfig& config, RC::Unreal::UObject* manager,
+                               const MarkerCandidate& target) -> WaypointTeleportResult;
+
     auto set_disabled(const std::string& message) -> void;
 
     /** @brief 记录界面最近消息；isFailure 为真时累计失败计数。 */
@@ -87,6 +101,9 @@ private:
     WaypointTeleportConfig config_{kDefaultWaypointTeleportConfig};
     pal_game::HotkeyEdgeTrigger trigger_;
     PendingRefinement pendingRefinement_;
+    pal_game::FunctionHookRegistry mapClickRegistry_{STR("WaypointMapClick")};
+    std::chrono::steady_clock::time_point nextHookAttempt_{};
+    bool mapClickHookTried_{};
     std::string iniPath_;
     std::atomic<bool> requestedTeleport_{false};
     /** @brief GUI 写入配置后置位；下一帧 tick 在游戏线程重置按键状态机。 */

@@ -142,6 +142,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `GetLocationManager` | `UPalUtility` | 标记传送：位置管理器 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `SetNoFallDamageHeightLastJumpedLocation` | `UPalIndividualCharacterParameter` | 标记传送：每次放置后重置坠落伤害下落起点（游戏原生机制，`LastJumpedLocation` 与落点差值结算） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `LineTraceSingle` | `UKismetSystemLibrary` | 标记传送：地面高度追踪（通道 0，±1km 窗口，读 OutHit.ImpactPoint.Z；PalSquadAllOut 同款） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
+| `WBP_Map_Base_C:On Icon Clicked`（蓝图事件，含空格） | 地图 UI | 地图点击传送：pre-hook 探测参数中的自定义图钉图标（类名含 Map_IconCustom）→ 图标 LocationId 反查标记 → 共用传送管线；5 秒有界重试解析 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `RemoveLocalCustomMarker` | `UPalLocationManager` | 标记传送：传送后按配置删除所用标记（FGuid 入参；参考实现默认行为，解决到达标记霸占"最近"选择） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `K2_SetActorLocation` | `AActor`（玩家 Pawn） | 标记传送：无扫掠精确放置（bSweep=false, bTeleport=true）。`SyncTeleport`（有状态序列，EngineTick 前置相位下内部 -1 崩溃）与 `K2_TeleportTo`（路径扫掠，直线穿山时在阻挡点停下导致入地）均已弃用 | 同上 |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
