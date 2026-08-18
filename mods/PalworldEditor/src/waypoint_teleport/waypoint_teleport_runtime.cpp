@@ -223,6 +223,52 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
 }
 
 /**
+ * @brief 调用 AActor::K2_TeleportTo(FVector, FRotator) -> bool。
+ * @details 走 ACharacter::TeleportTo 的角色感知路径，会通知移动组件并重置累计
+ *          下落高度（SetActorLocation 不会，导致两段式的空投被计为整段坠落伤害）。
+ *          仅适用于近距垂直跳：远距时其路径扫掠会在第一个阻挡点停下（入地）。
+ */
+[[nodiscard]] auto call_k2_teleport(UObject* pawn, const FVector& destination)
+    -> std::optional<bool> {
+    auto* const function =
+        pal_game::is_valid(pawn) ? pawn->GetFunctionByNameInChain(STR("K2_TeleportTo")) : nullptr;
+    auto* const locationProperty =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("DestLocation"), FNAME_Find)));
+    auto* const rotationProperty =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("DestRotation"), FNAME_Find)));
+    auto* const resultProperty =
+        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
+    if (!pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(locationProperty) ||
+        !pal_game::is_input_parameter(rotationProperty) ||
+        !pal_game::is_return_parameter(resultProperty) ||
+        locationProperty->GetElementSize() != sizeof(FVector)) {
+        return std::nullopt;
+    }
+
+    pal_game::FunctionParams params{function};
+    locationProperty->CopyCompleteValue(
+        locationProperty->ContainerPtrToValuePtr<void>(params.data()), &destination);
+    // 零朝向 FRotator 按引擎宽度写入：UE5 为 3×double（0x18），UE4 为 3×float（0x0C）。
+    auto* const rotationSlot = rotationProperty->ContainerPtrToValuePtr<void>(params.data());
+    if (rotationProperty->GetElementSize() == sizeof(double) * 3) {
+        const double zero[]{0.0, 0.0, 0.0};
+        std::memcpy(rotationSlot, zero, sizeof(zero));
+    } else if (rotationProperty->GetElementSize() == sizeof(float) * 3) {
+        const float zero[]{0.0F, 0.0F, 0.0F};
+        std::memcpy(rotationSlot, zero, sizeof(zero));
+    } else {
+        return std::nullopt;
+    }
+    pawn->ProcessEvent(function, params.data());
+    return resultProperty->GetPropertyValueInContainer(params.data());
+}
+
+/**
  * @brief 调用 AActor::K2_SetActorLocation(FVector, bool, FHitResult&, bool) -> bool。
  * @details bSweep=false 的无扫掠精确放置（PalSquadAllOut 用同族函数移动帕鲁）。
  *          此前两版原语的教训：SyncTeleport 为有状态序列入口（EngineTick 前置相位
@@ -544,7 +590,10 @@ auto WaypointTeleportRuntime::run_pending_refinement() -> void {
     destination.SetX(pendingRefinement_.x);
     destination.SetY(pendingRefinement_.y);
     destination.SetZ(correctedZ);
-    if (call_set_actor_location(pawn, destination).value_or(false)) {
+    // 优先角色感知的 K2_TeleportTo（近距垂直跳，重置累计下落高度避免坠落伤害）；
+    // 被引擎拒绝时回退到无扫掠 SetActorLocation（不重置下落，但保证贴地）。
+    if (call_k2_teleport(pawn, destination).value_or(false) ||
+        call_set_actor_location(pawn, destination).value_or(false)) {
         note("已自动贴地", false);
     }
 }
