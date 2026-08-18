@@ -205,9 +205,12 @@ inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCust
     if (!resultProperty->GetPropertyValueInContainer(params.data())) {
         return std::optional<double>{};  // 未命中：空 optional 内层
     }
+    // ImpactPoint 是 FHitResult 内部字段：容器必须是 OutHit 在参数缓冲中的实例，
+    // 而不是参数缓冲本身（否则读到 Start/End 区域的错位数据）。
+    void* const hitInstance = outHitProperty->ContainerPtrToValuePtr<void>(params.data());
     FVector impact{};
     impactProperty->CopyCompleteValue(&impact,
-                                      impactProperty->ContainerPtrToValuePtr<void>(params.data()));
+                                      impactProperty->ContainerPtrToValuePtr<void>(hitInstance));
     return std::optional<double>{impact.Z()};
 }
 
