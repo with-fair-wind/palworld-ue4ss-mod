@@ -39,8 +39,6 @@ namespace {
 inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCustomMarkers * 2)};
 /** @brief 超过此水平距离（cm）的目标按"远距两段式"处理：目标区块大概率未流送。 */
 inline constexpr double kDirectPlaceDistanceCm{10000.0};
-/** @brief 远距第一段：空投锚点在当前最佳 Z 线索之上的高度（cm）。 */
-inline constexpr double kSkyAnchorLiftCm{3000.0};
 /** @brief 第二段贴地等待时长：给区块流送留出时间。 */
 inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
 /** @brief 校正 Z 与第一段锚点的最小差值（cm）：小于该值视为已正确、免二次放置。 */
@@ -487,9 +485,10 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     const double distanceCm = std::sqrt(candidates[*nearest].distanceSquared);
     if (distanceCm > kDirectPlaceDistanceCm) {
         // 远距两段式：目标区块大概率未流送（实测：远距首追踪命中未加载占位高度，
-        // 到达后第二次追踪才是真实地面）。第一段空投至当前最佳 Z 线索上方，玩家
-        // 临近驱动区块加载，到期后由 run_pending_refinement 贴地。
-        const double anchorZ = std::max(**groundZ, candidates[*nearest].z) + kSkyAnchorLiftCm;
+        // 到达后第二次追踪才是真实地面）。第一段直接落在最佳已知高度 + 离地间隙
+        // （常见情况即真实地面，零降落；估计偏差由下落起点重置兜底），玩家临近
+        // 驱动区块加载，到期后由 run_pending_refinement 静默校正。
+        const double anchorZ = std::max(**groundZ, candidates[*nearest].z);
         FVector anchor{};
         anchor.SetX(candidates[*nearest].x);
         anchor.SetY(candidates[*nearest].y);
@@ -514,7 +513,7 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
             teleportCount_ += 1;
         }
         return finish(WaypointTeleportResult::teleported,
-                      "目标较远：已空投至上空，" +
+                      "目标较远：已到达，正在校正地面，" +
                           std::to_string(kRefinementDelay.count() / 1000.0).substr(0, 3) +
                           " 秒后自动贴地…",
                       false);

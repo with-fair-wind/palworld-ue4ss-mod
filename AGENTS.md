@@ -121,7 +121,7 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
 过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；
-地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"空投上空 + 1.2s 后自动贴地"两段式（近距直接落地），验证远/近两种距离各一次；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截；无标记、世界未同步时给出对应提示；
+地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截；无标记、世界未同步时给出对应提示；
 LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原语为 `AActor:K2_SetActorLocation`（bSweep=false 无扫掠精确放置，落点由地面追踪+离地间隙保证）；`K2_TeleportTo` 带路径扫掠，玩家到目标直线穿山时会在阻挡点停下放入地形（实测首次入地、二次正常），不得回退；
 `PalSyncTeleportComponent:SyncTeleport` 为有状态序列原语，从 EngineTick 前置
 相位调用即使参数/归属/守卫全对齐参考实现仍三次实测内部 -1 崩溃，本 mod 不得回退使用。
