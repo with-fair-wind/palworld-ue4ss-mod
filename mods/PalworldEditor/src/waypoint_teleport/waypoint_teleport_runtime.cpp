@@ -215,29 +215,41 @@ inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCust
 }
 
 /**
- * @brief 调用 AActor::K2_TeleportTo(FVector, FRotator) -> bool；结构不兼容返回空。
- * @details 无状态引擎标准传送原语（PalSquadAllOut 参考实现亦使用）。此前使用的
- *          PalSyncTeleportComponent:SyncTeleport 是有状态序列原语——参数、归属与
- *          前置守卫均对齐参考实现后仍在其内部以 -1 索引崩溃（EngineTick 前置相位
- *          下游戏内部缓存未初始化），无法静态排除，故整体弃用该路径。
+ * @brief 调用 AActor::K2_SetActorLocation(FVector, bool, FHitResult&, bool) -> bool。
+ * @details bSweep=false 的无扫掠精确放置（PalSquadAllOut 用同族函数移动帕鲁）。
+ *          此前两版原语的教训：SyncTeleport 为有状态序列入口（EngineTick 前置相位
+ *          下三次实测内部 -1 崩溃）；K2_TeleportTo 带路径扫掠——玩家到目标的直线
+ *          穿过山体时在阻挡点停下，把玩家放进地形内（实测"首次入地、二次正常"）。
+ *          无扫掠放置与路径无关，落点由本 mod 的地面追踪 + 离地间隙保证安全。
  */
-[[nodiscard]] auto call_k2_teleport(UObject* pawn, const FVector& destination)
+[[nodiscard]] auto call_set_actor_location(UObject* pawn, const FVector& destination)
     -> std::optional<bool> {
-    auto* const function =
-        pal_game::is_valid(pawn) ? pawn->GetFunctionByNameInChain(STR("K2_TeleportTo")) : nullptr;
+    auto* const function = pal_game::is_valid(pawn)
+                               ? pawn->GetFunctionByNameInChain(STR("K2_SetActorLocation"))
+                               : nullptr;
     auto* const locationProperty =
         function == nullptr ? nullptr
                             : CastField<FStructProperty>(
-                                  function->FindProperty(FName(STR("DestLocation"), FNAME_Find)));
-    auto* const rotationProperty =
+                                  function->FindProperty(FName(STR("NewLocation"), FNAME_Find)));
+    auto* const sweepProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FBoolProperty>(function->FindProperty(FName(STR("bSweep"), FNAME_Find)));
+    auto* const hitProperty =
         function == nullptr ? nullptr
                             : CastField<FStructProperty>(
-                                  function->FindProperty(FName(STR("DestRotation"), FNAME_Find)));
+                                  function->FindProperty(FName(STR("SweepHitResult"), FNAME_Find)));
+    auto* const teleportProperty =
+        function == nullptr
+            ? nullptr
+            : CastField<FBoolProperty>(function->FindProperty(FName(STR("bTeleport"), FNAME_Find)));
     auto* const resultProperty =
         function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 3) ||
+    if (!pal_game::has_exact_parameter_count(function, 5) ||
         !pal_game::is_input_parameter(locationProperty) ||
-        !pal_game::is_input_parameter(rotationProperty) ||
+        !pal_game::is_input_parameter(sweepProperty) ||
+        !pal_game::is_output_parameter(hitProperty) ||
+        !pal_game::is_input_parameter(teleportProperty) ||
         !pal_game::is_return_parameter(resultProperty) ||
         locationProperty->GetElementSize() != sizeof(FVector)) {
         return std::nullopt;
@@ -246,17 +258,8 @@ inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCust
     pal_game::FunctionParams params{function};
     locationProperty->CopyCompleteValue(
         locationProperty->ContainerPtrToValuePtr<void>(params.data()), &destination);
-    // 零朝向 FRotator 按引擎宽度写入：UE5 为 3×double（0x18），UE4 为 3×float（0x0C）。
-    auto* const rotationSlot = rotationProperty->ContainerPtrToValuePtr<void>(params.data());
-    if (rotationProperty->GetElementSize() == sizeof(double) * 3) {
-        const double zero[]{0.0, 0.0, 0.0};
-        std::memcpy(rotationSlot, zero, sizeof(zero));
-    } else if (rotationProperty->GetElementSize() == sizeof(float) * 3) {
-        const float zero[]{0.0F, 0.0F, 0.0F};
-        std::memcpy(rotationSlot, zero, sizeof(zero));
-    } else {
-        return std::nullopt;
-    }
+    sweepProperty->SetPropertyValueInContainer(params.data(), false);
+    teleportProperty->SetPropertyValueInContainer(params.data(), true);
     pawn->ProcessEvent(function, params.data());
     return resultProperty->GetPropertyValueInContainer(params.data());
 }
@@ -417,8 +420,8 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::noMarker, "没有自定义地图标记", true);
     }
 
-    // 传送原语：K2_TeleportTo 直接作用于玩家 Pawn——无序列状态机、无淡入流程，
-    // 从 EngineTick 前置相位调用安全（SyncTeleport 在该相位下三次实测崩溃）。
+    // 传送原语：K2_SetActorLocation(bSweep=false) 精确放置于玩家 Pawn——无序列
+    // 状态机、无路径扫掠（前两版原语的崩溃/入地教训见函数头注释）。
     auto* const pawn = pal_game::player_pawn(controller);
     if (!pal_game::is_valid(pawn)) {
         return finish(WaypointTeleportResult::unavailable, "无法解析玩家 Pawn", true);
@@ -439,14 +442,13 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     FVector destination{};
     destination.SetX(candidates[*nearest].x);
     destination.SetY(candidates[*nearest].y);
-    // K2_TeleportTo 内部带碰撞测试（bTestCollision）：落点正好等于地面撞击点时
-    // 胶囊体与地表相交会被直接拒绝（返回 false）。留出胶囊体半高以上的离地间隙。
-    constexpr double kArrivalClearance = 150.0;  // cm，高于玩家胶囊半高（~90cm）
+    // 离地间隙高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。
+    constexpr double kArrivalClearance = 150.0;  // cm
     destination.SetZ(**groundZ + kArrivalClearance +
                      static_cast<double>(config.arrivalHeightOffset));
-    const auto teleportResult = call_k2_teleport(pawn, destination);
+    const auto teleportResult = call_set_actor_location(pawn, destination);
     if (!teleportResult.has_value()) {
-        set_disabled("K2_TeleportTo 签名不兼容，已停用标记传送");
+        set_disabled("K2_SetActorLocation 签名不兼容，已停用标记传送");
         return WaypointTeleportResult::disabled;
     }
     if (!*teleportResult) {

@@ -122,8 +122,8 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
 过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；
 地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截；无标记、世界未同步时给出对应提示；
-LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原语为 `AActor:K2_TeleportTo`（无状态，
-返回 bool 即结果）；`PalSyncTeleportComponent:SyncTeleport` 为有状态序列原语，从 EngineTick 前置
+LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原语为 `AActor:K2_SetActorLocation`（bSweep=false 无扫掠精确放置，落点由地面追踪+离地间隙保证）；`K2_TeleportTo` 带路径扫掠，玩家到目标直线穿山时会在阻挡点停下放入地形（实测首次入地、二次正常），不得回退；
+`PalSyncTeleportComponent:SyncTeleport` 为有状态序列原语，从 EngineTick 前置
 相位调用即使参数/归属/守卫全对齐参考实现仍三次实测内部 -1 崩溃，本 mod 不得回退使用。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common

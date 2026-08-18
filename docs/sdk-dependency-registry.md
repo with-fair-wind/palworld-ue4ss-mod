@@ -141,7 +141,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `GetMaxOtomoNum` | Holder | 队伍上限 | `src/pal_revive/pal_revive.cpp:193` |
 | `GetLocationManager` | `UPalUtility` | 标记传送：位置管理器 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `LineTraceSingle` | `UKismetSystemLibrary` | 标记传送：地面高度追踪（通道 0，±1km 窗口，读 OutHit.ImpactPoint.Z；PalSquadAllOut 同款） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
-| `K2_TeleportTo` | `AActor`（玩家 Pawn） | 标记传送：无状态引擎传送原语（FVector+FRotator 入参、bool 返回）。弃用的 `SyncTeleport` 为有状态序列原语，EngineTick 前置相位下三次实测内部 -1 崩溃 | 同上 |
+| `K2_SetActorLocation` | `AActor`（玩家 Pawn） | 标记传送：无扫掠精确放置（bSweep=false, bTeleport=true）。`SyncTeleport`（有状态序列，EngineTick 前置相位下内部 -1 崩溃）与 `K2_TeleportTo`（路径扫掠，直线穿山时在阻挡点停下导致入地）均已弃用 | 同上 |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
 
 ### 玩家 / 控制器 / HUD
