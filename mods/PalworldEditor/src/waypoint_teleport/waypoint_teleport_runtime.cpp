@@ -223,49 +223,34 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
 }
 
 /**
- * @brief 调用 AActor::K2_TeleportTo(FVector, FRotator) -> bool。
- * @details 走 ACharacter::TeleportTo 的角色感知路径，会通知移动组件并重置累计
- *          下落高度（SetActorLocation 不会，导致两段式的空投被计为整段坠落伤害）。
- *          仅适用于近距垂直跳：远距时其路径扫掠会在第一个阻挡点停下（入地）。
+ * @brief 把坠落伤害的"下落起点"重置到当前位置（游戏原生机制）。
+ * @details Palworld 按 LastJumpedLocation 与落点的高度差结算坠落伤害；传送不会
+ *          更新该起点，导致空投整段被计为坠落。SetNoFallDamageHeightLastJumpedLocation
+ *          是游戏跳跃/滑翔使用的原生入口。best-effort：失败仅保持现状。
  */
-[[nodiscard]] auto call_k2_teleport(UObject* pawn, const FVector& destination)
-    -> std::optional<bool> {
+[[nodiscard]] auto reset_fall_origin(UObject* pawn) -> bool {
+    auto* const componentProperty =
+        pal_game::is_valid(pawn) ? CastField<FObjectPropertyBase>(pawn->GetPropertyByNameInChain(
+                                       STR("CharacterParameterComponent")))
+                                 : nullptr;
+    auto* const component = componentProperty == nullptr
+                                ? nullptr
+                                : componentProperty->GetObjectPropertyValue(
+                                      componentProperty->ContainerPtrToValuePtr<void>(pawn));
+    auto* const parameter =
+        pal_game::invoke<UObject*>(component, STR("GetIndividualParameter")).value_or(nullptr);
+    if (!pal_game::is_valid(parameter)) {
+        return false;
+    }
     auto* const function =
-        pal_game::is_valid(pawn) ? pawn->GetFunctionByNameInChain(STR("K2_TeleportTo")) : nullptr;
-    auto* const locationProperty =
-        function == nullptr ? nullptr
-                            : CastField<FStructProperty>(
-                                  function->FindProperty(FName(STR("DestLocation"), FNAME_Find)));
-    auto* const rotationProperty =
-        function == nullptr ? nullptr
-                            : CastField<FStructProperty>(
-                                  function->FindProperty(FName(STR("DestRotation"), FNAME_Find)));
-    auto* const resultProperty =
-        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 3) ||
-        !pal_game::is_input_parameter(locationProperty) ||
-        !pal_game::is_input_parameter(rotationProperty) ||
-        !pal_game::is_return_parameter(resultProperty) ||
-        locationProperty->GetElementSize() != sizeof(FVector)) {
-        return std::nullopt;
+        parameter->GetFunctionByNameInChain(STR("SetNoFallDamageHeightLastJumpedLocation"));
+    if (!pal_game::has_exact_parameter_count(function, 0) ||
+        function->GetReturnProperty() != nullptr) {
+        return false;
     }
-
     pal_game::FunctionParams params{function};
-    locationProperty->CopyCompleteValue(
-        locationProperty->ContainerPtrToValuePtr<void>(params.data()), &destination);
-    // 零朝向 FRotator 按引擎宽度写入：UE5 为 3×double（0x18），UE4 为 3×float（0x0C）。
-    auto* const rotationSlot = rotationProperty->ContainerPtrToValuePtr<void>(params.data());
-    if (rotationProperty->GetElementSize() == sizeof(double) * 3) {
-        const double zero[]{0.0, 0.0, 0.0};
-        std::memcpy(rotationSlot, zero, sizeof(zero));
-    } else if (rotationProperty->GetElementSize() == sizeof(float) * 3) {
-        const float zero[]{0.0F, 0.0F, 0.0F};
-        std::memcpy(rotationSlot, zero, sizeof(zero));
-    } else {
-        return std::nullopt;
-    }
-    pawn->ProcessEvent(function, params.data());
-    return resultProperty->GetPropertyValueInContainer(params.data());
+    parameter->ProcessEvent(function, params.data());
+    return true;
 }
 
 /**
@@ -518,6 +503,7 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
             return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）",
                           true);
         }
+        static_cast<void>(reset_fall_origin(pawn));
         pendingRefinement_ = {.active = true,
                               .x = candidates[*nearest].x,
                               .y = candidates[*nearest].y,
@@ -547,6 +533,7 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     if (!*teleportResult) {
         return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）", true);
     }
+    static_cast<void>(reset_fall_origin(pawn));
 
     {
         const std::lock_guard lock(snapshotMutex_);
@@ -590,10 +577,8 @@ auto WaypointTeleportRuntime::run_pending_refinement() -> void {
     destination.SetX(pendingRefinement_.x);
     destination.SetY(pendingRefinement_.y);
     destination.SetZ(correctedZ);
-    // 优先角色感知的 K2_TeleportTo（近距垂直跳，重置累计下落高度避免坠落伤害）；
-    // 被引擎拒绝时回退到无扫掠 SetActorLocation（不重置下落，但保证贴地）。
-    if (call_k2_teleport(pawn, destination).value_or(false) ||
-        call_set_actor_location(pawn, destination).value_or(false)) {
+    if (call_set_actor_location(pawn, destination).value_or(false)) {
+        static_cast<void>(reset_fall_origin(pawn));
         note("已自动贴地", false);
     }
 }

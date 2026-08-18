@@ -140,6 +140,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `SetSpawnedCharacterType` | StaticCharacterParameterComponent | 强制模式临时切换 Common 类型 | `src/capture_override/capture_override_runtime.cpp` |
 | `GetMaxOtomoNum` | Holder | 队伍上限 | `src/pal_revive/pal_revive.cpp:193` |
 | `GetLocationManager` | `UPalUtility` | 标记传送：位置管理器 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
+| `SetNoFallDamageHeightLastJumpedLocation` | `UPalIndividualCharacterParameter` | 标记传送：每次放置后重置坠落伤害下落起点（游戏原生机制，`LastJumpedLocation` 与落点差值结算） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `LineTraceSingle` | `UKismetSystemLibrary` | 标记传送：地面高度追踪（通道 0，±1km 窗口，读 OutHit.ImpactPoint.Z；PalSquadAllOut 同款） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `K2_SetActorLocation` | `AActor`（玩家 Pawn） | 标记传送：无扫掠精确放置（bSweep=false, bTeleport=true）。`SyncTeleport`（有状态序列，EngineTick 前置相位下内部 -1 崩溃）与 `K2_TeleportTo`（路径扫掠，直线穿山时在阻挡点停下导致入地）均已弃用 | 同上 |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
