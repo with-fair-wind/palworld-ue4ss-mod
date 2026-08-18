@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -29,6 +30,9 @@ struct WaypointTeleportConfig {
     bool disableWhileMounted{true}; /**< 骑乘时禁用。 */
     bool disableInDungeon{true};    /**< 地牢内禁用。 */
     bool disableDuringCombat{true}; /**< 战斗中禁用。 */
+    /**< 传送后自动删除所用标记（参考实现默认行为）：到达后脚下的标记距离恒为 0，
+     *    会一直霸占"最近"选择，不删除则无法连续传送到下一个标记。 */
+    bool deleteMarkerAfterTeleport{true};
     /**< 到达高度偏移（厘米）。默认 0 = 使用标记原始 Z，与参考 mod 的已验证行为一致；
      *    高空偏移未经游戏内验证（游戏内部落地解析可能失败导致崩溃）。 */
     float arrivalHeightOffset{0.0F};
@@ -47,10 +51,11 @@ enum class WaypointTeleportResult : std::uint8_t {
 
 /** @brief 标记候选：运行时读取后交给纯值选择器。 */
 struct MarkerCandidate {
-    double x{};               /**< 标记世界坐标 X。 */
-    double y{};               /**< 标记世界坐标 Y。 */
-    double z{};               /**< 标记世界坐标 Z（到达点锚定高度）。 */
-    double distanceSquared{}; /**< 玩家到标记的水平距离平方。 */
+    std::array<std::uint32_t, 4> guid{}; /**< 标记键（FGuid 的 4 个字，用于删除）。 */
+    double x{};                          /**< 标记世界坐标 X。 */
+    double y{};                          /**< 标记世界坐标 Y。 */
+    double z{};                          /**< 标记世界坐标 Z（到达点锚定高度）。 */
+    double distanceSquared{};            /**< 玩家到标记的水平距离平方。 */
 };
 
 /**

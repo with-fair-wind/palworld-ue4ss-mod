@@ -32,6 +32,9 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
     if (ImGui::Checkbox("战斗中禁用", &config.disableDuringCombat)) {
         self->waypointTeleportRuntime_.set_config(config);
     }
+    if (ImGui::Checkbox("传送后删除该标记", &config.deleteMarkerAfterTeleport)) {
+        self->waypointTeleportRuntime_.set_config(config);
+    }
     float arrivalOffset = config.arrivalHeightOffset;
     if (ImGui::InputFloat("到达高度偏移(cm)", &arrivalOffset)) {
         config.arrivalHeightOffset = waypoint_teleport::valid_arrival_offset(arrivalOffset)
@@ -55,7 +58,8 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
     }
     ImGui::TextDisabled(
         "默认 F7；点击上方按钮后按下新键即可改键；设置保存在 waypoint_teleport.ini。");
-    ImGui::TextDisabled("传送到距离最近的自定义地图标记；到达点为标记位置加高度偏移。");
+    ImGui::TextDisabled(
+        "传送到距离最近的自定义地图标记；默认传送后删除该标记，可连续放置-传送无需手动清理。");
     ImGui::TextDisabled("成功 %llu 次；失败/拦截 %llu 次。",
                         static_cast<unsigned long long>(snapshot.teleportCount),
                         static_cast<unsigned long long>(snapshot.failCount));

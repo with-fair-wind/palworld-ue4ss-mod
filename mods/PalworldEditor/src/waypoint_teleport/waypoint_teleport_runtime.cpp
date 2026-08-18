@@ -133,10 +133,35 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
         }
         auto* const entry = map->GetData(index, layout);
         auto* const value = static_cast<void*>(static_cast<std::byte*>(entry) + layout.ValueOffset);
+        std::array<std::uint32_t, 4> guid{};
+        keyProperty->CopyCompleteValue(guid.data(), entry);  // 键始终位于条目起始偏移
         FVector location{};
         locationProperty->CopyCompleteValue(&location, value);
-        output.push_back(MarkerCandidate{.x = location.X(), .y = location.Y(), .z = location.Z()});
+        output.push_back(
+            MarkerCandidate{.guid = guid, .x = location.X(), .y = location.Y(), .z = location.Z()});
     }
+    return true;
+}
+
+/** @brief 删除一个自定义地图标记（数据层 RemoveLocalCustomMarker）；best-effort。 */
+[[nodiscard]] auto remove_custom_marker(UObject* manager, const std::array<std::uint32_t, 4>& guid)
+    -> bool {
+    auto* const function = pal_game::is_valid(manager)
+                               ? manager->GetFunctionByNameInChain(STR("RemoveLocalCustomMarker"))
+                               : nullptr;
+    auto* const parameter = function == nullptr ? nullptr
+                                                : CastField<FStructProperty>(function->FindProperty(
+                                                      FName(STR("MarkerID"), FNAME_Find)));
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(parameter) ||
+        parameter->GetElementSize() != sizeof(std::uint32_t) * 4 ||
+        function->GetReturnProperty() != nullptr) {
+        return false;
+    }
+    pal_game::FunctionParams params{function};
+    parameter->CopyCompleteValue(parameter->ContainerPtrToValuePtr<void>(params.data()),
+                                 guid.data());
+    manager->ProcessEvent(function, params.data());
     return true;
 }
 
@@ -503,6 +528,9 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
                           true);
         }
         static_cast<void>(reset_fall_origin(pawn));
+        if (config.deleteMarkerAfterTeleport) {
+            static_cast<void>(remove_custom_marker(manager, candidates[*nearest].guid));
+        }
         pendingRefinement_ = {.active = true,
                               .x = candidates[*nearest].x,
                               .y = candidates[*nearest].y,
@@ -533,17 +561,22 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）", true);
     }
     static_cast<void>(reset_fall_origin(pawn));
+    const bool markerRemoved = !config.deleteMarkerAfterTeleport ||
+                               remove_custom_marker(manager, candidates[*nearest].guid);
 
     {
         const std::lock_guard lock(snapshotMutex_);
         teleportCount_ += 1;
     }
-    return finish(WaypointTeleportResult::teleported,
-                  "已传送到最近的地图标记（水平距离 " +
-                      std::to_string(static_cast<int>(
-                          std::sqrt(candidates[*nearest].distanceSquared) / 100.0)) +
-                      " 米）",
-                  false);
+    std::string message{"已传送到最近的地图标记（水平距离 "};
+    message +=
+        std::to_string(static_cast<int>(std::sqrt(candidates[*nearest].distanceSquared) / 100.0));
+    message += " 米";
+    if (config.deleteMarkerAfterTeleport) {
+        message += markerRemoved ? "，标记已删除" : "，标记删除失败";
+    }
+    message += "）";
+    return finish(WaypointTeleportResult::teleported, std::move(message), false);
 }
 
 auto WaypointTeleportRuntime::run_pending_refinement() -> void {
