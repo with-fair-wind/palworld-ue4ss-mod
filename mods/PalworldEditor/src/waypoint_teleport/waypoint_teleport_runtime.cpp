@@ -439,7 +439,11 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     FVector destination{};
     destination.SetX(candidates[*nearest].x);
     destination.SetY(candidates[*nearest].y);
-    destination.SetZ(**groundZ + static_cast<double>(config.arrivalHeightOffset));
+    // K2_TeleportTo 内部带碰撞测试（bTestCollision）：落点正好等于地面撞击点时
+    // 胶囊体与地表相交会被直接拒绝（返回 false）。留出胶囊体半高以上的离地间隙。
+    constexpr double kArrivalClearance = 150.0;  // cm，高于玩家胶囊半高（~90cm）
+    destination.SetZ(**groundZ + kArrivalClearance +
+                     static_cast<double>(config.arrivalHeightOffset));
     const auto teleportResult = call_k2_teleport(pawn, destination);
     if (!teleportResult.has_value()) {
         set_disabled("K2_TeleportTo 签名不兼容，已停用标记传送");
