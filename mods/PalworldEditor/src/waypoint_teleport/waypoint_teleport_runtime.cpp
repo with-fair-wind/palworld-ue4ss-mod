@@ -135,6 +135,83 @@ inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCust
 }
 
 /**
+ * @brief 对标记水平位置做垂直射线追踪，取真实地面高度。
+ * @details 地图标记的 Z 不可靠（可能落在地表下方导致传送入地）；KismetSystemLibrary:
+ *          LineTraceSingle（PalSquadAllOut 参考实现同款，通道 0）以标记 Z 为中心
+ *          ±1km 窗口向下追踪，命中返回 ImpactPoint.Z。返回三态：有值=地面 Z、
+ *          false=未命中、nullopt=结构不兼容。
+ */
+[[nodiscard]] auto trace_ground_z(UObject* worldContext, const double x, const double y,
+                                  const double markerZ) -> std::optional<std::optional<double>> {
+    constexpr double kTraceWindow = 100000.0;  // ±1km 覆盖任意标记 Z 误差
+    auto* const library = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
+    auto* const function =
+        library == nullptr ? nullptr : library->GetFunctionByNameInChain(STR("LineTraceSingle"));
+    if (!pal_game::is_valid(library) || !pal_game::has_exact_parameter_count(function, 13)) {
+        return std::nullopt;
+    }
+    auto* const contextProperty = CastField<FObjectPropertyBase>(
+        function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const startProperty =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("Start"), FNAME_Find)));
+    auto* const endProperty =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("End"), FNAME_Find)));
+    auto* const channelProperty =
+        CastField<FByteProperty>(function->FindProperty(FName(STR("TraceChannel"), FNAME_Find)));
+    auto* const ignoreSelfProperty =
+        CastField<FBoolProperty>(function->FindProperty(FName(STR("bIgnoreSelf"), FNAME_Find)));
+    auto* const outHitProperty =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("OutHit"), FNAME_Find)));
+    auto* const resultProperty = CastField<FBoolProperty>(function->GetReturnProperty());
+    if (!pal_game::is_input_parameter(contextProperty) ||
+        !pal_game::is_input_parameter(startProperty) ||
+        !pal_game::is_input_parameter(endProperty) || channelProperty == nullptr ||
+        !pal_game::is_input_parameter(ignoreSelfProperty) ||
+        !pal_game::is_output_parameter(outHitProperty) ||
+        !pal_game::is_return_parameter(resultProperty) ||
+        startProperty->GetElementSize() != sizeof(FVector) ||
+        endProperty->GetElementSize() != sizeof(FVector)) {
+        return std::nullopt;
+    }
+    auto* const hitStruct = outHitProperty->GetStruct().Get();
+    auto* const impactProperty =
+        hitStruct == nullptr ? nullptr
+                             : CastField<FStructProperty>(
+                                   hitStruct->FindProperty(FName(STR("ImpactPoint"), FNAME_Find)));
+    if (impactProperty == nullptr || impactProperty->GetElementSize() != sizeof(FVector)) {
+        return std::nullopt;
+    }
+
+    FVector start{};
+    start.SetX(x);
+    start.SetY(y);
+    start.SetZ(markerZ + kTraceWindow);
+    FVector end{};
+    end.SetX(x);
+    end.SetY(y);
+    end.SetZ(markerZ - kTraceWindow);
+
+    pal_game::FunctionParams params{function};
+    contextProperty->SetObjectPropertyValue(
+        contextProperty->ContainerPtrToValuePtr<void>(params.data()), worldContext);
+    startProperty->CopyCompleteValue(startProperty->ContainerPtrToValuePtr<void>(params.data()),
+                                     &start);
+    endProperty->CopyCompleteValue(endProperty->ContainerPtrToValuePtr<void>(params.data()), &end);
+    channelProperty->SetPropertyValueInContainer(
+        params.data(), static_cast<std::uint8_t>(0));  // 通道 0（PalSquad 实证）
+    ignoreSelfProperty->SetPropertyValueInContainer(params.data(), true);
+    library->ProcessEvent(function, params.data());
+    if (!resultProperty->GetPropertyValueInContainer(params.data())) {
+        return std::optional<double>{};  // 未命中：空 optional 内层
+    }
+    FVector impact{};
+    impactProperty->CopyCompleteValue(&impact,
+                                      impactProperty->ContainerPtrToValuePtr<void>(params.data()));
+    return std::optional<double>{impact.Z()};
+}
+
+/**
  * @brief 调用 AActor::K2_TeleportTo(FVector, FRotator) -> bool；结构不兼容返回空。
  * @details 无状态引擎标准传送原语（PalSquadAllOut 参考实现亦使用）。此前使用的
  *          PalSyncTeleportComponent:SyncTeleport 是有状态序列原语——参数、归属与
@@ -339,15 +416,27 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
 
     // 传送原语：K2_TeleportTo 直接作用于玩家 Pawn——无序列状态机、无淡入流程，
     // 从 EngineTick 前置相位调用安全（SyncTeleport 在该相位下三次实测崩溃）。
-    // 到达点 = 标记原始坐标 + 配置偏移（默认 0 = 标记地面高度）。
     auto* const pawn = pal_game::player_pawn(controller);
     if (!pal_game::is_valid(pawn)) {
         return finish(WaypointTeleportResult::unavailable, "无法解析玩家 Pawn", true);
     }
+    // 地图标记 Z 不可靠（实测会落在地表下方传送入地）：先以标记 Z 为中心 ±1km
+    // 向下射线追踪取真实地面高度，偏移叠加在地面之上；追踪未命中或结构不兼容
+    // 时拒绝传送，绝不使用未经校正的标记 Z。
+    const auto groundZ = trace_ground_z(worldContext, candidates[*nearest].x,
+                                        candidates[*nearest].y, candidates[*nearest].z);
+    if (!groundZ.has_value()) {
+        set_disabled("LineTraceSingle 签名不兼容，已停用标记传送");
+        return WaypointTeleportResult::disabled;
+    }
+    if (!groundZ->has_value()) {
+        return finish(WaypointTeleportResult::unavailable, "标记点无法探测地面（可能在水下/洞顶）",
+                      true);
+    }
     FVector destination{};
     destination.SetX(candidates[*nearest].x);
     destination.SetY(candidates[*nearest].y);
-    destination.SetZ(candidates[*nearest].z + static_cast<double>(config.arrivalHeightOffset));
+    destination.SetZ(**groundZ + static_cast<double>(config.arrivalHeightOffset));
     const auto teleportResult = call_k2_teleport(pawn, destination);
     if (!teleportResult.has_value()) {
         set_disabled("K2_TeleportTo 签名不兼容，已停用标记传送");
