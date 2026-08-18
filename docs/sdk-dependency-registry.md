@@ -140,8 +140,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `SetSpawnedCharacterType` | StaticCharacterParameterComponent | 强制模式临时切换 Common 类型 | `src/capture_override/capture_override_runtime.cpp` |
 | `GetMaxOtomoNum` | Holder | 队伍上限 | `src/pal_revive/pal_revive.cpp:193` |
 | `GetLocationManager` | `UPalUtility` | 标记传送：位置管理器 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
-| `GetSyncTeleportComp` | `APalPlayerState` | 标记传送：传送组件 | 同上 |
-| `SyncTeleport` | `UPalSyncTeleportComponent` | 标记传送：原生传送（结构体参数） | 同上 |
+| `K2_TeleportTo` | `AActor`（玩家 Pawn） | 标记传送：无状态引擎传送原语（FVector+FRotator 入参、bool 返回）。弃用的 `SyncTeleport` 为有状态序列原语，EngineTick 前置相位下三次实测内部 -1 崩溃 | 同上 |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
 
 ### 玩家 / 控制器 / HUD
@@ -245,7 +244,6 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `CharacterMaxRank`/`WorkSuitabilityMaxRank` | `PalGameSetting` | int | `src/pal_stats/pal_stats.cpp:134, 136` |
 | `PalBoxReviveTime` | `PalGameSetting` | float（可逆清零，恢复账本） | `src/revive_timer/revive_timer_gateway.cpp` |
 | `CustomMarkers` | `UPalLocationManager` | `TMap<FGuid, FPalCustomMarkerSaveData>`（值含 `IconLocation` FVector、`IconType` int32） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
-| `Parameter`（`FPalSyncTeleportRequestParameter`） | `SyncTeleport` 入参 | struct：`Location` FVector、`Rotation` FQuat、3 个跳过 bool（按属性名写入，FQuat 按引擎宽度写单位四元数） | 同上 |
 
 ---
 

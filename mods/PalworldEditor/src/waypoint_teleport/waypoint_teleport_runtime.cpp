@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstddef>
 #include <fstream>
+#include <optional>
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
@@ -133,49 +134,51 @@ inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCust
     return true;
 }
 
-/** @brief 调用 UPalSyncTeleportComponent:SyncTeleport；结构不兼容返回 false。 */
-[[nodiscard]] auto call_sync_teleport(UObject* component, const FVector& destination) -> bool {
-    auto* const function = pal_game::is_valid(component)
-                               ? component->GetFunctionByNameInChain(STR("SyncTeleport"))
-                               : nullptr;
-    auto* const parameter = function == nullptr ? nullptr
-                                                : CastField<FStructProperty>(function->FindProperty(
-                                                      FName(STR("Parameter"), FNAME_Find)));
-    if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_input_parameter(parameter) || function->GetReturnProperty() != nullptr) {
-        return false;
-    }
-    auto* const parameterStruct = parameter->GetStruct().Get();
-    auto* const locationProperty = parameterStruct == nullptr
-                                       ? nullptr
-                                       : CastField<FStructProperty>(parameterStruct->FindProperty(
-                                             FName(STR("Location"), FNAME_Find)));
-    auto* const rotationProperty = parameterStruct == nullptr
-                                       ? nullptr
-                                       : CastField<FStructProperty>(parameterStruct->FindProperty(
-                                             FName(STR("Rotation"), FNAME_Find)));
-    if (locationProperty == nullptr || rotationProperty == nullptr ||
+/**
+ * @brief 调用 AActor::K2_TeleportTo(FVector, FRotator) -> bool；结构不兼容返回空。
+ * @details 无状态引擎标准传送原语（PalSquadAllOut 参考实现亦使用）。此前使用的
+ *          PalSyncTeleportComponent:SyncTeleport 是有状态序列原语——参数、归属与
+ *          前置守卫均对齐参考实现后仍在其内部以 -1 索引崩溃（EngineTick 前置相位
+ *          下游戏内部缓存未初始化），无法静态排除，故整体弃用该路径。
+ */
+[[nodiscard]] auto call_k2_teleport(UObject* pawn, const FVector& destination)
+    -> std::optional<bool> {
+    auto* const function =
+        pal_game::is_valid(pawn) ? pawn->GetFunctionByNameInChain(STR("K2_TeleportTo")) : nullptr;
+    auto* const locationProperty =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("DestLocation"), FNAME_Find)));
+    auto* const rotationProperty =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("DestRotation"), FNAME_Find)));
+    auto* const resultProperty =
+        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
+    if (!pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(locationProperty) ||
+        !pal_game::is_input_parameter(rotationProperty) ||
+        !pal_game::is_return_parameter(resultProperty) ||
         locationProperty->GetElementSize() != sizeof(FVector)) {
-        return false;
+        return std::nullopt;
     }
-    // 三项跳过标志（音效/淡入淡出）与音效对象保持 InitializeStruct 的零值。
 
     pal_game::FunctionParams params{function};
-    locationProperty->CopyCompleteValue(parameter->ContainerPtrToValuePtr<void>(params.data()),
-                                        &destination);
-    // 单位四元数按引擎宽度写入：UE5 为 4×double（0x20），UE4 为 4×float（0x10）。
+    locationProperty->CopyCompleteValue(
+        locationProperty->ContainerPtrToValuePtr<void>(params.data()), &destination);
+    // 零朝向 FRotator 按引擎宽度写入：UE5 为 3×double（0x18），UE4 为 3×float（0x0C）。
     auto* const rotationSlot = rotationProperty->ContainerPtrToValuePtr<void>(params.data());
-    if (rotationProperty->GetElementSize() == sizeof(double) * 4) {
-        const double identity[]{0.0, 0.0, 0.0, 1.0};
-        std::memcpy(rotationSlot, identity, sizeof(identity));
-    } else if (rotationProperty->GetElementSize() == sizeof(float) * 4) {
-        const float identity[]{0.0F, 0.0F, 0.0F, 1.0F};
-        std::memcpy(rotationSlot, identity, sizeof(identity));
+    if (rotationProperty->GetElementSize() == sizeof(double) * 3) {
+        const double zero[]{0.0, 0.0, 0.0};
+        std::memcpy(rotationSlot, zero, sizeof(zero));
+    } else if (rotationProperty->GetElementSize() == sizeof(float) * 3) {
+        const float zero[]{0.0F, 0.0F, 0.0F};
+        std::memcpy(rotationSlot, zero, sizeof(zero));
     } else {
-        return false;
+        return std::nullopt;
     }
-    component->ProcessEvent(function, params.data());
-    return true;
+    pawn->ProcessEvent(function, params.data());
+    return resultProperty->GetPropertyValueInContainer(params.data());
 }
 
 }  // namespace
@@ -334,25 +337,24 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::noMarker, "没有自定义地图标记", true);
     }
 
-    auto* const component =
-        pal_game::invoke<UObject*>(playerState, STR("GetSyncTeleportComp")).value_or(nullptr);
-    if (!pal_game::is_valid(component)) {
-        return finish(WaypointTeleportResult::unavailable, "无法解析传送组件", true);
+    // 传送原语：K2_TeleportTo 直接作用于玩家 Pawn——无序列状态机、无淡入流程，
+    // 从 EngineTick 前置相位调用安全（SyncTeleport 在该相位下三次实测崩溃）。
+    // 到达点 = 标记原始坐标 + 配置偏移（默认 0 = 标记地面高度）。
+    auto* const pawn = pal_game::player_pawn(controller);
+    if (!pal_game::is_valid(pawn)) {
+        return finish(WaypointTeleportResult::unavailable, "无法解析玩家 Pawn", true);
     }
-    // 参考实现的强制前置：传送序列进行中再次 SyncTeleport 会使游戏内部状态
-    // 进入非法路径（实测崩溃形态为内部索引 -1），必须先查询并拦截。
-    if (pal_game::invoke<bool>(component, STR("IsTeleporting")).value_or(false)) {
-        return finish(WaypointTeleportResult::blocked, "已有传送进行中，请稍候", true);
-    }
-    // 到达点 = 标记原始坐标 + 配置偏移；默认偏移 0 与参考实现一致（其 Z 已为
-    // 地面高度）。高空偏移未经游戏内验证，游戏内部落地解析可能失败。
     FVector destination{};
     destination.SetX(candidates[*nearest].x);
     destination.SetY(candidates[*nearest].y);
     destination.SetZ(candidates[*nearest].z + static_cast<double>(config.arrivalHeightOffset));
-    if (!call_sync_teleport(component, destination)) {
-        set_disabled("SyncTeleport 签名不兼容，已停用标记传送");
+    const auto teleportResult = call_k2_teleport(pawn, destination);
+    if (!teleportResult.has_value()) {
+        set_disabled("K2_TeleportTo 签名不兼容，已停用标记传送");
         return WaypointTeleportResult::disabled;
+    }
+    if (!*teleportResult) {
+        return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）", true);
     }
 
     {
