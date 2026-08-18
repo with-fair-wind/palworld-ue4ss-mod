@@ -271,9 +271,21 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     }
     auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
     auto* const controller = pal_game::local_player_controller(worldContext);
-    auto* const playerState = UObjectGlobals::FindFirstOf(STR("PalPlayerState"));
-    if (controller == nullptr || playerState == nullptr) {
+    if (controller == nullptr) {
         return finish(WaypointTeleportResult::unavailable, "无法解析本地玩家", true);
+    }
+    // 与参考实现同源：PlayerState 必须取控制器自身的（AController::PlayerState 属性）。
+    // FindFirstOf("PalPlayerState") 可能命中非本地实例（远端/模板），其传送组件的
+    // 内部归属为空，SyncTeleport 会在游戏内部走非法索引路径（实测崩溃形态 -1）。
+    auto* const playerStateProperty =
+        CastField<FObjectPropertyBase>(controller->GetPropertyByNameInChain(STR("PlayerState")));
+    auto* const playerState =
+        playerStateProperty == nullptr
+            ? nullptr
+            : playerStateProperty->GetObjectPropertyValue(
+                  playerStateProperty->ContainerPtrToValuePtr<void>(controller));
+    if (!pal_game::is_valid(playerState)) {
+        return finish(WaypointTeleportResult::unavailable, "无法解析本地玩家状态", true);
     }
 
     // 镜像远程终端的服务器同步门：标志存在且为 false 时拦截；缺失视为就绪。
