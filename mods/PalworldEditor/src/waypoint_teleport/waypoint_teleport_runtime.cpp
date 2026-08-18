@@ -447,8 +447,9 @@ auto WaypointTeleportRuntime::request_teleport() -> void {
 auto WaypointTeleportRuntime::begin_world_transition() -> void {
     trigger_.reset();
     pendingRefinement_.active = false;
-    mapClickRegistry_.unregister_all();
-    mapClickHookTried_ = false;
+    // 地图点击 Hook 进程常驻、不随世界注销：标题期注册后于首次 LoadMap 前置
+    // 注销 script 分发器会在 UE4SS 全局回调结构内崩溃（实测启动即崩）；处理器
+    // 自带配置/域停用/Shift/图钉类型四重门控，跨世界保持注册是安全的。
     domainDisabled_.store(false, std::memory_order_release);
     requestedTeleport_.store(false);
 }
@@ -686,14 +687,9 @@ void WaypointTeleportRuntime::handle_map_click(
 }
 
 auto WaypointTeleportRuntime::ensure_map_click_hook(const WaypointTeleportConfig& config) -> void {
-    if (!config.teleportFromMapClick) {
-        if (!mapClickRegistry_.empty()) {
-            mapClickRegistry_.unregister_all();
-            mapClickHookTried_ = false;
-        }
-        return;
-    }
-    if (!mapClickRegistry_.empty()) {
+    // 一旦注册即进程常驻：配置关闭由 handle_map_click 内部检查实现（不注销），
+    // 与参考实现"注册后不注销"的已验证模式一致。
+    if (!config.teleportFromMapClick || !mapClickRegistry_.empty()) {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
