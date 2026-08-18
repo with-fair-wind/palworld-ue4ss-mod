@@ -327,8 +327,13 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     if (!pal_game::is_valid(component)) {
         return finish(WaypointTeleportResult::unavailable, "无法解析传送组件", true);
     }
-    // 到达点 = 标记水平位置 + 标记 Z + 配置偏移：以标记点地形高度为锚，默认 +100m
-    // 便于滑翔落地；偏移可在 ini 调整（0 = 直接落在标记点）。
+    // 参考实现的强制前置：传送序列进行中再次 SyncTeleport 会使游戏内部状态
+    // 进入非法路径（实测崩溃形态为内部索引 -1），必须先查询并拦截。
+    if (pal_game::invoke<bool>(component, STR("IsTeleporting")).value_or(false)) {
+        return finish(WaypointTeleportResult::blocked, "已有传送进行中，请稍候", true);
+    }
+    // 到达点 = 标记原始坐标 + 配置偏移；默认偏移 0 与参考实现一致（其 Z 已为
+    // 地面高度）。高空偏移未经游戏内验证，游戏内部落地解析可能失败。
     FVector destination{};
     destination.SetX(candidates[*nearest].x);
     destination.SetY(candidates[*nearest].y);

@@ -49,7 +49,7 @@ void test_nearest_marker_single() {
 void test_config_defaults_and_round_trip() {
     const auto config = waypoint_teleport::kDefaultWaypointTeleportConfig;
     CHECK(config.hotkeyVk == 118);
-    CHECK(config.arrivalHeightOffset == 10000.0F);
+    CHECK(config.arrivalHeightOffset == 0.0F);
 
     const auto parsed = waypoint_teleport::parse_waypoint_teleport_config(
         waypoint_teleport::serialize_waypoint_teleport_config(config));

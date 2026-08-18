@@ -25,11 +25,13 @@ inline constexpr std::size_t kMaximumCustomMarkers{1024};
  * @note 快捷键默认 F7（0x76=118），避开 UE4SS GUI 的 F10。
  */
 struct WaypointTeleportConfig {
-    int hotkeyVk{118};                   /**< 触发快捷键 VK 码。 */
-    bool disableWhileMounted{true};      /**< 骑乘时禁用。 */
-    bool disableInDungeon{true};         /**< 地牢内禁用。 */
-    bool disableDuringCombat{true};      /**< 战斗中禁用。 */
-    float arrivalHeightOffset{10000.0F}; /**< 到达高度偏移（厘米）；0 = 使用标记原始 Z。 */
+    int hotkeyVk{118};              /**< 触发快捷键 VK 码。 */
+    bool disableWhileMounted{true}; /**< 骑乘时禁用。 */
+    bool disableInDungeon{true};    /**< 地牢内禁用。 */
+    bool disableDuringCombat{true}; /**< 战斗中禁用。 */
+    /**< 到达高度偏移（厘米）。默认 0 = 使用标记原始 Z，与参考 mod 的已验证行为一致；
+     *    高空偏移未经游戏内验证（游戏内部落地解析可能失败导致崩溃）。 */
+    float arrivalHeightOffset{0.0F};
 };
 
 inline constexpr WaypointTeleportConfig kDefaultWaypointTeleportConfig{};
