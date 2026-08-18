@@ -11,7 +11,7 @@
 #include <vector>
 
 #include <DynamicOutput/DynamicOutput.hpp>
-#include <Unreal/Core/Containers/ScriptMap.hpp>
+#include <Unreal/Core/Containers/Map.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
@@ -128,7 +128,7 @@ inline constexpr int32 kMaximumCustomMarkerIndex{static_cast<int32>(kMaximumCust
         auto* const value = static_cast<void*>(static_cast<std::byte*>(entry) + layout.ValueOffset);
         FVector location{};
         locationProperty->CopyCompleteValue(&location, value);
-        output.push_back(MarkerCandidate{.x = location.X, .y = location.Y, .z = location.Z});
+        output.push_back(MarkerCandidate{.x = location.X(), .y = location.Y(), .z = location.Z()});
     }
     return true;
 }
@@ -313,8 +313,8 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return finish(WaypointTeleportResult::noMarker, "没有自定义地图标记", true);
     }
     for (auto& candidate : candidates) {
-        const auto dx = candidate.x - static_cast<double>(playerLocation.X);
-        const auto dy = candidate.y - static_cast<double>(playerLocation.Y);
+        const auto dx = candidate.x - playerLocation.X();
+        const auto dy = candidate.y - playerLocation.Y();
         candidate.distanceSquared = dx * dx + dy * dy;
     }
     const auto nearest = select_nearest_marker(candidates);
@@ -330,9 +330,9 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
     // 到达点 = 标记水平位置 + 标记 Z + 配置偏移：以标记点地形高度为锚，默认 +100m
     // 便于滑翔落地；偏移可在 ini 调整（0 = 直接落在标记点）。
     FVector destination{};
-    destination.X = static_cast<double>(candidates[*nearest].x);
-    destination.Y = static_cast<double>(candidates[*nearest].y);
-    destination.Z = candidates[*nearest].z + static_cast<double>(config.arrivalHeightOffset);
+    destination.SetX(candidates[*nearest].x);
+    destination.SetY(candidates[*nearest].y);
+    destination.SetZ(candidates[*nearest].z + static_cast<double>(config.arrivalHeightOffset));
     if (!call_sync_teleport(component, destination)) {
         set_disabled("SyncTeleport 签名不兼容，已停用标记传送");
         return WaypointTeleportResult::disabled;
