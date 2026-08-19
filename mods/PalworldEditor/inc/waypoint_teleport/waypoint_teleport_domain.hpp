@@ -42,7 +42,7 @@ inline constexpr WaypointTeleportConfig kDefaultWaypointTeleportConfig{};
 
 /** @brief 一次触发的结果分类，供 UI 与日志使用。 */
 enum class WaypointTeleportResult : std::uint8_t {
-    teleported,  /**< 已调用原生 SyncTeleport。 */
+    teleported,  /**< 已完成放置（K2_SetActorLocation 无扫掠）。 */
     blocked,     /**< 被门控拦截（地牢/骑乘/战斗/世界未同步）。 */
     noMarker,    /**< 当前没有自定义地图标记。 */
     unavailable, /**< 反射链路不可用（控制器/管理器/组件/函数）。 */
@@ -114,6 +114,9 @@ struct MarkerCandidate {
         } else if (key == "DisableDuringCombat") {
             config.disableDuringCombat =
                 pal_game::parse_ini_bool(value, config.disableDuringCombat);
+        } else if (key == "DeleteMarkerAfterTeleport") {
+            config.deleteMarkerAfterTeleport =
+                pal_game::parse_ini_bool(value, config.deleteMarkerAfterTeleport);
         } else if (key == "ArrivalHeightOffset") {
             const auto parsed = pal_game::parse_ini_float(value);
             if (parsed.has_value() && valid_arrival_offset(*parsed)) {
@@ -138,6 +141,9 @@ struct MarkerCandidate {
            "\n"
            "DisableDuringCombat=" +
            (config.disableDuringCombat ? "true" : "false") +
+           "\n"
+           "DeleteMarkerAfterTeleport=" +
+           (config.deleteMarkerAfterTeleport ? "true" : "false") +
            "\n"
            "ArrivalHeightOffset=" +
            std::to_string(config.arrivalHeightOffset) + "\n";

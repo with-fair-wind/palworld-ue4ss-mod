@@ -50,15 +50,25 @@ void test_config_defaults_and_round_trip() {
     const auto config = waypoint_teleport::kDefaultWaypointTeleportConfig;
     CHECK(config.hotkeyVk == 118);
     CHECK(config.arrivalHeightOffset == 0.0F);
+    CHECK(config.deleteMarkerAfterTeleport);
+
+    // 全字段翻转后往返：任一键不参与 serialize/parse 都会在此暴露。
+    auto flipped = config;
+    flipped.hotkeyVk = 74;
+    flipped.disableWhileMounted = !flipped.disableWhileMounted;
+    flipped.disableInDungeon = !flipped.disableInDungeon;
+    flipped.disableDuringCombat = !flipped.disableDuringCombat;
+    flipped.deleteMarkerAfterTeleport = !flipped.deleteMarkerAfterTeleport;
+    flipped.arrivalHeightOffset = 250.5F;
 
     const auto parsed = waypoint_teleport::parse_waypoint_teleport_config(
-        waypoint_teleport::serialize_waypoint_teleport_config(config));
-    CHECK(parsed.hotkeyVk == config.hotkeyVk);
-    CHECK(parsed.disableWhileMounted == config.disableWhileMounted);
-    CHECK(parsed.disableInDungeon == config.disableInDungeon);
-    CHECK(parsed.disableDuringCombat == config.disableDuringCombat);
-    CHECK(parsed.deleteMarkerAfterTeleport == config.deleteMarkerAfterTeleport);
-    CHECK(parsed.arrivalHeightOffset == config.arrivalHeightOffset);
+        waypoint_teleport::serialize_waypoint_teleport_config(flipped));
+    CHECK(parsed.hotkeyVk == flipped.hotkeyVk);
+    CHECK(parsed.disableWhileMounted == flipped.disableWhileMounted);
+    CHECK(parsed.disableInDungeon == flipped.disableInDungeon);
+    CHECK(parsed.disableDuringCombat == flipped.disableDuringCombat);
+    CHECK(parsed.deleteMarkerAfterTeleport == flipped.deleteMarkerAfterTeleport);
+    CHECK(parsed.arrivalHeightOffset == flipped.arrivalHeightOffset);
 }
 
 void test_config_invalid_values_fall_back() {

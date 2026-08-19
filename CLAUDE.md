@@ -255,7 +255,7 @@ Windows SDK，允许它查询 MSVC 驱动（如
 - `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩对象的一次性冷却覆盖与原值恢复；
 - `inc/capture_override/` + `src/capture_override/`：捕获限制瞬时事务与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除与单字段恢复账本；
-- `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（配置解析、最近选择、SyncTeleport）；
+- `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（配置解析、最近选择、无扫掠放置）；
 - `inc/pal_remote_palbox/` + `src/pal_remote_palbox/`：远程终端——按键上升沿状态机（300ms 防连点）
   与基地选择策略（纯值层 `remote_palbox.hpp`）+ 游戏线程运行时 `remote_palbox_runtime.cpp`；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：

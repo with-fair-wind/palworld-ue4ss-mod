@@ -1,6 +1,6 @@
 /**
  * @file waypoint_teleport_runtime.hpp
- * @brief 传送至最近地图标记点的游戏线程运行时：门控、标记读取与原生 SyncTeleport。
+ * @brief 传送至最近地图标记点的游戏线程运行时：门控、标记读取与无扫掠放置。
  * @details 只在游戏线程调用；跨帧不持有 UObject 指针。每帧开销固定为按键轮询；
  *          全部游戏逻辑仅在按键上升沿或 GUI 请求时一次性执行。结构故障 → 本世界
  *          代次内停用；LoadMap 后重新可用。
@@ -79,8 +79,14 @@ private:
     /** @brief 到期执行远距目标的贴地校正（best-effort，失败仅取消计划）。 */
     auto run_pending_refinement() -> void;
 
-    /** @brief 门控 + 地面追踪 + 放置 + 删除的共用传送核心（F7 与地图点击共用）。 */
-    auto teleport_to_candidate(const WaypointTeleportConfig& config, RC::Unreal::UObject* manager,
+    /**
+     * @brief 门控 + 地面追踪 + 放置 + 删除的传送核心。
+     * @note 全部句柄由 execute_trigger 在同一游戏线程调用链内解析后传入
+     *       （短期非拥有句柄，本函数不得重新解析或跨帧保存）。
+     */
+    auto teleport_to_candidate(const WaypointTeleportConfig& config,
+                               RC::Unreal::UObject* worldContext, RC::Unreal::UObject* controller,
+                               RC::Unreal::UObject* pawn, RC::Unreal::UObject* manager,
                                const MarkerCandidate& target) -> WaypointTeleportResult;
 
     auto set_disabled(const std::string& message) -> void;

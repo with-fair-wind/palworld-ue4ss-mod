@@ -303,7 +303,7 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 - `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除的单字段可逆覆盖与恢复账本；
 - `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（CustomMarkers 读取
-  + 最近标记纯值选择 + 原生 SyncTeleport）；
+  + 最近标记纯值选择 + K2_SetActorLocation 无扫掠放置）；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿
   状态机 300ms 防连点、基地选择策略）与游戏线程运行时；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：

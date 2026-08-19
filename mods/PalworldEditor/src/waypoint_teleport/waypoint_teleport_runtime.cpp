@@ -1,6 +1,6 @@
 /**
  * @file waypoint_teleport_runtime.cpp
- * @brief 实现传送至最近地图标记点：门控、CustomMarkers 读取与原生 SyncTeleport。
+ * @brief 实现传送至最近地图标记点：门控、CustomMarkers 读取与无扫掠放置。
  * @details 复用 pal_game 公共原语（控制器/Pawn/战斗判定/按键状态机）；标记 TMap 与
  *          传送参数全部经 FProperty API 按名读写，不手写参数布局。跨帧只保存纯值。
  */
@@ -43,6 +43,8 @@ inline constexpr double kDirectPlaceDistanceCm{10000.0};
 inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
 /** @brief 校正 Z 与第一段锚点的最小差值（cm）：小于该值视为已正确、免二次放置。 */
 inline constexpr double kRefinementMinDeltaCm{100.0};
+/** @brief 到达点离地间隙（cm）：高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。 */
+inline constexpr double kArrivalClearanceCm{150.0};
 
 /** @brief 游戏是否处于前台（前台窗口属于本进程）。 */
 [[nodiscard]] auto foreground_is_game() -> bool {
@@ -216,31 +218,42 @@ auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
             keyProperty->GetElementSize() != sizeof(FGuid)) {
             continue;
         }
-        const int32 maximumIndex = scriptMap->GetMaxIndex();
-        if (maximumIndex < 0 || maximumIndex > kMaximumCustomMarkerIndex) {
-            continue;
-        }
         const auto layout =
             FScriptMap::GetScriptLayout(keyProperty->GetSize(), keyProperty->GetMinAlignment(),
                                         valueProperty->GetSize(), valueProperty->GetMinAlignment());
-        for (int32 index{}; index < maximumIndex; ++index) {
-            if (!scriptMap->IsValidIndex(index)) {
-                continue;
+        const auto findGuidIndex = [&]() -> std::optional<int32> {
+            const int32 currentMaxIndex = scriptMap->GetMaxIndex();
+            if (currentMaxIndex < 0 || currentMaxIndex > kMaximumCustomMarkerIndex) {
+                return std::nullopt;
             }
-            auto* const entry = scriptMap->GetData(index, layout);
-            std::array<std::uint32_t, 4> entryGuid{};
-            keyProperty->CopyCompleteValue(entryGuid.data(), entry);
-            if (entryGuid != guid) {
-                continue;
+            for (int32 index{}; index < currentMaxIndex; ++index) {
+                if (!scriptMap->IsValidIndex(index)) {
+                    continue;
+                }
+                auto* const entry = scriptMap->GetData(index, layout);
+                std::array<std::uint32_t, 4> entryGuid{};
+                keyProperty->CopyCompleteValue(entryGuid.data(), entry);
+                if (entryGuid == guid) {
+                    return index;
+                }
             }
-            auto* const icon = valueProperty->GetObjectPropertyValue(
-                static_cast<void*>(static_cast<std::byte*>(entry) + layout.ValueOffset));
-            if (pal_game::is_valid(icon)) {
-                call_remove_custom_icon(map, icon);
-                call_no_parameter_function(icon, STR("RemoveFromParent"));
-            }
-            scriptMap->RemoveAt(index, layout);
-            break;  // 同一控件内一个 GUID 至多一条
+            return std::nullopt;
+        };
+        const auto matchIndex = findGuidIndex();
+        if (!matchIndex.has_value()) {
+            continue;
+        }
+        auto* const icon = valueProperty->GetObjectPropertyValue(static_cast<void*>(
+            static_cast<std::byte*>(scriptMap->GetData(*matchIndex, layout)) + layout.ValueOffset));
+        if (pal_game::is_valid(icon)) {
+            call_remove_custom_icon(map, icon);
+            call_no_parameter_function(icon, STR("RemoveFromParent"));
+        }
+        // 蓝图函数内部可能已改动 CustomMarkerMap：按 GUID 重新定位后再删除，
+        // 不得复用调用前的下标（陈旧下标会删错条目或破坏容器）。
+        const auto freshIndex = findGuidIndex();
+        if (freshIndex.has_value()) {
+            scriptMap->RemoveAt(*freshIndex, layout);
         }
     }
 }
@@ -513,7 +526,9 @@ auto WaypointTeleportRuntime::begin_world_transition() -> void {
 auto WaypointTeleportRuntime::finish_world_transition() -> void {}
 
 auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig& config,
-                                                    UObject* manager, const MarkerCandidate& target)
+                                                    UObject* worldContext, UObject* controller,
+                                                    UObject* pawn, UObject* manager,
+                                                    const MarkerCandidate& target)
     -> WaypointTeleportResult {
     const auto finish = [this](const WaypointTeleportResult result, const std::string& message,
                                const bool isFailure) -> WaypointTeleportResult {
@@ -524,10 +539,9 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
     if (domainDisabled_.load(std::memory_order_acquire)) {
         return finish(WaypointTeleportResult::disabled, "结构故障已停用标记传送", true);
     }
-    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
-    auto* const controller = pal_game::local_player_controller(worldContext);
-    if (controller == nullptr) {
-        return finish(WaypointTeleportResult::unavailable, "无法解析本地玩家", true);
+    // 句柄由 execute_trigger 同帧解析传入；此处只做有效性复核，不重复解析。
+    if (!pal_game::is_valid(controller) || !pal_game::is_valid(pawn)) {
+        return finish(WaypointTeleportResult::unavailable, "无法解析本地玩家或 Pawn", true);
     }
     // PlayerState 必须取控制器自身的（AController::PlayerState 属性）；FindFirstOf
     // 可能命中非本地实例（远端/模板）。
@@ -561,12 +575,6 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
         return finish(WaypointTeleportResult::blocked, "战斗中已禁用", true);
     }
 
-    // 传送原语：K2_SetActorLocation(bSweep=false) 精确放置于玩家 Pawn——无序列
-    // 状态机、无路径扫掠（前几版原语的崩溃/入地教训见函数头注释）。
-    auto* const pawn = pal_game::player_pawn(controller);
-    if (!pal_game::is_valid(pawn)) {
-        return finish(WaypointTeleportResult::unavailable, "无法解析玩家 Pawn", true);
-    }
     // 地图标记 Z 不可靠（实测会落在地表下方传送入地）：以标记 Z 为中心 ±1km 向下
     // 射线追踪取真实地面；未命中或结构不兼容时拒绝传送。
     const auto groundZ = trace_ground_z(worldContext, target.x, target.y, target.z);
@@ -579,7 +587,6 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
                       true);
     }
     // 离地间隙高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。
-    constexpr double kArrivalClearance = 150.0;  // cm
     const double distanceCm = std::sqrt(target.distanceSquared);
     if (distanceCm > kDirectPlaceDistanceCm) {
         // 远距两段式：目标区块大概率未流送（实测：远距首追踪命中未加载占位高度，
@@ -589,7 +596,8 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
         FVector anchor{};
         anchor.SetX(target.x);
         anchor.SetY(target.y);
-        anchor.SetZ(anchorZ + kArrivalClearance + static_cast<double>(config.arrivalHeightOffset));
+        anchor.SetZ(anchorZ + kArrivalClearanceCm +
+                    static_cast<double>(config.arrivalHeightOffset));
         const auto anchorResult = call_set_actor_location(pawn, anchor);
         if (!anchorResult.has_value()) {
             set_disabled("K2_SetActorLocation 签名不兼容，已停用标记传送");
@@ -622,7 +630,7 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
     FVector destination{};
     destination.SetX(target.x);
     destination.SetY(target.y);
-    destination.SetZ(**groundZ + kArrivalClearance +
+    destination.SetZ(**groundZ + kArrivalClearanceCm +
                      static_cast<double>(config.arrivalHeightOffset));
     const auto teleportResult = call_set_actor_location(pawn, destination);
     if (!teleportResult.has_value()) {
@@ -689,7 +697,8 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         note("没有自定义地图标记", true);
         return WaypointTeleportResult::noMarker;
     }
-    return teleport_to_candidate(config, manager, candidates[*nearest]);
+    return teleport_to_candidate(config, worldContext, controller, pawn, manager,
+                                 candidates[*nearest]);
 }
 
 auto WaypointTeleportRuntime::run_pending_refinement() -> void {
@@ -714,7 +723,7 @@ auto WaypointTeleportRuntime::run_pending_refinement() -> void {
         note("贴地校正失败：无法探测地面", true);
         return;
     }
-    const double correctedZ = **groundZ + 150.0;
+    const double correctedZ = **groundZ + kArrivalClearanceCm;
     if (std::abs(correctedZ - pendingRefinement_.anchorZ) < kRefinementMinDeltaCm) {
         return;  // 首次追踪已正确（或玩家已自行落地），无需二次放置。
     }
