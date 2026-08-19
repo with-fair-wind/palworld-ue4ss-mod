@@ -143,7 +143,109 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
     return true;
 }
 
-/** @brief 删除一个自定义地图标记（数据层 RemoveLocalCustomMarker）；best-effort。 */
+/** @brief 调用目标上的无参 void UFunction；函数缺失或带参数时跳过。 */
+auto call_no_parameter_function(UObject* target, const wchar_t* functionName) -> void {
+    auto* const function =
+        pal_game::is_valid(target) ? target->GetFunctionByNameInChain(functionName) : nullptr;
+    if (!pal_game::has_exact_parameter_count(function, 0)) {
+        return;
+    }
+    target->ProcessEvent(function, nullptr);
+}
+
+/**
+ * @brief 调用地图控件的 RemoveCustomIcon(Icon)。
+ * @details 蓝图函数，参数名未知；按"唯一非返回参数必须是对象输入"验证签名，
+ *          不兼容时跳过（后续的 TMap 移除仍会执行）。
+ */
+auto call_remove_custom_icon(UObject* map, UObject* icon) -> void {
+    auto* const function =
+        pal_game::is_valid(map) ? map->GetFunctionByNameInChain(STR("RemoveCustomIcon")) : nullptr;
+    FObjectPropertyBase* inputProperty{};
+    std::size_t parmCount{};
+    if (function != nullptr) {
+        for (auto* property :
+             TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
+            if (!property->HasAnyPropertyFlags(CPF_Parm)) {
+                continue;
+            }
+            ++parmCount;
+            if (pal_game::is_return_parameter(property)) {
+                continue;
+            }
+            if (inputProperty != nullptr) {
+                inputProperty = nullptr;
+                break;
+            }
+            inputProperty = CastField<FObjectPropertyBase>(property);
+        }
+    }
+    if (parmCount == 0 || parmCount > 2 || inputProperty == nullptr ||
+        !pal_game::is_input_parameter(inputProperty)) {
+        return;
+    }
+    pal_game::FunctionParams params{function};
+    inputProperty->SetObjectPropertyValue(
+        inputProperty->ContainerPtrToValuePtr<void>(params.data()), icon);
+    map->ProcessEvent(function, params.data());
+}
+
+/**
+ * @brief 从地图控件（WBP_Map_Base_C）的 CustomMarkerMap 移除标记图标。
+ * @details RemoveLocalCustomMarker 只清 LocationManager 数据层；地图控件的图标
+ *          TMap 是独立容器，不移除则地图上标记继续显示（参考实现两层都删）。
+ *          每次传送的按键请求路径才执行一次；best-effort，控件缺失或结构
+ *          不符时跳过，不影响数据层删除结果。
+ */
+auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
+    std::vector<UObject*> maps;
+    UObjectGlobals::FindAllOf(STR("WBP_Map_Base_C"), maps);
+    for (auto* const map : maps) {
+        auto* const mapProperty = CastField<FMapProperty>(
+            pal_game::is_valid(map) ? map->GetPropertyByNameInChain(STR("CustomMarkerMap"))
+                                    : nullptr);
+        auto* const keyProperty = mapProperty == nullptr
+                                      ? nullptr
+                                      : CastField<FStructProperty>(mapProperty->GetKeyProp());
+        auto* const valueProperty =
+            mapProperty == nullptr ? nullptr
+                                   : CastField<FObjectPropertyBase>(mapProperty->GetValueProp());
+        auto* const scriptMap =
+            mapProperty == nullptr ? nullptr : mapProperty->ContainerPtrToValuePtr<FScriptMap>(map);
+        if (keyProperty == nullptr || valueProperty == nullptr || scriptMap == nullptr ||
+            keyProperty->GetElementSize() != sizeof(FGuid)) {
+            continue;
+        }
+        const int32 maximumIndex = scriptMap->GetMaxIndex();
+        if (maximumIndex < 0 || maximumIndex > kMaximumCustomMarkerIndex) {
+            continue;
+        }
+        const auto layout =
+            FScriptMap::GetScriptLayout(keyProperty->GetSize(), keyProperty->GetMinAlignment(),
+                                        valueProperty->GetSize(), valueProperty->GetMinAlignment());
+        for (int32 index{}; index < maximumIndex; ++index) {
+            if (!scriptMap->IsValidIndex(index)) {
+                continue;
+            }
+            auto* const entry = scriptMap->GetData(index, layout);
+            std::array<std::uint32_t, 4> entryGuid{};
+            keyProperty->CopyCompleteValue(entryGuid.data(), entry);
+            if (entryGuid != guid) {
+                continue;
+            }
+            auto* const icon = valueProperty->GetObjectPropertyValue(
+                static_cast<void*>(static_cast<std::byte*>(entry) + layout.ValueOffset));
+            if (pal_game::is_valid(icon)) {
+                call_remove_custom_icon(map, icon);
+                call_no_parameter_function(icon, STR("RemoveFromParent"));
+            }
+            scriptMap->RemoveAt(index, layout);
+            break;  // 同一控件内一个 GUID 至多一条
+        }
+    }
+}
+
+/** @brief 删除一个自定义地图标记（数据层 RemoveLocalCustomMarker + 地图图标）；best-effort。 */
 [[nodiscard]] auto remove_custom_marker(UObject* manager, const std::array<std::uint32_t, 4>& guid)
     -> bool {
     auto* const function = pal_game::is_valid(manager)
@@ -162,6 +264,7 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
     parameter->CopyCompleteValue(parameter->ContainerPtrToValuePtr<void>(params.data()),
                                  guid.data());
     manager->ProcessEvent(function, params.data());
+    remove_map_icons(guid);
     return true;
 }
 

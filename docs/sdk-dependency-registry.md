@@ -142,7 +142,8 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `GetLocationManager` | `UPalUtility` | 标记传送：位置管理器 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `SetNoFallDamageHeightLastJumpedLocation` | `UPalIndividualCharacterParameter` | 标记传送：每次放置后重置坠落伤害下落起点（游戏原生机制，`LastJumpedLocation` 与落点差值结算） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `LineTraceSingle` | `UKismetSystemLibrary` | 标记传送：地面高度追踪（通道 0，±1km 窗口，读 OutHit.ImpactPoint.Z；PalSquadAllOut 同款） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
-| `RemoveLocalCustomMarker` | `UPalLocationManager` | 标记传送：传送后按配置删除所用标记（FGuid 入参；参考实现默认行为，解决到达标记霸占"最近"选择） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
+| `RemoveLocalCustomMarker` | `UPalLocationManager` | 标记传送：传送后按配置删除所用标记（FGuid 入参；参考实现默认行为，解决到达标记霸占"最近"选择）。只删数据层——地图图标在 `WBP_Map_Base_C.CustomMarkerMap`（TMap<FGuid, 图标控件>），须一并移除否则地图上标记残留 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
+| `CustomMarkerMap` / `RemoveCustomIcon` | `WBP_Map_Base_C`（地图控件蓝图类） | 标记传送：删除标记时同步移除地图图标（FindAllOf 找控件实例 → 匹配 GUID → RemoveCustomIcon(Icon) + 图标 RemoveFromParent + TMap RemoveAt）；仅在每次传送按键请求路径执行 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `K2_SetActorLocation` | `AActor`（玩家 Pawn） | 标记传送：无扫掠精确放置（bSweep=false, bTeleport=true）。`SyncTeleport`（有状态序列，EngineTick 前置相位下内部 -1 崩溃）与 `K2_TeleportTo`（路径扫掠，直线穿山时在阻挡点停下导致入地）均已弃用 | 同上 |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
 
