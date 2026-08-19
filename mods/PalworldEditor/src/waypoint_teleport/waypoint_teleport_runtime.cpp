@@ -87,7 +87,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
 /**
  * @brief 读取全部自定义标记的候选坐标。
  * @details TMap<FGuid, FPalCustomMarkerSaveData> 经 FMapProperty 布局迭代；值结构的
- *          IconLocation/IconType 按名解析。结构不兼容返回 false（调用方安全停用）。
+ *          IconLocation 按名解析。结构不兼容返回 false（调用方安全停用）。
  */
 [[nodiscard]] auto read_marker_candidates(UObject* manager, std::vector<MarkerCandidate>& output)
     -> bool {
@@ -109,12 +109,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
                                        ? nullptr
                                        : CastField<FStructProperty>(valueStruct->FindProperty(
                                              FName(STR("IconLocation"), FNAME_Find)));
-    auto* const typeProperty =
-        valueStruct == nullptr ? nullptr
-                               : CastField<FIntProperty>(
-                                     valueStruct->FindProperty(FName(STR("IconType"), FNAME_Find)));
-    if (locationProperty == nullptr || typeProperty == nullptr ||
-        locationProperty->GetElementSize() != sizeof(FVector)) {
+    if (locationProperty == nullptr || locationProperty->GetElementSize() != sizeof(FVector)) {
         return false;
     }
 

@@ -245,7 +245,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `BaseCampId`/`OwnerMapObjectInstanceId` | `PalHUDDispatchParameter_PalBox` | struct | `remote_palbox_runtime.cpp:747, 749` |
 | `CharacterMaxRank`/`WorkSuitabilityMaxRank` | `PalGameSetting` | int | `src/pal_stats/pal_stats.cpp:134, 136` |
 | `PalBoxReviveTime` | `PalGameSetting` | float（可逆清零，恢复账本） | `src/revive_timer/revive_timer_gateway.cpp` |
-| `CustomMarkers` | `UPalLocationManager` | `TMap<FGuid, FPalCustomMarkerSaveData>`（值含 `IconLocation` FVector、`IconType` int32） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
+| `CustomMarkers` | `UPalLocationManager` | `TMap<FGuid, FPalCustomMarkerSaveData>`（只读迭代，读取值结构 `IconLocation` FVector） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 
 ---
 

@@ -80,7 +80,7 @@ private:
     auto run_pending_refinement() -> void;
 
     /**
-     * @brief 门控 + 地面追踪 + 放置 + 删除的传送核心。
+     * @brief 门控 + 地面追踪 + 放置的传送核心。
      * @note 全部句柄由 execute_trigger 在同一游戏线程调用链内解析后传入
      *       （短期非拥有句柄，本函数不得重新解析或跨帧保存）。
      */
