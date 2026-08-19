@@ -14,6 +14,7 @@
 #include <DynamicOutput/DynamicOutput.hpp>
 #include <Unreal/Core/Containers/Map.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
@@ -195,21 +196,40 @@ auto call_remove_custom_icon(UObject* map, UObject* icon) -> void {
 /**
  * @brief 把图标控件收起（UWidget:SetVisibility(ESlateVisibility::Collapsed)）。
  * @details 地图打开（活跃 Slate 树）时，RemoveFromParent 与 TMap 移除实测会崩溃；
- *          收起是属性级原生调用，不做任何结构变更，图标立即从地图消失且跨重开保持。
+ *          收起是属性级原生调用，不做任何结构变更，图标立即从地图消失且随控件
+ *          实例跨重开保持。参数名各版本不一（InVisibility/NewVisibility），按
+ *          "唯一参数"定位，兼容 FByteProperty 与底层 uint8 的 FEnumProperty。
  */
 auto call_collapse_icon(UObject* icon) -> bool {
     auto* const function =
         pal_game::is_valid(icon) ? icon->GetFunctionByNameInChain(STR("SetVisibility")) : nullptr;
-    auto* const parameter = function == nullptr ? nullptr
-                                                : CastField<FByteProperty>(function->FindProperty(
-                                                      FName(STR("NewVisibility"), FNAME_Find)));
     if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_input_parameter(parameter) || function->GetReturnProperty() != nullptr) {
+        function->GetReturnProperty() != nullptr) {
+        return false;
+    }
+    FProperty* parameter{};
+    for (auto* property :
+         TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
+        if (property->HasAnyPropertyFlags(CPF_Parm)) {
+            parameter = property;
+            break;
+        }
+    }
+    if (parameter == nullptr || !pal_game::is_input_parameter(parameter)) {
         return false;
     }
     pal_game::FunctionParams params{function};
-    parameter->SetPropertyValueInContainer(params.data(),
-                                           static_cast<std::uint8_t>(1));  // Collapsed
+    if (auto* const byteProperty = CastField<FByteProperty>(parameter)) {
+        byteProperty->SetPropertyValueInContainer(params.data(), static_cast<std::uint8_t>(1));
+    } else if (auto* const enumProperty = CastField<FEnumProperty>(parameter)) {
+        auto* const underlying = CastField<FByteProperty>(enumProperty->GetUnderlyingProperty());
+        if (underlying == nullptr) {
+            return false;  // 非 uint8 枚举：放弃收起（保守跳过）
+        }
+        underlying->SetPropertyValueInContainer(params.data(), static_cast<std::uint8_t>(1));
+    } else {
+        return false;
+    }
     icon->ProcessEvent(function, params.data());
     return true;
 }
