@@ -2,13 +2,12 @@
  * @file fishing_boost_gateway.cpp
  * @brief 实现 UPalFishingSystem.CatchBattleParameter 的读写与可逆恢复。
  */
-#include <fishing_boost/fishing_boost_gateway.hpp>
-
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
+#include <fishing_boost/fishing_boost_gateway.hpp>
 
 namespace fishing_boost {
 using namespace RC;
@@ -44,8 +43,7 @@ struct FieldAccess {
     if (floatProp == nullptr) {
         return {};
     }
-    return {.property = floatProp,
-            .container = structProp->ContainerPtrToValuePtr<void>(system)};
+    return {.property = floatProp, .container = structProp->ContainerPtrToValuePtr<void>(system)};
 }
 
 }  // namespace
@@ -71,7 +69,8 @@ auto apply(Ledger& ledger) -> GatewayStatus {
             for (std::size_t j{}; j <= i; ++j) {
                 const auto rollback = find_field(system, kFieldCatalog[j].fieldName);
                 if (rollback.property != nullptr) {
-                    rollback.property->SetPropertyValueInContainer(rollback.container, originals[j]);
+                    rollback.property->SetPropertyValueInContainer(rollback.container,
+                                                                   originals[j]);
                 }
             }
             return GatewayStatus::verificationFailed;

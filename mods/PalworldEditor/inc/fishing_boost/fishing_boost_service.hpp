@@ -23,7 +23,6 @@ struct FieldSpec {
     std::string_view description;
 };
 
-
 inline constexpr std::array<FieldSpec, kFieldCount> kFieldCatalog{{
     {"SinkWaitMinTime", 0.0F, "鱼咬钩最短等待(秒)→0"},
     {"SinkWaitMaxTime", 0.0F, "鱼咬钩最长等待(秒)→0"},
@@ -44,8 +43,12 @@ enum class Phase : std::uint8_t {
  */
 class Ledger final {
 public:
-    auto set_desired(const bool enabled) noexcept -> void { desired_ = enabled; }
-    [[nodiscard]] auto desired() const noexcept -> bool { return desired_; }
+    auto set_desired(const bool enabled) noexcept -> void {
+        desired_ = enabled;
+    }
+    [[nodiscard]] auto desired() const noexcept -> bool {
+        return desired_;
+    }
 
     auto record_originals(const std::array<float, kFieldCount>& values) -> void {
         originals_ = values;
@@ -54,18 +57,27 @@ public:
     [[nodiscard]] auto originals() const -> std::optional<std::array<float, kFieldCount>> {
         return hasRecords_ ? std::optional{originals_} : std::nullopt;
     }
-    auto clear_records() -> void { hasRecords_ = false; }
-    [[nodiscard]] auto has_records() const -> bool { return hasRecords_; }
+    auto clear_records() -> void {
+        hasRecords_ = false;
+    }
+    [[nodiscard]] auto has_records() const -> bool {
+        return hasRecords_;
+    }
 
-    auto disable_for_world() -> void { safetyDisabled_ = true; }
-    [[nodiscard]] auto safety_disabled() const -> bool { return safetyDisabled_; }
+    auto disable_for_world() -> void {
+        safetyDisabled_ = true;
+    }
+    [[nodiscard]] auto safety_disabled() const -> bool {
+        return safetyDisabled_;
+    }
     auto begin_world() -> void {
         safetyDisabled_ = false;
         clear_records();
     }
 
     [[nodiscard]] auto phase() const -> Phase {
-        if (safetyDisabled_) return Phase::safetyDisabled;
+        if (safetyDisabled_)
+            return Phase::safetyDisabled;
         return hasRecords_ ? Phase::active : Phase::off;
     }
 
