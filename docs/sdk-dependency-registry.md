@@ -142,7 +142,6 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `GetLocationManager` | `UPalUtility` | 标记传送：位置管理器 | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `SetNoFallDamageHeightLastJumpedLocation` | `UPalIndividualCharacterParameter` | 标记传送：每次放置后重置坠落伤害下落起点（游戏原生机制，`LastJumpedLocation` 与落点差值结算） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `LineTraceSingle` | `UKismetSystemLibrary` | 标记传送：地面高度追踪（通道 0，±1km 窗口，读 OutHit.ImpactPoint.Z；PalSquadAllOut 同款） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
-| `RemoveLocalCustomMarker` | `UPalLocationManager` | 标记传送：传送后按配置删除所用标记（FGuid 入参；参考实现默认行为，解决到达标记霸占"最近"选择） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 | `K2_SetActorLocation` | `AActor`（玩家 Pawn） | 标记传送：无扫掠精确放置（bSweep=false, bTeleport=true）。`SyncTeleport`（有状态序列，EngineTick 前置相位下内部 -1 崩溃）与 `K2_TeleportTo`（路径扫掠，直线穿山时在阻挡点停下导致入地）均已弃用 | 同上 |
 | `FindWazaForBP` | `UPalWazaDatabase` | 主动技能分类查询 | `src/skills/pal_skills.cpp:855` |
 
@@ -246,7 +245,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `BaseCampId`/`OwnerMapObjectInstanceId` | `PalHUDDispatchParameter_PalBox` | struct | `remote_palbox_runtime.cpp:747, 749` |
 | `CharacterMaxRank`/`WorkSuitabilityMaxRank` | `PalGameSetting` | int | `src/pal_stats/pal_stats.cpp:134, 136` |
 | `PalBoxReviveTime` | `PalGameSetting` | float（可逆清零，恢复账本） | `src/revive_timer/revive_timer_gateway.cpp` |
-| `CustomMarkers` | `UPalLocationManager` | `TMap<FGuid, FPalCustomMarkerSaveData>`（值含 `IconLocation` FVector、`IconType` int32） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
+| `CustomMarkers` | `UPalLocationManager` | `TMap<FGuid, FPalCustomMarkerSaveData>`（只读迭代，读取值结构 `IconLocation` FVector） | `src/waypoint_teleport/waypoint_teleport_runtime.cpp` |
 
 ---
 

@@ -120,7 +120,7 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 目标暂不可用时等待重试，字段缺失时本世界安全停用。
 
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
-过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；默认传送后自动删除所用标记（DeleteMarkerAfterTeleport，到达标记距离恒为 0 会霸占最近选择，不删除无法连续传送），须验证删除后地图图标同步消失、开关关闭时标记保留；
+过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；传送不删除、不修改任何标记（曾实现"传送后自动删除标记"，但地图控件图标 TMap 在活跃 Slate 状态下结构移除多次实测崩溃、收起后重开地图又重建，需求已整体移除；到达标记会霸占最近选择，连续传送需在地图中手动删除或远离该标记）；
 地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截；无标记、世界未同步时给出对应提示；
 LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原语为 `AActor:K2_SetActorLocation`（bSweep=false 无扫掠精确放置，落点由地面追踪+离地间隙保证）；`K2_TeleportTo` 带路径扫掠，玩家到目标直线穿山时会在阻挡点停下放入地形（实测首次入地、二次正常），不得回退；
 `PalSyncTeleportComponent:SyncTeleport` 为有状态序列原语，从 EngineTick 前置
@@ -303,7 +303,7 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 - `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除的单字段可逆覆盖与恢复账本；
 - `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（CustomMarkers 读取
-  + 最近标记纯值选择 + 原生 SyncTeleport）；
+  + 最近标记纯值选择 + K2_SetActorLocation 无扫掠放置）；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿
   状态机 300ms 防连点、基地选择策略）与游戏线程运行时；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：
