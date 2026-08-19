@@ -198,10 +198,14 @@ auto call_remove_custom_icon(UObject* map, UObject* icon) -> void {
  *          TMap 是独立容器，不移除则地图上标记继续显示（参考实现两层都删）。
  *          每次传送的按键请求路径才执行一次；best-effort，控件缺失或结构
  *          不符时跳过，不影响数据层删除结果。
+ * @note 每步前后输出 Verbose 日志：地图打开状态下传送曾触发崩溃，日志可精确定位
+ *       崩溃发生在哪一步（RemoveCustomIcon / RemoveFromParent / RemoveAt 之后）。
  */
 auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
     std::vector<UObject*> maps;
     UObjectGlobals::FindAllOf(STR("WBP_Map_Base_C"), maps);
+    Output::send<LogLevel::Verbose>(
+        STR("PalworldEditor: marker icon cleanup begin, {} map widget(s)\n"), maps.size());
     for (auto* const map : maps) {
         auto* const mapProperty = CastField<FMapProperty>(
             pal_game::is_valid(map) ? map->GetPropertyByNameInChain(STR("CustomMarkerMap"))
@@ -216,6 +220,8 @@ auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
             mapProperty == nullptr ? nullptr : mapProperty->ContainerPtrToValuePtr<FScriptMap>(map);
         if (keyProperty == nullptr || valueProperty == nullptr || scriptMap == nullptr ||
             keyProperty->GetElementSize() != sizeof(FGuid)) {
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: map widget skipped, CustomMarkerMap structure mismatch\n"));
             continue;
         }
         const auto layout =
@@ -245,17 +251,33 @@ auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
         }
         auto* const icon = valueProperty->GetObjectPropertyValue(static_cast<void*>(
             static_cast<std::byte*>(scriptMap->GetData(*matchIndex, layout)) + layout.ValueOffset));
+        Output::send<LogLevel::Verbose>(
+            STR("PalworldEditor: marker entry found in live map widget, icon {}\n"),
+            static_cast<const void*>(icon));
         if (pal_game::is_valid(icon)) {
             call_remove_custom_icon(map, icon);
-            call_no_parameter_function(icon, STR("RemoveFromParent"));
+            Output::send<LogLevel::Verbose>(STR("PalworldEditor: RemoveCustomIcon returned\n"));
+            // 蓝图函数可能已销毁/标记图标控件：第二次调用前必须重新验证。
+            if (pal_game::is_valid(icon)) {
+                call_no_parameter_function(icon, STR("RemoveFromParent"));
+                Output::send<LogLevel::Verbose>(STR("PalworldEditor: RemoveFromParent returned\n"));
+            } else {
+                Output::send<LogLevel::Verbose>(
+                    STR("PalworldEditor: icon invalid after RemoveCustomIcon, skip detach\n"));
+            }
         }
         // 蓝图函数内部可能已改动 CustomMarkerMap：按 GUID 重新定位后再删除，
         // 不得复用调用前的下标（陈旧下标会删错条目或破坏容器）。
         const auto freshIndex = findGuidIndex();
         if (freshIndex.has_value()) {
             scriptMap->RemoveAt(*freshIndex, layout);
+            Output::send<LogLevel::Verbose>(STR("PalworldEditor: CustomMarkerMap entry removed\n"));
+        } else {
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: CustomMarkerMap entry already gone\n"));
         }
     }
+    Output::send<LogLevel::Verbose>(STR("PalworldEditor: marker icon cleanup end\n"));
 }
 
 /** @brief 删除一个自定义地图标记（数据层 RemoveLocalCustomMarker + 地图图标）；best-effort。 */
