@@ -50,7 +50,6 @@ void test_config_defaults_and_round_trip() {
     const auto config = waypoint_teleport::kDefaultWaypointTeleportConfig;
     CHECK(config.hotkeyVk == 118);
     CHECK(config.arrivalHeightOffset == 0.0F);
-    CHECK(config.deleteMarkerAfterTeleport);
 
     // 全字段翻转后往返：任一键不参与 serialize/parse 都会在此暴露。
     auto flipped = config;
@@ -58,7 +57,6 @@ void test_config_defaults_and_round_trip() {
     flipped.disableWhileMounted = !flipped.disableWhileMounted;
     flipped.disableInDungeon = !flipped.disableInDungeon;
     flipped.disableDuringCombat = !flipped.disableDuringCombat;
-    flipped.deleteMarkerAfterTeleport = !flipped.deleteMarkerAfterTeleport;
     flipped.arrivalHeightOffset = 250.5F;
 
     const auto parsed = waypoint_teleport::parse_waypoint_teleport_config(
@@ -67,7 +65,6 @@ void test_config_defaults_and_round_trip() {
     CHECK(parsed.disableWhileMounted == flipped.disableWhileMounted);
     CHECK(parsed.disableInDungeon == flipped.disableInDungeon);
     CHECK(parsed.disableDuringCombat == flipped.disableDuringCombat);
-    CHECK(parsed.deleteMarkerAfterTeleport == flipped.deleteMarkerAfterTeleport);
     CHECK(parsed.arrivalHeightOffset == flipped.arrivalHeightOffset);
 }
 

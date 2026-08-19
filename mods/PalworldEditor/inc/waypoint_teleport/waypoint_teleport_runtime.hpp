@@ -7,14 +7,12 @@
  */
 #pragma once
 
-#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <string>
 #include <string_view>
-#include <vector>
 
 #include <common/hotkey_edge_trigger.hpp>
 #include <skills/world_session_state.hpp>
@@ -75,28 +73,11 @@ private:
         std::chrono::steady_clock::time_point deadline{};
     };
 
-    /** @brief 开图传送后待关图补删的标记 GUID 与重试计划（纯值，仅游戏线程）。 */
-    struct PendingIconCleanup {
-        std::vector<std::array<std::uint32_t, 4>> guids;
-        std::chrono::steady_clock::time_point nextAttempt{};
-        int attempts{};
-    };
-
     /** @brief 在 tick 内执行一次完整触发管线并返回结果。 */
     auto execute_trigger(const WaypointTeleportConfig& config) -> WaypointTeleportResult;
 
     /** @brief 到期执行远距目标的贴地校正（best-effort，失败仅取消计划）。 */
     auto run_pending_refinement() -> void;
-
-    /**
-     * @brief 到期检查地图是否已关闭，对关闭控件补执行标记条目结构删除。
-     * @details 低频有上限重试（2 秒一轮、最多 15 轮）：打开状态下结构手术实测
-     *          崩溃，只能等关闭后执行；空队列时常量时间，不做空闲反射轮询。
-     */
-    auto run_deferred_icon_cleanup() -> void;
-
-    /** @brief 补删队列非空时安排下一轮重试窗口。 */
-    auto schedule_icon_cleanup_retry() -> void;
 
     /**
      * @brief 门控 + 地面追踪 + 放置 + 删除的传送核心。
@@ -116,7 +97,6 @@ private:
     WaypointTeleportConfig config_{kDefaultWaypointTeleportConfig};
     pal_game::HotkeyEdgeTrigger trigger_;
     PendingRefinement pendingRefinement_;
-    PendingIconCleanup pendingIconCleanup_;
     std::string iniPath_;
     std::atomic<bool> requestedTeleport_{false};
     /** @brief GUI 写入配置后置位；下一帧 tick 在游戏线程重置按键状态机。 */
