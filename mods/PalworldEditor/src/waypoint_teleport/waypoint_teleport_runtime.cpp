@@ -325,49 +325,6 @@ inline constexpr double kRefinementMinDeltaCm{100.0};
     pawn->ProcessEvent(function, params.data());
     return resultProperty->GetPropertyValueInContainer(params.data());
 }
-
-/** @brief 从地图点击事件参数中探测自定义图钉图标对象（类名含 Map_IconCustom）。 */
-[[nodiscard]] auto custom_icon_from_params(UFunction* function, void* locals) -> UObject* {
-    if (function == nullptr || locals == nullptr) {
-        return nullptr;
-    }
-    for (auto* property :
-         TFieldRange<FProperty>(function, EFieldIterationFlags::IncludeDeprecated)) {
-        if (!property->HasAnyPropertyFlags(CPF_Parm) ||
-            property->HasAnyPropertyFlags(CPF_ReturnParm)) {
-            continue;
-        }
-        auto* const objectProperty = CastField<FObjectPropertyBase>(property);
-        if (objectProperty == nullptr) {
-            continue;
-        }
-        auto* const value = objectProperty->GetObjectPropertyValue(
-            objectProperty->ContainerPtrToValuePtr<void>(locals));
-        if (!pal_game::is_valid(value)) {
-            continue;
-        }
-        const auto className = text_encoding::to_utf8(value->GetClassPrivate()->GetName());
-        if (className.find("Map_IconCustom") != std::string::npos) {
-            return value;
-        }
-    }
-    return nullptr;
-}
-
-/** @brief 读取图钉图标的 LocationId（FGuid 的 4 个字）。 */
-[[nodiscard]] auto icon_marker_guid(UObject* icon) -> std::optional<std::array<std::uint32_t, 4>> {
-    auto* const property =
-        pal_game::is_valid(icon)
-            ? CastField<FStructProperty>(icon->GetPropertyByNameInChain(STR("LocationId")))
-            : nullptr;
-    if (property == nullptr || property->GetElementSize() != sizeof(std::uint32_t) * 4) {
-        return std::nullopt;
-    }
-    std::array<std::uint32_t, 4> guid{};
-    property->CopyCompleteValue(guid.data(), property->ContainerPtrToValuePtr<void>(icon));
-    return guid;
-}
-
 }  // namespace
 
 auto WaypointTeleportRuntime::load_config(const std::string_view iniPath) -> void {
@@ -424,7 +381,6 @@ auto WaypointTeleportRuntime::tick(const float deltaSeconds,
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
     if (session.can_access_unreal()) {
         run_pending_refinement();  // 远距两段式的到期贴地（空计划为常量时间）。
-        ensure_map_click_hook(config);
     }
     const bool triggered = guiRequest || edge;
     if (!triggered) {
@@ -447,18 +403,11 @@ auto WaypointTeleportRuntime::request_teleport() -> void {
 auto WaypointTeleportRuntime::begin_world_transition() -> void {
     trigger_.reset();
     pendingRefinement_.active = false;
-    // 地图点击 Hook 进程常驻、不随世界注销：标题期注册后于首次 LoadMap 前置
-    // 注销 script 分发器会在 UE4SS 全局回调结构内崩溃（实测启动即崩）；处理器
-    // 自带配置/域停用/Shift/图钉类型四重门控，跨世界保持注册是安全的。
     domainDisabled_.store(false, std::memory_order_release);
     requestedTeleport_.store(false);
 }
 
 auto WaypointTeleportRuntime::finish_world_transition() -> void {}
-
-auto WaypointTeleportRuntime::shutdown() -> void {
-    mapClickRegistry_.unregister_all();
-}
 
 auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig& config,
                                                     UObject* manager, const MarkerCandidate& target)
@@ -638,78 +587,6 @@ auto WaypointTeleportRuntime::execute_trigger(const WaypointTeleportConfig& conf
         return WaypointTeleportResult::noMarker;
     }
     return teleport_to_candidate(config, manager, candidates[*nearest]);
-}
-
-void WaypointTeleportRuntime::handle_map_click(
-    RC::Unreal::UnrealScriptFunctionCallableContext& context) {
-    if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) == 0) {
-        return;  // 未按 Shift：保持原版点击行为。
-    }
-    WaypointTeleportConfig config;
-    {
-        const std::lock_guard lock(snapshotMutex_);
-        config = config_;
-    }
-    if (!config.teleportFromMapClick || domainDisabled_.load(std::memory_order_acquire)) {
-        return;
-    }
-    auto* const icon = custom_icon_from_params(context.TheStack.Node(), context.TheStack.Locals());
-    const auto guid = icon == nullptr ? std::nullopt : icon_marker_guid(icon);
-    if (!guid.has_value()) {
-        return;  // 点击的不是自定义图钉（或无标记数据）：保持原版行为。
-    }
-
-    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
-    auto* const controller = pal_game::local_player_controller(worldContext);
-    FVector playerLocation{};
-    if (controller == nullptr ||
-        !pal_game::read_actor_location(pal_game::player_pawn(controller), playerLocation)) {
-        return;
-    }
-    auto* const manager = location_manager(worldContext);
-    if (manager == nullptr) {
-        return;
-    }
-    std::vector<MarkerCandidate> candidates;
-    if (!read_marker_candidates(manager, candidates)) {
-        set_disabled("CustomMarkers 结构不兼容，已停用标记传送");
-        return;
-    }
-    const auto matched = std::ranges::find_if(
-        candidates, [&](const MarkerCandidate& candidate) { return candidate.guid == *guid; });
-    if (matched == candidates.end()) {
-        return;
-    }
-    const auto dx = matched->x - playerLocation.X();
-    const auto dy = matched->y - playerLocation.Y();
-    matched->distanceSquared = dx * dx + dy * dy;
-    static_cast<void>(teleport_to_candidate(config, manager, *matched));
-}
-
-auto WaypointTeleportRuntime::ensure_map_click_hook(const WaypointTeleportConfig& config) -> void {
-    // 一旦注册即进程常驻：配置关闭由 handle_map_click 内部检查实现（不注销），
-    // 与参考实现"注册后不注销"的已验证模式一致。
-    if (!config.teleportFromMapClick || !mapClickRegistry_.empty()) {
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (mapClickHookTried_ && now < nextHookAttempt_) {
-        return;
-    }
-    mapClickHookTried_ = true;
-    nextHookAttempt_ = now + std::chrono::seconds{5};
-
-    auto* const function = UObjectGlobals::StaticFindObject<UFunction*>(
-        nullptr, nullptr,
-        STR("/Game/Pal/Blueprint/UI/UserInterface/Map/WBP_Map_Base.WBP_Map_Base_C:"
-            "On Icon Clicked"));
-    if (function == nullptr) {
-        return;  // 蓝图类尚未加载；稍后有界重试。
-    }
-    static_cast<void>(mapClickRegistry_.register_hook(
-        function,
-        [this](UnrealScriptFunctionCallableContext& context, void*) { handle_map_click(context); },
-        {}));
 }
 
 auto WaypointTeleportRuntime::run_pending_refinement() -> void {
