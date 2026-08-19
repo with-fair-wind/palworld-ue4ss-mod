@@ -46,6 +46,10 @@ inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
 inline constexpr double kRefinementMinDeltaCm{100.0};
 /** @brief 到达点离地间隙（cm）：高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。 */
 inline constexpr double kArrivalClearanceCm{150.0};
+/** @brief 开图传送后关图补删的重试间隔。 */
+inline constexpr auto kIconCleanupRetryInterval = std::chrono::milliseconds{2000};
+/** @brief 关图补删的最大尝试轮数（约 30 秒后放弃并告警）。 */
+inline constexpr int kIconCleanupMaxAttempts{15};
 
 /** @brief 游戏是否处于前台（前台窗口属于本进程）。 */
 [[nodiscard]] auto foreground_is_game() -> bool {
@@ -235,107 +239,155 @@ auto call_collapse_icon(UObject* icon) -> bool {
 }
 
 /**
- * @brief 从地图控件（WBP_Map_Base_C）的 CustomMarkerMap 移除标记图标。
- * @details RemoveLocalCustomMarker 只清 LocationManager 数据层；地图控件的图标
- *          TMap 是独立容器，不移除则地图上标记继续显示（参考实现两层都删）。
- *          每次传送的按键请求路径才执行一次；best-effort，控件缺失或结构
- *          不符时跳过，不影响数据层删除结果。
- * @note 地图打开时只收起图标（属性级），关闭时才执行完整移除（后者已多轮实测稳定）；
- *       每步输出 Verbose 日志便于回归定位。
+ * @brief 一个地图控件 CustomMarkerMap 的已验证反射访问句柄（仅当帧有效，非拥有）。
  */
-auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
+struct WidgetMapAccess {
+    UObject* widget{};                    /**< 地图控件实例。 */
+    FStructProperty* keyProperty{};       /**< FGuid 键属性。 */
+    FObjectPropertyBase* valueProperty{}; /**< 图标控件指针值属性。 */
+    FScriptMap* scriptMap{};              /**< CustomMarkerMap 实例。 */
+    FScriptMapLayout layout{};            /**< 按属性尺寸计算的脚本布局。 */
+};
+
+/** @brief 解析并验证一个地图控件的 CustomMarkerMap 访问；结构不符返回空。 */
+[[nodiscard]] auto resolve_widget_access(UObject* map) -> std::optional<WidgetMapAccess> {
+    auto* const mapProperty = CastField<FMapProperty>(
+        pal_game::is_valid(map) ? map->GetPropertyByNameInChain(STR("CustomMarkerMap")) : nullptr);
+    auto* const keyProperty =
+        mapProperty == nullptr ? nullptr : CastField<FStructProperty>(mapProperty->GetKeyProp());
+    auto* const valueProperty = mapProperty == nullptr
+                                    ? nullptr
+                                    : CastField<FObjectPropertyBase>(mapProperty->GetValueProp());
+    auto* const scriptMap =
+        mapProperty == nullptr ? nullptr : mapProperty->ContainerPtrToValuePtr<FScriptMap>(map);
+    if (keyProperty == nullptr || valueProperty == nullptr || scriptMap == nullptr ||
+        keyProperty->GetElementSize() != sizeof(FGuid)) {
+        return std::nullopt;
+    }
+    return WidgetMapAccess{.widget = map,
+                           .keyProperty = keyProperty,
+                           .valueProperty = valueProperty,
+                           .scriptMap = scriptMap,
+                           .layout = FScriptMap::GetScriptLayout(
+                               keyProperty->GetSize(), keyProperty->GetMinAlignment(),
+                               valueProperty->GetSize(), valueProperty->GetMinAlignment())};
+}
+
+/** @brief 在控件 TMap 中按 GUID 线性定位条目下标；防御性上限内扫描。 */
+[[nodiscard]] auto find_guid_index(const WidgetMapAccess& access,
+                                   const std::array<std::uint32_t, 4>& guid)
+    -> std::optional<int32> {
+    const int32 currentMaxIndex = access.scriptMap->GetMaxIndex();
+    if (currentMaxIndex < 0 || currentMaxIndex > kMaximumCustomMarkerIndex) {
+        return std::nullopt;
+    }
+    for (int32 index{}; index < currentMaxIndex; ++index) {
+        if (!access.scriptMap->IsValidIndex(index)) {
+            continue;
+        }
+        auto* const entry = access.scriptMap->GetData(index, access.layout);
+        std::array<std::uint32_t, 4> entryGuid{};
+        access.keyProperty->CopyCompleteValue(entryGuid.data(), entry);
+        if (entryGuid == guid) {
+            return index;
+        }
+    }
+    return std::nullopt;
+}
+
+/** @brief 读取条目对应的图标控件指针（短期非拥有句柄）。 */
+[[nodiscard]] auto read_icon(const WidgetMapAccess& access, const int32 index) -> UObject* {
+    return access.valueProperty->GetObjectPropertyValue(static_cast<void*>(
+        static_cast<std::byte*>(access.scriptMap->GetData(index, access.layout)) +
+        access.layout.ValueOffset));
+}
+
+/**
+ * @brief 对关闭状态（非活跃 Slate）的地图控件执行完整结构移除（已多轮实测稳定）。
+ * @details RemoveCustomIcon -> 图标 RemoveFromParent -> 按 GUID 重定位后 RemoveAt。
+ */
+auto structural_remove_marker(const WidgetMapAccess& access,
+                              const std::array<std::uint32_t, 4>& guid) -> void {
+    const auto matchIndex = find_guid_index(access, guid);
+    if (!matchIndex.has_value()) {
+        return;
+    }
+    auto* const icon = read_icon(access, *matchIndex);
+    Output::send<LogLevel::Verbose>(
+        STR("PalworldEditor: marker entry found in idle map widget, icon {}\n"),
+        static_cast<const void*>(icon));
+    if (pal_game::is_valid(icon)) {
+        call_remove_custom_icon(access.widget, icon);
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor: RemoveCustomIcon returned\n"));
+        // 蓝图函数可能已销毁/标记图标控件：第二次调用前必须重新验证。
+        if (pal_game::is_valid(icon)) {
+            call_no_parameter_function(icon, STR("RemoveFromParent"));
+            Output::send<LogLevel::Verbose>(STR("PalworldEditor: RemoveFromParent returned\n"));
+        } else {
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: icon invalid after RemoveCustomIcon, skip detach\n"));
+        }
+    }
+    // 蓝图函数内部可能已改动 CustomMarkerMap：按 GUID 重新定位后再删除，
+    // 不得复用调用前的下标（陈旧下标会删错条目或破坏容器）。
+    const auto freshIndex = find_guid_index(access, guid);
+    if (freshIndex.has_value()) {
+        access.scriptMap->RemoveAt(*freshIndex, access.layout);
+        Output::send<LogLevel::Verbose>(STR("PalworldEditor: CustomMarkerMap entry removed\n"));
+    } else {
+        Output::send<LogLevel::Verbose>(
+            STR("PalworldEditor: CustomMarkerMap entry already gone\n"));
+    }
+}
+
+/**
+ * @brief 删除标记在地图控件层的图标；打开的控件只收起并登记待补删。
+ * @details RemoveLocalCustomMarker 只清 LocationManager 数据层。地图打开（活跃
+ *          Slate 树）时结构手术实测会崩溃：收起图标（属性级）并把 GUID 记入
+ *          deferredOut，由关图后的低频补删真正移除条目——地图重开会从
+ *          CustomMarkerMap 重建图标，条目不删则图标复活。地图关闭时直接执行
+ *          已验证稳定的完整移除。best-effort，不影响数据层删除结果。
+ * @note IsVisible 解析失败时按"打开"处理（保守：宁可收起+补删也不做结构手术）。
+ */
+auto remove_map_icons(const std::array<std::uint32_t, 4>& guid,
+                      std::vector<std::array<std::uint32_t, 4>>& deferredOut) -> void {
     std::vector<UObject*> maps;
     UObjectGlobals::FindAllOf(STR("WBP_Map_Base_C"), maps);
     Output::send<LogLevel::Verbose>(
         STR("PalworldEditor: marker icon cleanup begin, {} map widget(s)\n"), maps.size());
+    bool deferredRequired{false};
     for (auto* const map : maps) {
-        auto* const mapProperty = CastField<FMapProperty>(
-            pal_game::is_valid(map) ? map->GetPropertyByNameInChain(STR("CustomMarkerMap"))
-                                    : nullptr);
-        auto* const keyProperty = mapProperty == nullptr
-                                      ? nullptr
-                                      : CastField<FStructProperty>(mapProperty->GetKeyProp());
-        auto* const valueProperty =
-            mapProperty == nullptr ? nullptr
-                                   : CastField<FObjectPropertyBase>(mapProperty->GetValueProp());
-        auto* const scriptMap =
-            mapProperty == nullptr ? nullptr : mapProperty->ContainerPtrToValuePtr<FScriptMap>(map);
-        if (keyProperty == nullptr || valueProperty == nullptr || scriptMap == nullptr ||
-            keyProperty->GetElementSize() != sizeof(FGuid)) {
+        auto access = resolve_widget_access(map);
+        if (!access.has_value()) {
             Output::send<LogLevel::Verbose>(
                 STR("PalworldEditor: map widget skipped, CustomMarkerMap structure mismatch\n"));
             continue;
         }
-        const auto layout =
-            FScriptMap::GetScriptLayout(keyProperty->GetSize(), keyProperty->GetMinAlignment(),
-                                        valueProperty->GetSize(), valueProperty->GetMinAlignment());
-        const auto findGuidIndex = [&]() -> std::optional<int32> {
-            const int32 currentMaxIndex = scriptMap->GetMaxIndex();
-            if (currentMaxIndex < 0 || currentMaxIndex > kMaximumCustomMarkerIndex) {
-                return std::nullopt;
-            }
-            for (int32 index{}; index < currentMaxIndex; ++index) {
-                if (!scriptMap->IsValidIndex(index)) {
-                    continue;
-                }
-                auto* const entry = scriptMap->GetData(index, layout);
-                std::array<std::uint32_t, 4> entryGuid{};
-                keyProperty->CopyCompleteValue(entryGuid.data(), entry);
-                if (entryGuid == guid) {
-                    return index;
-                }
-            }
-            return std::nullopt;
-        };
-        const auto matchIndex = findGuidIndex();
+        const auto matchIndex = find_guid_index(*access, guid);
         if (!matchIndex.has_value()) {
             continue;
         }
-        auto* const icon = valueProperty->GetObjectPropertyValue(static_cast<void*>(
-            static_cast<std::byte*>(scriptMap->GetData(*matchIndex, layout)) + layout.ValueOffset));
-        // 地图打开（活跃 Slate 树）时禁止结构手术：RemoveFromParent/RemoveAt 在该状态
-        // 实测崩溃；改为收起图标（属性级），条目留在控件 TMap 中由关闭后的下次清理或
-        // 控件重建消化。地图关闭时保持已验证稳定的完整移除序列。
-        // IsVisible 解析失败时按"打开"处理（保守：宁可只收起也不做结构手术）。
         const bool mapVisible = pal_game::invoke<bool>(map, STR("IsVisible")).value_or(true);
         if (mapVisible) {
+            auto* const icon = read_icon(*access, *matchIndex);
             const bool collapsed = pal_game::is_valid(icon) && call_collapse_icon(icon);
             Output::send<LogLevel::Verbose>(
-                STR("PalworldEditor: live map widget, icon collapsed={} (no structural removal)\n"),
+                STR("PalworldEditor: live map widget, icon collapsed={} (deferred removal)\n"),
                 collapsed);
+            deferredRequired = true;
             continue;
         }
-        Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: marker entry found in idle map widget, icon {}\n"),
-            static_cast<const void*>(icon));
-        if (pal_game::is_valid(icon)) {
-            call_remove_custom_icon(map, icon);
-            Output::send<LogLevel::Verbose>(STR("PalworldEditor: RemoveCustomIcon returned\n"));
-            // 蓝图函数可能已销毁/标记图标控件：第二次调用前必须重新验证。
-            if (pal_game::is_valid(icon)) {
-                call_no_parameter_function(icon, STR("RemoveFromParent"));
-                Output::send<LogLevel::Verbose>(STR("PalworldEditor: RemoveFromParent returned\n"));
-            } else {
-                Output::send<LogLevel::Verbose>(
-                    STR("PalworldEditor: icon invalid after RemoveCustomIcon, skip detach\n"));
-            }
-        }
-        // 蓝图函数内部可能已改动 CustomMarkerMap：按 GUID 重新定位后再删除，
-        // 不得复用调用前的下标（陈旧下标会删错条目或破坏容器）。
-        const auto freshIndex = findGuidIndex();
-        if (freshIndex.has_value()) {
-            scriptMap->RemoveAt(*freshIndex, layout);
-            Output::send<LogLevel::Verbose>(STR("PalworldEditor: CustomMarkerMap entry removed\n"));
-        } else {
-            Output::send<LogLevel::Verbose>(
-                STR("PalworldEditor: CustomMarkerMap entry already gone\n"));
-        }
+        structural_remove_marker(*access, guid);
+    }
+    if (deferredRequired) {
+        deferredOut.push_back(guid);
     }
     Output::send<LogLevel::Verbose>(STR("PalworldEditor: marker icon cleanup end\n"));
 }
 
 /** @brief 删除一个自定义地图标记（数据层 RemoveLocalCustomMarker + 地图图标）；best-effort。 */
-[[nodiscard]] auto remove_custom_marker(UObject* manager, const std::array<std::uint32_t, 4>& guid)
+[[nodiscard]] auto remove_custom_marker(UObject* manager, const std::array<std::uint32_t, 4>& guid,
+                                        std::vector<std::array<std::uint32_t, 4>>& deferredOut)
     -> bool {
     auto* const function = pal_game::is_valid(manager)
                                ? manager->GetFunctionByNameInChain(STR("RemoveLocalCustomMarker"))
@@ -353,7 +405,7 @@ auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
     parameter->CopyCompleteValue(parameter->ContainerPtrToValuePtr<void>(params.data()),
                                  guid.data());
     manager->ProcessEvent(function, params.data());
-    remove_map_icons(guid);
+    remove_map_icons(guid, deferredOut);
     return true;
 }
 
@@ -572,7 +624,8 @@ auto WaypointTeleportRuntime::tick(const float deltaSeconds,
     // 状态机每帧无条件推进，避免丢失松开的下降沿（同远程终端）。
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
     if (session.can_access_unreal()) {
-        run_pending_refinement();  // 远距两段式的到期贴地（空计划为常量时间）。
+        run_pending_refinement();     // 远距两段式的到期贴地（空计划为常量时间）。
+        run_deferred_icon_cleanup();  // 关图补删到期检查（空队列常量时间）。
     }
     const bool triggered = guiRequest || edge;
     if (!triggered) {
@@ -595,6 +648,7 @@ auto WaypointTeleportRuntime::request_teleport() -> void {
 auto WaypointTeleportRuntime::begin_world_transition() -> void {
     trigger_.reset();
     pendingRefinement_.active = false;
+    pendingIconCleanup_ = {};  // 地图控件随世界销毁，条目与补删责任一并终止。
     domainDisabled_.store(false, std::memory_order_release);
     requestedTeleport_.store(false);
 }
@@ -685,7 +739,9 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
         }
         static_cast<void>(reset_fall_origin(pawn));
         if (config.deleteMarkerAfterTeleport) {
-            static_cast<void>(remove_custom_marker(manager, target.guid));
+            static_cast<void>(
+                remove_custom_marker(manager, target.guid, pendingIconCleanup_.guids));
+            schedule_icon_cleanup_retry();
         }
         pendingRefinement_ = {.active = true,
                               .x = target.x,
@@ -717,8 +773,11 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
         return finish(WaypointTeleportResult::unavailable, "引擎拒绝传送（目标点不可达）", true);
     }
     static_cast<void>(reset_fall_origin(pawn));
-    const bool markerRemoved =
-        !config.deleteMarkerAfterTeleport || remove_custom_marker(manager, target.guid);
+    bool markerRemoved{true};
+    if (config.deleteMarkerAfterTeleport) {
+        markerRemoved = remove_custom_marker(manager, target.guid, pendingIconCleanup_.guids);
+        schedule_icon_cleanup_retry();
+    }
 
     {
         const std::lock_guard lock(snapshotMutex_);
@@ -810,6 +869,69 @@ auto WaypointTeleportRuntime::run_pending_refinement() -> void {
     if (call_set_actor_location(pawn, destination).value_or(false)) {
         static_cast<void>(reset_fall_origin(pawn));
         note("已自动贴地", false);
+    }
+}
+
+/** @brief 补删队列非空时安排下一轮重试（每次传送活动都会顺延窗口）。 */
+auto WaypointTeleportRuntime::schedule_icon_cleanup_retry() -> void {
+    if (!pendingIconCleanup_.guids.empty()) {
+        pendingIconCleanup_.nextAttempt =
+            std::chrono::steady_clock::now() + kIconCleanupRetryInterval;
+    }
+}
+
+auto WaypointTeleportRuntime::run_deferred_icon_cleanup() -> void {
+    if (pendingIconCleanup_.guids.empty()) {
+        pendingIconCleanup_.attempts = 0;
+        return;
+    }
+    if (std::chrono::steady_clock::now() < pendingIconCleanup_.nextAttempt) {
+        return;
+    }
+    pendingIconCleanup_.nextAttempt = std::chrono::steady_clock::now() + kIconCleanupRetryInterval;
+    if (++pendingIconCleanup_.attempts > kIconCleanupMaxAttempts) {
+        Output::send<LogLevel::Warning>(
+            STR("PalworldEditor: deferred marker icon cleanup gave up after {} attempts; "
+                "{} marker(s) may reappear on the map\n"),
+            pendingIconCleanup_.attempts - 1, pendingIconCleanup_.guids.size());
+        pendingIconCleanup_ = {};
+        return;
+    }
+
+    std::vector<UObject*> maps;
+    UObjectGlobals::FindAllOf(STR("WBP_Map_Base_C"), maps);
+    if (maps.empty()) {
+        // 控件已销毁：条目随之消失，无补删责任。
+        pendingIconCleanup_ = {};
+        return;
+    }
+    for (auto* const map : maps) {
+        const bool mapVisible = pal_game::invoke<bool>(map, STR("IsVisible")).value_or(true);
+        if (mapVisible) {
+            continue;
+        }
+        auto access = resolve_widget_access(map);
+        if (!access.has_value()) {
+            continue;
+        }
+        for (const auto& guid : pendingIconCleanup_.guids) {
+            structural_remove_marker(*access, guid);
+        }
+    }
+    // 清理后仍存在于任何控件（含仍打开的）的 GUID 保留待重试。
+    std::erase_if(pendingIconCleanup_.guids, [&](const std::array<std::uint32_t, 4>& guid) {
+        for (auto* const map : maps) {
+            auto access = resolve_widget_access(map);
+            if (access.has_value() && find_guid_index(*access, guid).has_value()) {
+                return false;
+            }
+        }
+        return true;
+    });
+    if (pendingIconCleanup_.guids.empty()) {
+        pendingIconCleanup_.attempts = 0;
+        Output::send<LogLevel::Verbose>(
+            STR("PalworldEditor: deferred marker icon cleanup complete\n"));
     }
 }
 
