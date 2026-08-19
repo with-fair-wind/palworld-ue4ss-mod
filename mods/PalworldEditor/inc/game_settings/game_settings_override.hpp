@@ -31,10 +31,14 @@ enum class Category : std::uint8_t {
 /** @brief 参数分类的中文显示名。 */
 [[nodiscard]] constexpr auto category_name(const Category c) noexcept -> std::string_view {
     switch (c) {
-        case Category::party: return "队伍与个体";
-        case Category::progression: return "进度与浓缩";
-        case Category::world: return "世界与时间";
-        case Category::qualityOfLife: return "便利性";
+        case Category::party:
+            return "队伍与个体";
+        case Category::progression:
+            return "进度与浓缩";
+        case Category::world:
+            return "世界与时间";
+        case Category::qualityOfLife:
+            return "便利性";
     }
     return "未知";
 }
@@ -51,8 +55,8 @@ struct OverrideSpec {
 };
 
 /** @brief 验证值是否在安全域内且类型匹配。 */
-[[nodiscard]] constexpr auto is_value_safe(const OverrideSpec& spec,
-                                           const OverrideValue& value) -> bool {
+[[nodiscard]] constexpr auto is_value_safe(const OverrideSpec& spec, const OverrideValue& value)
+    -> bool {
     if (value.index() != spec.defaultValue.index()) {
         return false;  // 类型不匹配
     }
@@ -84,24 +88,22 @@ inline constexpr std::array kOverrideCatalog{
                  "闪光帕鲁出现概率（默认 0.02 = 2%）", 1.0F, 0.0F, 1.0F},
     OverrideSpec{Category::party, "PredatorPal_AppearanceProbability", "捕食者帕鲁出现率",
                  "捕食者帕鲁出现概率", 0.5F, 0.0F, 1.0F},
-    OverrideSpec{Category::party, "RarePal_LevelAdd", "稀有帕鲁等级加成",
-                 "闪光帕鲁额外等级", 10, std::int32_t{0}, std::int32_t{50}},
+    OverrideSpec{Category::party, "RarePal_LevelAdd", "稀有帕鲁等级加成", "闪光帕鲁额外等级", 10,
+                 std::int32_t{0}, std::int32_t{50}},
     OverrideSpec{Category::party, "BossOrRarePal_TalentMin", "Boss/稀有个体值下限",
                  "Boss 和稀有帕鲁的最低个体值", 50, std::int32_t{0}, std::int32_t{100}},
     // ── 进度与浓缩 ──
-    OverrideSpec{Category::progression, "CharacterRankUpRequiredNumDefault",
-                 "浓缩消耗帕鲁数", "升星默认消耗的同种帕鲁数量", 1, std::int32_t{1},
-                 std::int32_t{100}},
-    OverrideSpec{Category::progression, "CharacterMaxRank", "最大星级", "浓缩可达最大星级",
-                 5, std::int32_t{1}, std::int32_t{10}},
-    OverrideSpec{Category::progression, "CharacterMaxLevel", "最大等级", "角色最大等级",
-                 100, std::int32_t{1}, std::int32_t{200}},
+    OverrideSpec{Category::progression, "CharacterRankUpRequiredNumDefault", "浓缩消耗帕鲁数",
+                 "升星默认消耗的同种帕鲁数量", 1, std::int32_t{1}, std::int32_t{100}},
+    OverrideSpec{Category::progression, "CharacterMaxRank", "最大星级", "浓缩可达最大星级", 5,
+                 std::int32_t{1}, std::int32_t{10}},
+    OverrideSpec{Category::progression, "CharacterMaxLevel", "最大等级", "角色最大等级", 100,
+                 std::int32_t{1}, std::int32_t{200}},
     // ── 世界与时间 ──
     OverrideSpec{Category::world, "PalWorldMinutes_RealOneMinute", "游戏时间流速",
-                 "现实 1 分钟 = 游戏多少分钟（默认 60）", 120, std::int32_t{1},
-                 std::int32_t{1440}},
-    OverrideSpec{Category::world, "BaseCampAreaRange", "据点半径(cm)", "据点覆盖半径",
-                 5000.0F, 1000.0F, 20000.0F},
+                 "现实 1 分钟 = 游戏多少分钟（默认 60）", 120, std::int32_t{1}, std::int32_t{1440}},
+    OverrideSpec{Category::world, "BaseCampAreaRange", "据点半径(cm)", "据点覆盖半径", 5000.0F,
+                 1000.0F, 20000.0F},
     // ── 便利性 ──
     OverrideSpec{Category::qualityOfLife, "ReturnOtomoPalCoolTime", "收回帕鲁冷却",
                  "收回出战帕鲁的冷却时间（秒）", 0.0F, 0.0F, 30.0F},

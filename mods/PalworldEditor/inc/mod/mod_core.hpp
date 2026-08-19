@@ -25,6 +25,7 @@
 #include <Unreal/Hooks/Hooks.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <capture_override/capture_override_runtime.hpp>
+#include <fishing_boost/fishing_boost_gateway.hpp>
 #include <game/pal_game.hpp>
 #include <game_settings/game_settings_gateway.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
@@ -296,6 +297,12 @@ private:
     /** @brief 渲染游戏参数覆盖列表。 */
     static void render_game_settings(PalworldEditorMod* self);
 
+    /** @brief 渲染钓鱼圣手开关。 */
+    static void render_fishing_boost(PalworldEditorMod* self);
+
+    /** @brief 消费钓鱼圣手请求。 */
+    auto process_fishing_boost_work(const bool worldContextReady) -> void;
+
     /** @brief 消费参数覆盖请求并执行差量事务。 */
     auto process_game_settings_work(const bool worldContextReady) -> void;
 
@@ -470,6 +477,15 @@ private:
     game_settings::OverrideLedger gameSettingsLedger_;
     /** @brief 游戏线程发布、GUI 只读的参数覆盖运行阶段。 */
     std::atomic<game_settings::RuntimePhase> gameSettingsPhase_{game_settings::RuntimePhase::off};
+
+    /** @brief GUI 提交的钓鱼圣手偏好；EngineTick 消费。 */
+    std::atomic<bool> requestedFishingBoost_{false};
+    /** @brief 通知 EngineTick 消费最新钓鱼圣手偏好。 */
+    std::atomic<bool> fishingBoostDirty_{false};
+    /** @brief 钓鱼参数覆盖账本。 */
+    fishing_boost::Ledger fishingBoostLedger_;
+    /** @brief 钓鱼圣手运行阶段。 */
+    std::atomic<fishing_boost::Phase> fishingBoostPhase_{fishing_boost::Phase::off};
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;

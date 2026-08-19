@@ -2,8 +2,6 @@
  * @file game_settings_gateway.cpp
  * @brief 实现 UPalGameSetting 参数的读取、写入验证与可逆恢复。
  */
-#include <game_settings/game_settings_gateway.hpp>
-
 #include <vector>
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
@@ -11,6 +9,7 @@
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
+#include <game_settings/game_settings_gateway.hpp>
 
 namespace game_settings {
 using namespace RC;
@@ -24,16 +23,13 @@ namespace {
         nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
     auto* const function =
         utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(STR("GetGameSetting"));
-    auto* const input =
-        function == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(
-                  function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const output =
-        function == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(
-                  function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    auto* const input = function == nullptr ? nullptr
+                                            : CastField<FObjectPropertyBase>(function->FindProperty(
+                                                  FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const output = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(
+                                   function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
     if (!pal_game::is_valid(utility) || !pal_game::has_exact_parameter_count(function, 2) ||
         !pal_game::is_input_parameter(input) || !pal_game::is_return_parameter(output)) {
         return nullptr;

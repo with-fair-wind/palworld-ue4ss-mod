@@ -250,6 +250,10 @@ auto PalworldEditorMod::on_unreal_init() -> void {
                                  std::memory_order_release);
         static_cast<void>(reviveTimerLedger_.begin_world(worldSession_.generation()));
         gameSettingsLedger_.begin_world();
+        fishingBoostLedger_.begin_world();
+        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+        fishingBoostLedger_.begin_world();
+        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
         gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
         reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
                                 std::memory_order_release);
@@ -286,6 +290,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         process_stack_limit_work(worldContextReady);
         process_revive_timer_work(worldContextReady);
         process_game_settings_work(worldContextReady);
+        process_fishing_boost_work(worldContextReady);
         process_pal_edit_requests();
         process_initialization_tasks();
         process_utility_requests();
@@ -985,6 +990,26 @@ auto PalworldEditorMod::restore_revive_timer_overrides(const std::string_view re
     return succeeded;
 }
 
+auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady) -> void {
+    if (!worldContextReady)
+        return;
+    if (fishingBoostDirty_.exchange(false, std::memory_order_acq_rel)) {
+        fishingBoostLedger_.set_desired(requestedFishingBoost_.load(std::memory_order_acquire));
+    }
+    if (fishingBoostLedger_.safety_disabled()) {
+        fishingBoostPhase_.store(fishing_boost::Phase::safetyDisabled, std::memory_order_release);
+        return;
+    }
+    const bool wantsOn = fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
+    const bool wantsOff = !fishingBoostLedger_.desired() && fishingBoostLedger_.has_records();
+    if (wantsOn) {
+        static_cast<void>(fishing_boost::apply(fishingBoostLedger_));
+    } else if (wantsOff) {
+        static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
+    }
+    fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+}
+
 auto PalworldEditorMod::process_game_settings_work(const bool worldContextReady) -> void {
     if (!worldContextReady) {
         return;
@@ -1150,6 +1175,8 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     gameSettingsLedger_.clear_all_desired();
     gameSettingsDirty_.store(false, std::memory_order_release);
     gameSettingsLedger_.begin_world();
+    fishingBoostLedger_.begin_world();
+    fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
                             std::memory_order_release);
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));

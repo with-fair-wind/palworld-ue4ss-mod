@@ -42,6 +42,8 @@ add_library(${TARGET} SHARED
     src/waypoint_teleport/waypoint_teleport_ui.cpp
     src/game_settings/game_settings_gateway.cpp
     src/game_settings/game_settings_ui.cpp
+    src/fishing_boost/fishing_boost_gateway.cpp
+    src/fishing_boost/fishing_boost_ui.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)

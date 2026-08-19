@@ -107,6 +107,7 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
         }
         if (ImGui::BeginTabItem("参数")) {
             render_game_settings(self);
+            render_fishing_boost(self);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("据点")) {
