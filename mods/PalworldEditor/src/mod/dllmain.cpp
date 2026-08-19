@@ -249,6 +249,8 @@ auto PalworldEditorMod::on_unreal_init() -> void {
         stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
                                  std::memory_order_release);
         static_cast<void>(reviveTimerLedger_.begin_world(worldSession_.generation()));
+        gameSettingsLedger_.begin_world();
+        gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
         reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
                                 std::memory_order_release);
         baseResourceBridge_.on_world_ready(worldSession_.generation());
@@ -283,6 +285,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         const auto worldContextReady = process_inventory_requests(deltaSeconds);
         process_stack_limit_work(worldContextReady);
         process_revive_timer_work(worldContextReady);
+        process_game_settings_work(worldContextReady);
         process_pal_edit_requests();
         process_initialization_tasks();
         process_utility_requests();
@@ -982,6 +985,31 @@ auto PalworldEditorMod::restore_revive_timer_overrides(const std::string_view re
     return succeeded;
 }
 
+auto PalworldEditorMod::process_game_settings_work(const bool worldContextReady) -> void {
+    if (!worldContextReady) {
+        return;
+    }
+    if (gameSettingsLedger_.safety_disabled()) {
+        gameSettingsPhase_.store(game_settings::RuntimePhase::safetyDisabled,
+                                 std::memory_order_release);
+        return;
+    }
+    if (!gameSettingsDirty_.exchange(false, std::memory_order_acq_rel) &&
+        !gameSettingsLedger_.has_work()) {
+        gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
+        return;
+    }
+    // 应用差量
+    if (!gameSettingsLedger_.pending_indices().empty()) {
+        static_cast<void>(game_settings::apply_overrides(gameSettingsLedger_));
+    }
+    // 恢复已清除期望的
+    if (!gameSettingsLedger_.restoring_indices().empty()) {
+        static_cast<void>(game_settings::restore_overrides(gameSettingsLedger_));
+    }
+    gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
+}
+
 auto PalworldEditorMod::publish_revive_timer_status(std::string message) -> void {
     const std::lock_guard lock(reviveTimerStatusMutex_);
     reviveTimerStatus_ = std::move(message);
@@ -1119,6 +1147,9 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     reviveTimerSettingDirty_.store(false, std::memory_order_release);
     reviveTimerRetryRequested_.store(false, std::memory_order_release);
     static_cast<void>(reviveTimerLedger_.begin_world(nextWorldGeneration));
+    gameSettingsLedger_.clear_all_desired();
+    gameSettingsDirty_.store(false, std::memory_order_release);
+    gameSettingsLedger_.begin_world();
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
                             std::memory_order_release);
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));

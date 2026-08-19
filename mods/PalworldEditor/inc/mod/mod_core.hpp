@@ -26,6 +26,7 @@
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <capture_override/capture_override_runtime.hpp>
 #include <game/pal_game.hpp>
+#include <game_settings/game_settings_gateway.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
 #include <items/item_catalog.hpp>
@@ -292,6 +293,12 @@ private:
     /** @brief 渲染标记点传送配置与运行状态。 */
     static void render_waypoint_teleport(PalworldEditorMod* self);
 
+    /** @brief 渲染游戏参数覆盖列表。 */
+    static void render_game_settings(PalworldEditorMod* self);
+
+    /** @brief 消费参数覆盖请求并执行差量事务。 */
+    auto process_game_settings_work(const bool worldContextReady) -> void;
+
     /** @brief 渲染捕获不可捕获帕鲁的两级开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_capture_override(PalworldEditorMod* self);
 
@@ -456,6 +463,13 @@ private:
     /** @brief 游戏线程发布、GUI 只读的捕获覆盖运行阶段。 */
     std::atomic<capture_override::CaptureRuntimePhase> captureRuntimePhase_{
         capture_override::CaptureRuntimePhase::off};
+
+    /** @brief 通知 EngineTick 消费最新的游戏参数覆盖。 */
+    std::atomic<bool> gameSettingsDirty_{false};
+    /** @brief 多字段参数覆盖账本；游戏线程写、GUI 读。 */
+    game_settings::OverrideLedger gameSettingsLedger_;
+    /** @brief 游戏线程发布、GUI 只读的参数覆盖运行阶段。 */
+    std::atomic<game_settings::RuntimePhase> gameSettingsPhase_{game_settings::RuntimePhase::off};
 
     /** @brief 在游戏线程执行 Palworld 技能反射读写的无 UObject 所有权网关。 */
     pal_skills::PalSkillGateway skillGateway_;

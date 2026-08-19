@@ -40,6 +40,8 @@ add_library(${TARGET} SHARED
     src/revive_timer/revive_timer_ui.cpp
     src/waypoint_teleport/waypoint_teleport_runtime.cpp
     src/waypoint_teleport/waypoint_teleport_ui.cpp
+    src/game_settings/game_settings_gateway.cpp
+    src/game_settings/game_settings_ui.cpp
 )
 
 target_include_directories(${TARGET} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
