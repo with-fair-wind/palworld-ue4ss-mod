@@ -18,6 +18,7 @@
 - **队伍复活**：按当前队伍槽位恢复帕鲁生命状态；
 - **爪钩与捕获**：默认关闭的爪钩无冷却，以及投球期间瞬时捕获限制覆盖；
 - **复活计时**：默认关闭的终端复活等待移除（可逆，关闭/切图恢复原值）；
+- **标记传送**：按键传送到最近的自定义地图标记（F7 默认，可配置门控与到达高度）；
 - **远程终端**：按键触发的跨据点终端选择，含圈内判定与战斗中禁用（默认关闭）；
 - **据点资源共享**：同公会跨据点制作/建造材料共享（默认关闭，仅单人/本地房主）。
 
@@ -56,13 +57,13 @@ cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
 提交前至少运行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-- 五个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖物品目录、技能目录与编辑、配置、资源
-  共享、远程终端、捕获覆盖和复活计时等纯值逻辑；反射调用、ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
+- 六个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖物品目录、技能目录与编辑、配置、资源
+  共享、远程终端、捕获覆盖、复活计时和标记传送等纯值逻辑；反射调用、ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
 - 游戏内应看到 `PalworldEditor loaded (v1.7.0)`；除物品、技能与世界切换回归外，逐项验证清单见
   `AGENTS.md` 的"验证一次改动"。
 
@@ -254,6 +255,7 @@ Windows SDK，允许它查询 MSVC 驱动（如
 - `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩对象的一次性冷却覆盖与原值恢复；
 - `inc/capture_override/` + `src/capture_override/`：捕获限制瞬时事务与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除与单字段恢复账本；
+- `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（配置解析、最近选择、SyncTeleport）；
 - `inc/pal_remote_palbox/` + `src/pal_remote_palbox/`：远程终端——按键上升沿状态机（300ms 防连点）
   与基地选择策略（纯值层 `remote_palbox.hpp`）+ 游戏线程运行时 `remote_palbox_runtime.cpp`；
 - `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：

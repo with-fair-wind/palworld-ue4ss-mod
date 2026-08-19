@@ -5,13 +5,12 @@
  */
 #pragma once
 
-#include <charconv>
 #include <cstddef>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <system_error>
 
+#include <common/ini_config.hpp>
 namespace pal_remote_palbox {
 
 /** @brief 远程终端运行时配置；与 remote_palbox.ini 的键一一对应。 */
@@ -24,23 +23,6 @@ struct RemotePalboxConfig {
 };
 
 inline constexpr RemotePalboxConfig kDefaultRemotePalboxConfig{};
-
-/** @brief 键位必须是合法 VK 码（1–255）。 */
-[[nodiscard]] inline auto valid_hotkey_vk(const int vk) noexcept -> bool {
-    return vk >= 1 && vk <= 255;
-}
-
-/** @brief 解析布尔值；非 true/false 回退 fallback。 */
-[[nodiscard]] inline auto parse_bool(const std::string_view value, const bool fallback) noexcept
-    -> bool {
-    if (value == "true") {
-        return true;
-    }
-    if (value == "false") {
-        return false;
-    }
-    return fallback;
-}
 
 /**
  * @brief 按行解析 `Key=Value` 配置。
@@ -62,26 +44,21 @@ inline constexpr RemotePalboxConfig kDefaultRemotePalboxConfig{};
         const auto key = line.substr(0, eq);
         const auto value = line.substr(eq + 1);
         if (key == "HotkeyVk") {
-            const auto parsed = [&]() -> std::optional<int> {
-                int result{};
-                const auto [end, error] =
-                    std::from_chars(value.data(), value.data() + value.size(), result);
-                if (error != std::errc{} || end != value.data() + value.size()) {
-                    return std::nullopt;
-                }
-                return result;
-            }();
-            if (parsed.has_value() && valid_hotkey_vk(*parsed)) {
+            const auto parsed = pal_game::parse_ini_int(value);
+            if (parsed.has_value() && pal_game::valid_hotkey_vk(*parsed)) {
                 config.hotkeyVk = *parsed;
             }
         } else if (key == "DisableWhileMounted") {
-            config.disableWhileMounted = parse_bool(value, config.disableWhileMounted);
+            config.disableWhileMounted =
+                pal_game::parse_ini_bool(value, config.disableWhileMounted);
         } else if (key == "DisableInDungeon") {
-            config.disableInDungeon = parse_bool(value, config.disableInDungeon);
+            config.disableInDungeon = pal_game::parse_ini_bool(value, config.disableInDungeon);
         } else if (key == "OnlyInsideBaseCircle") {
-            config.onlyInsideBaseCircle = parse_bool(value, config.onlyInsideBaseCircle);
+            config.onlyInsideBaseCircle =
+                pal_game::parse_ini_bool(value, config.onlyInsideBaseCircle);
         } else if (key == "DisableDuringCombat") {
-            config.disableDuringCombat = parse_bool(value, config.disableDuringCombat);
+            config.disableDuringCombat =
+                pal_game::parse_ini_bool(value, config.disableDuringCombat);
         }
         // 未知键忽略。
     }

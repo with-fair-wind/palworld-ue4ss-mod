@@ -17,6 +17,7 @@
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
+#include <Unreal/UnrealCoreStructs.hpp>
 
 namespace pal_game {
 /** @brief 主玩家背包数据对象的 Unreal 类名。 */
@@ -212,5 +213,107 @@ template <typename T>
         separator == std::wstring::npos ? fullName : fullName.substr(separator + 1);
     return RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(nullptr, nullptr,
                                                                               objectPath.c_str());
+}
+
+/**
+ * @brief 解析本地玩家控制器（`PalUtility:GetLocalPalPlayerController`）。
+ * @param[in] worldContext 任意世界内对象（通常为主背包数据对象）。
+ * @return 签名精确匹配时的本地控制器；世界未就绪或签名漂移时为空。
+ */
+[[nodiscard]] inline auto local_player_controller(RC::Unreal::UObject* worldContext)
+    -> RC::Unreal::UObject* {
+    using namespace RC::Unreal;
+    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const function =
+        utility == nullptr ? nullptr
+                           : utility->GetFunctionByNameInChain(STR("GetLocalPalPlayerController"));
+    auto* const input = function == nullptr ? nullptr
+                                            : CastField<FObjectPropertyBase>(function->FindProperty(
+                                                  FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const output = function == nullptr
+                             ? nullptr
+                             : CastField<FObjectPropertyBase>(
+                                   function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    if (!is_valid(utility) || !is_valid(worldContext) || !has_exact_parameter_count(function, 2) ||
+        !is_input_parameter(input) || !is_return_parameter(output)) {
+        return nullptr;
+    }
+    FunctionParams params{function};
+    input->SetObjectPropertyValue(input->ContainerPtrToValuePtr<void>(params.data()), worldContext);
+    utility->ProcessEvent(function, params.data());
+    auto* const controller =
+        output->GetObjectPropertyValue(output->ContainerPtrToValuePtr<void>(params.data()));
+    return is_valid(controller) ? controller : nullptr;
+}
+
+/**
+ * @brief 解析控制器当前 Pawn（属性优先，UFunction 兜底）。
+ * @details Palworld 上 `GetPawn` 的 UFunction 反射不可靠（GetFunctionByNameInChain 返回
+ *          空），`AController::Pawn` 属性路径优先；失败时回退无参 UFunction 调用。
+ */
+[[nodiscard]] inline auto player_pawn(RC::Unreal::UObject* controller) -> RC::Unreal::UObject* {
+    using namespace RC::Unreal;
+    if (!is_valid(controller)) {
+        return nullptr;
+    }
+    auto* const pawnProperty =
+        CastField<FObjectPropertyBase>(controller->GetPropertyByNameInChain(STR("Pawn")));
+    if (pawnProperty != nullptr) {
+        auto* const pawn = pawnProperty->GetObjectPropertyValue(
+            pawnProperty->ContainerPtrToValuePtr<void>(controller));
+        if (is_valid(pawn)) {
+            return pawn;
+        }
+    }
+    if (auto* const pawn = invoke<UObject*>(controller, STR("K2_GetPawn")).value_or(nullptr);
+        is_valid(pawn)) {
+        return pawn;
+    }
+    return invoke<UObject*>(controller, STR("GetPawn")).value_or(nullptr);
+}
+
+/**
+ * @brief 本地玩家是否处于战斗模式（`APalCharacter::bIsBattleMode` 属性）。
+ * @details Palworld 1.0 没有 IsInCombat/IsInBattle UFunction；战斗模式由玩家 Pawn 上的
+ *          属性维护。Pawn 不可解析或属性缺失时按"未在战斗"处理。
+ */
+[[nodiscard]] inline auto player_in_battle_mode(RC::Unreal::UObject* controller) -> bool {
+    using namespace RC::Unreal;
+    auto* const pawn = player_pawn(controller);
+    if (!is_valid(pawn)) {
+        return false;
+    }
+    auto* const property =
+        CastField<FBoolProperty>(pawn->GetPropertyByNameInChain(STR("bIsBattleMode")));
+    return property != nullptr && property->GetPropertyValueInContainer(pawn);
+}
+
+/**
+ * @brief 读取 Actor 位置（`K2_GetActorLocation` 优先，`GetActorLocation` 兜底）。
+ * @param[out] output 经 CopyCompleteValue 拷出的 FVector；不依赖引擎数值宽度。
+ * @retval true 成功调用任一位置 UFunction 并拷贝返回值。
+ * @note 不尝试 GetLocation：Palworld 中该函数只存在于防御建筑模型类。
+ */
+[[nodiscard]] inline auto read_actor_location(RC::Unreal::UObject* object,
+                                              RC::Unreal::FVector& output) -> bool {
+    using namespace RC::Unreal;
+    for (const wchar_t* functionName : {L"K2_GetActorLocation", L"GetActorLocation"}) {
+        auto* const function =
+            is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;
+        auto* const returnProperty =
+            function == nullptr ? nullptr
+                                : CastField<FStructProperty>(function->GetReturnProperty());
+        if (!has_exact_parameter_count(function, 1) || !is_return_parameter(returnProperty) ||
+            returnProperty->GetElementSize() != sizeof(FVector)) {
+            continue;
+        }
+        FunctionParams params{function};
+        object->ProcessEvent(function, params.data());
+        returnProperty->CopyCompleteValue(
+            &output, returnProperty->ContainerPtrToValuePtr<void>(params.data()));
+        return true;
+    }
+    return false;
 }
 }  // namespace pal_game

@@ -14,9 +14,8 @@ void PalworldEditorMod::render_revive_timer(PalworldEditorMod* self) {
     ImGui::SeparatorText("终端复活计时");
     bool enabled = self->requestedReviveTimerRemove_.load(std::memory_order_acquire);
     const auto phase = self->reviveTimerPhase_.load(std::memory_order_acquire);
-    const auto safetyDisabled =
-        phase == revive_timer::ReviveTimerRuntimePhase::safetyDisabled ||
-        self->reviveTimerLedger_.safety_disabled();
+    const auto safetyDisabled = phase == revive_timer::ReviveTimerRuntimePhase::safetyDisabled ||
+                                self->reviveTimerLedger_.safety_disabled();
     ImGui::BeginDisabled(safetyDisabled);
     if (ImGui::Checkbox("移除帕鲁终端复活等待", &enabled)) {
         self->requestedReviveTimerRemove_.store(enabled, std::memory_order_release);

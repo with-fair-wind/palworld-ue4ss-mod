@@ -4,14 +4,13 @@
  * @details 复用 pal_stats 的 PalUtility:GetGameSetting 反射路径；所有指针仅在
  *          当前游戏线程调用内使用，跨帧只保存原值 float。
  */
-#include <revive_timer/revive_timer_gateway.hpp>
-
 #include <utility>
 
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/game_reflection.hpp>
+#include <revive_timer/revive_timer_gateway.hpp>
 
 namespace revive_timer {
 using namespace RC;
@@ -48,8 +47,7 @@ struct ReviveTimerAccess {
     }
     auto* const contextProperty = CastField<FObjectPropertyBase>(
         function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const resultProperty =
-        CastField<FObjectPropertyBase>(function->GetReturnProperty());
+    auto* const resultProperty = CastField<FObjectPropertyBase>(function->GetReturnProperty());
     if (!pal_game::has_exact_parameter_count(function, 2) ||
         !pal_game::is_input_parameter(contextProperty) ||
         !pal_game::is_return_parameter(resultProperty)) {

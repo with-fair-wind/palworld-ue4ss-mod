@@ -14,11 +14,11 @@ namespace revive_timer {
 
 /** @brief 一次覆盖或恢复操作的终止状态。 */
 enum class ReviveTimerGatewayStatus : std::uint8_t {
-    succeeded,       /**< 操作完成并重读验证成功，或无需恢复。 */
+    succeeded,         /**< 操作完成并重读验证成功，或无需恢复。 */
     targetUnavailable, /**< 世界上下文或游戏设置实例暂不可用；可重试。 */
-    preflightFailed, /**< 当前游戏版本缺少所需函数或字段，未执行写入。 */
-    verifiedRollback, /**< 写入验证失败，但原值已经恢复并重读确认。 */
-    rollbackFailed,  /**< 写入验证失败且原值恢复无法确认。 */
+    preflightFailed,   /**< 当前游戏版本缺少所需函数或字段，未执行写入。 */
+    verifiedRollback,  /**< 写入验证失败，但原值已经恢复并重读确认。 */
+    rollbackFailed,    /**< 写入验证失败且原值恢复无法确认。 */
 };
 
 /** @brief 把反射网关结果收敛为领域账本的结果分类。 */

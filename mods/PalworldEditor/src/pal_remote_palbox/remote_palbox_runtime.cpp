@@ -67,30 +67,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return UObjectGlobals::FindFirstOf(className);
 }
 
-/** @brief 本地玩家控制器（镜像资源分享的 PalUtility 调用模式）。 */
+/** @brief 本地玩家控制器：已提取为 pal_game 公共原语，此处委托保持本模块引用不变。 */
 [[nodiscard]] auto local_player_controller(UObject* worldContext) -> UObject* {
-    auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
-    auto* function = utility == nullptr
-                         ? nullptr
-                         : utility->GetFunctionByNameInChain(STR("GetLocalPalPlayerController"));
-    auto* input = function == nullptr ? nullptr
-                                      : CastField<FObjectPropertyBase>(function->FindProperty(
-                                            FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* output = function == nullptr ? nullptr
-                                       : CastField<FObjectPropertyBase>(function->FindProperty(
-                                             FName(STR("ReturnValue"), FNAME_Find)));
-    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !pal_game::has_exact_parameter_count(function, 2) || !pal_game::is_input_parameter(input) ||
-        !pal_game::is_return_parameter(output)) {
-        return nullptr;
-    }
-    pal_game::FunctionParams params{function};
-    input->SetObjectPropertyValue(input->ContainerPtrToValuePtr<void>(params.data()), worldContext);
-    utility->ProcessEvent(function, params.data());
-    auto* const controller =
-        output->GetObjectPropertyValue(output->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(controller) ? controller : nullptr;
+    return pal_game::local_player_controller(worldContext);
 }
 
 /** @brief 获取 Palworld 世界设置对象（PalUtility::GetGameSetting）。
@@ -171,49 +150,14 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return output > 0.0F;
 }
 
-/** @brief 读取 Actor 位置（K2_GetActorLocation/GetActorLocation 均尝试，镜像 AnywherePalbox）。
- *  @note 不尝试 GetLocation：Palworld 中该函数只存在于防御建筑模型类，且 GetFunctionByNameInChain
- *        无法预期返回类型，CopyCompleteValue 按 struct 定义拷贝可能越界。 */
+/** @brief 读取 Actor 位置：已提取为 pal_game::read_actor_location，此处委托。 */
 [[nodiscard]] auto read_location(UObject* object, FVector& output) -> bool {
-    for (const wchar_t* functionName : {L"K2_GetActorLocation", L"GetActorLocation"}) {
-        auto* function =
-            pal_game::is_valid(object) ? object->GetFunctionByNameInChain(functionName) : nullptr;
-        auto* const returnProperty =
-            function == nullptr ? nullptr
-                                : CastField<FStructProperty>(function->GetReturnProperty());
-        if (!pal_game::has_exact_parameter_count(function, 1) ||
-            !pal_game::is_return_parameter(returnProperty) ||
-            returnProperty->GetElementSize() != sizeof(FVector)) {
-            continue;
-        }
-        pal_game::FunctionParams params{function};
-        object->ProcessEvent(function, params.data());
-        returnProperty->CopyCompleteValue(
-            &output, returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-        return true;
-    }
-    return false;
+    return pal_game::read_actor_location(object, output);
 }
 
-/** @brief 本地玩家的 Pawn（AController::Pawn 属性优先，GetPawn() UFunction 兜底）。
- *  @details 镜像 AnywherePalbox 的 GetPlayer：Palworld 上 GetPawn 的 UFunction 反射不可靠
- *           （GetFunctionByNameInChain 返回空），属性路径优先。 */
+/** @brief 本地玩家的 Pawn：已提取为 pal_game 公共原语（属性优先 + K2_GetPawn 兜底）。 */
 [[nodiscard]] auto get_player_pawn(UObject* controller) -> UObject* {
-    if (!pal_game::is_valid(controller)) {
-        return nullptr;
-    }
-    // 1) Pawn 属性（AController::Pawn）
-    auto* const pawnProperty = controller->GetPropertyByNameInChain(STR("Pawn"));
-    auto* const pawnObjectProperty = CastField<FObjectPropertyBase>(pawnProperty);
-    if (pawnObjectProperty != nullptr) {
-        auto* const pawnValue = pawnObjectProperty->GetObjectPropertyValue(
-            pawnObjectProperty->ContainerPtrToValuePtr<void>(controller));
-        if (pal_game::is_valid(pawnValue)) {
-            return pawnValue;
-        }
-    }
-    // 2) GetPawn() UFunction
-    return pal_game::invoke<UObject*>(controller, STR("GetPawn")).value_or(nullptr);
+    return pal_game::player_pawn(controller);
 }
 
 /** @brief 玩家当前位置（Pawn → K2_GetActorLocation）。 */
@@ -225,17 +169,9 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return read_location(pawn, output);
 }
 
-/** @brief 本地玩家是否处于战斗模式（APalCharacter::bIsBattleMode 属性，游戏权威）。
- *  @details Palworld 1.0 上 IsInCombat/IsInBattle 等 UFunction 名不存在；战斗模式由
- *           APalCharacter 属性维护（受攻击/攻击后置真，脱离战斗复原），玩家 Pawn 直接继承。 */
+/** @brief 本地玩家是否处于战斗模式：已提取为 pal_game 公共原语，此处委托。 */
 [[nodiscard]] auto player_in_battle_mode(UObject* controller) -> bool {
-    auto* const pawn = get_player_pawn(controller);
-    if (pawn == nullptr) {
-        return false;
-    }
-    auto* const property = pawn->GetPropertyByNameInChain(STR("bIsBattleMode"));
-    auto* const boolProperty = CastField<FBoolProperty>(property);
-    return boolProperty != nullptr && boolProperty->GetPropertyValueInContainer(pawn);
+    return pal_game::player_in_battle_mode(controller);
 }
 
 /** @brief 读取基地模型中心（UPalBaseCampModel 的 Transform.Translation）。
