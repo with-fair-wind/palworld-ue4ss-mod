@@ -33,8 +33,6 @@ struct WaypointTeleportConfig {
     /**< 传送后自动删除所用标记（参考实现默认行为）：到达后脚下的标记距离恒为 0，
      *    会一直霸占"最近"选择，不删除则无法连续传送到下一个标记。 */
     bool deleteMarkerAfterTeleport{true};
-    /**< 已弃用：地图点击传送因 UE4SS script hook 安全问题移除。键保留以兼容旧 ini。 */
-    bool teleportFromMapClick{false};
     /**< 到达高度偏移（厘米）。默认 0 = 使用标记原始 Z，与参考 mod 的已验证行为一致；
      *    高空偏移未经游戏内验证（游戏内部落地解析可能失败导致崩溃）。 */
     float arrivalHeightOffset{0.0F};
