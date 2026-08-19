@@ -193,13 +193,35 @@ auto call_remove_custom_icon(UObject* map, UObject* icon) -> void {
 }
 
 /**
+ * @brief 把图标控件收起（UWidget:SetVisibility(ESlateVisibility::Collapsed)）。
+ * @details 地图打开（活跃 Slate 树）时，RemoveFromParent 与 TMap 移除实测会崩溃；
+ *          收起是属性级原生调用，不做任何结构变更，图标立即从地图消失且跨重开保持。
+ */
+auto call_collapse_icon(UObject* icon) -> bool {
+    auto* const function =
+        pal_game::is_valid(icon) ? icon->GetFunctionByNameInChain(STR("SetVisibility")) : nullptr;
+    auto* const parameter = function == nullptr ? nullptr
+                                                : CastField<FByteProperty>(function->FindProperty(
+                                                      FName(STR("NewVisibility"), FNAME_Find)));
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_input_parameter(parameter) || function->GetReturnProperty() != nullptr) {
+        return false;
+    }
+    pal_game::FunctionParams params{function};
+    parameter->SetPropertyValueInContainer(params.data(),
+                                           static_cast<std::uint8_t>(1));  // Collapsed
+    icon->ProcessEvent(function, params.data());
+    return true;
+}
+
+/**
  * @brief 从地图控件（WBP_Map_Base_C）的 CustomMarkerMap 移除标记图标。
  * @details RemoveLocalCustomMarker 只清 LocationManager 数据层；地图控件的图标
  *          TMap 是独立容器，不移除则地图上标记继续显示（参考实现两层都删）。
  *          每次传送的按键请求路径才执行一次；best-effort，控件缺失或结构
  *          不符时跳过，不影响数据层删除结果。
- * @note 每步前后输出 Verbose 日志：地图打开状态下传送曾触发崩溃，日志可精确定位
- *       崩溃发生在哪一步（RemoveCustomIcon / RemoveFromParent / RemoveAt 之后）。
+ * @note 地图打开时只收起图标（属性级），关闭时才执行完整移除（后者已多轮实测稳定）；
+ *       每步输出 Verbose 日志便于回归定位。
  */
 auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
     std::vector<UObject*> maps;
@@ -251,8 +273,20 @@ auto remove_map_icons(const std::array<std::uint32_t, 4>& guid) -> void {
         }
         auto* const icon = valueProperty->GetObjectPropertyValue(static_cast<void*>(
             static_cast<std::byte*>(scriptMap->GetData(*matchIndex, layout)) + layout.ValueOffset));
+        // 地图打开（活跃 Slate 树）时禁止结构手术：RemoveFromParent/RemoveAt 在该状态
+        // 实测崩溃；改为收起图标（属性级），条目留在控件 TMap 中由关闭后的下次清理或
+        // 控件重建消化。地图关闭时保持已验证稳定的完整移除序列。
+        // IsVisible 解析失败时按"打开"处理（保守：宁可只收起也不做结构手术）。
+        const bool mapVisible = pal_game::invoke<bool>(map, STR("IsVisible")).value_or(true);
+        if (mapVisible) {
+            const bool collapsed = pal_game::is_valid(icon) && call_collapse_icon(icon);
+            Output::send<LogLevel::Verbose>(
+                STR("PalworldEditor: live map widget, icon collapsed={} (no structural removal)\n"),
+                collapsed);
+            continue;
+        }
         Output::send<LogLevel::Verbose>(
-            STR("PalworldEditor: marker entry found in live map widget, icon {}\n"),
+            STR("PalworldEditor: marker entry found in idle map widget, icon {}\n"),
             static_cast<const void*>(icon));
         if (pal_game::is_valid(icon)) {
             call_remove_custom_icon(map, icon);
