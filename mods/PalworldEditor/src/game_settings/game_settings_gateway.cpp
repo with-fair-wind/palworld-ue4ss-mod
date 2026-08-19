@@ -121,7 +121,7 @@ auto apply_overrides(OverrideLedger& ledger) -> GatewayStatus {
         const OverrideValue original = read_value(property, setting);
         const OverrideValue& desired = *ledger.desired(index);
         if (values_equal(original, desired)) {
-            ledger.record_applied(index, original);
+            ledger.record_applied(index, original, desired);
             continue;
         }
         if (!write_value(property, setting, desired) ||
@@ -134,7 +134,7 @@ auto apply_overrides(OverrideLedger& ledger) -> GatewayStatus {
             }
             return GatewayStatus::verificationFailed;
         }
-        ledger.record_applied(index, original);
+        ledger.record_applied(index, original, desired);
     }
     return GatewayStatus::succeeded;
 }

@@ -52,7 +52,7 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 
 # 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests PalworldEditorGameSettingsTests
 ctest --test-dir build --output-on-failure
 
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
@@ -70,13 +70,13 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 提交前至少执行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests PalworldEditorGameSettingsTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-六个测试 target/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、配置、资源池、能力
-判断、恢复账本、远程终端、捕获覆盖、复活计时与标记传送决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
+七个测试 target/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、配置、资源池、能力
+判断、恢复账本、远程终端、捕获覆盖、复活计时、标记传送与游戏参数覆盖决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
 游戏内端到端验证。
 
 构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.7.0)`；打开
@@ -118,6 +118,12 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 复活计时移除还应验证：默认关闭且关闭时零写入；开启后终端倒地帕鲁立即复活（PalBoxReviveTime=0）；
 关闭开关、切图与热卸载后原值恢复且重读一致；设置实例被世界重建时恢复按"无需恢复"处理而不是报错；
 目标暂不可用时等待重试，字段缺失时本世界安全停用。
+
+游戏参数覆盖还应验证：默认全部未勾选且零写入；勾选后状态行显示"已写入 N 项"；**勾选后再修改数值必须
+重新写入**（applied 差量语义，UI 输入的新值立即反映到游戏行为）；同一值重复输入不重复写入；取消勾选后
+恢复原值且重读一致；出现率/个体值类参数只影响之后新生成的野生帕鲁，据点半径需重进存档；任一字段缺失
+或类型不匹配时本世界安全停用（红字提示），切图/卸载按账本恢复原值；钓鱼圣手开启后钓鱼无需小游戏直接
+成功，关闭后恢复原参数。
 
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
 过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；默认传送后自动删除所用标记（DeleteMarkerAfterTeleport，到达标记距离恒为 0 会霸占最近选择，不删除无法连续传送），须验证删除后地图图标同步消失、开关关闭时标记保留；
@@ -302,6 +308,9 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 - `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩冷却覆盖与恢复；
 - `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除的单字段可逆覆盖与恢复账本；
+- `inc/game_settings/` + `src/game_settings/`：`UPalGameSetting` 多参数可逆覆盖——目录化规格、
+  applied 差量账本（改值即重写、原值只记首次）、GUI/游戏线程互斥锁共享账本；
+- `inc/fishing_boost/` + `src/fishing_boost/`：钓鱼圣手——`CatchBattleParameter` 四字段可逆覆盖；
 - `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（CustomMarkers 读取
   + 最近标记纯值选择 + 原生 SyncTeleport）；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿

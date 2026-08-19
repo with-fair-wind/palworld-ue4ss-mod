@@ -82,35 +82,39 @@ struct OverrideSpec {
  */
 inline constexpr std::array kOverrideCatalog{
     // ── 队伍与个体 ──
-    OverrideSpec{Category::party, "OtomoSlotNum", "队伍槽位", "同时出战帕鲁数量", 5,
+    OverrideSpec{Category::party, "OtomoSlotNum", "队伍槽位", "同时出战帕鲁数量（默认 5）", 5,
                  std::int32_t{1}, std::int32_t{10}},
     OverrideSpec{Category::party, "RarePal_AppearanceProbability", "稀有帕鲁出现率",
-                 "闪光帕鲁出现概率（默认 0.02 = 2%）", 1.0F, 0.0F, 1.0F},
+                 "闪光帕鲁出现概率（默认 2%）；仅影响之后新生成的野生帕鲁", 1.0F, 0.0F, 1.0F},
     OverrideSpec{Category::party, "PredatorPal_AppearanceProbability", "捕食者帕鲁出现率",
-                 "捕食者帕鲁出现概率", 0.5F, 0.0F, 1.0F},
-    OverrideSpec{Category::party, "RarePal_LevelAdd", "稀有帕鲁等级加成", "闪光帕鲁额外等级", 10,
-                 std::int32_t{0}, std::int32_t{50}},
+                 "捕食者帕鲁出现概率；仅影响之后新生成的野生帕鲁", 0.5F, 0.0F, 1.0F},
+    OverrideSpec{Category::party, "RarePal_LevelAdd", "稀有帕鲁等级加成",
+                 "闪光帕鲁额外等级；仅影响之后新生成的野生帕鲁", 10, std::int32_t{0},
+                 std::int32_t{50}},
     OverrideSpec{Category::party, "BossOrRarePal_TalentMin", "Boss/稀有个体值下限",
-                 "Boss 和稀有帕鲁的最低个体值", 50, std::int32_t{0}, std::int32_t{100}},
+                 "Boss 和稀有帕鲁的最低个体值；仅影响之后新生成的个体", 50, std::int32_t{0},
+                 std::int32_t{100}},
     // ── 进度与浓缩 ──
     OverrideSpec{Category::progression, "CharacterRankUpRequiredNumDefault", "浓缩消耗帕鲁数",
-                 "升星默认消耗的同种帕鲁数量", 1, std::int32_t{1}, std::int32_t{100}},
+                 "升星默认消耗的同种帕鲁数量；下次浓缩时生效", 1, std::int32_t{1},
+                 std::int32_t{100}},
     OverrideSpec{Category::progression, "CharacterMaxRank", "最大星级", "浓缩可达最大星级", 5,
                  std::int32_t{1}, std::int32_t{10}},
-    OverrideSpec{Category::progression, "CharacterMaxLevel", "最大等级", "角色最大等级", 100,
+    OverrideSpec{Category::progression, "CharacterMaxLevel", "最大等级", "角色最大等级上限", 100,
                  std::int32_t{1}, std::int32_t{200}},
     // ── 世界与时间 ──
     OverrideSpec{Category::world, "PalWorldMinutes_RealOneMinute", "游戏时间流速",
-                 "现实 1 分钟 = 游戏多少分钟（默认 60）", 120, std::int32_t{1}, std::int32_t{1440}},
-    OverrideSpec{Category::world, "BaseCampAreaRange", "据点半径(cm)", "据点覆盖半径", 5000.0F,
-                 1000.0F, 20000.0F},
+                 "现实 1 分钟 = 游戏多少分钟（默认 60）；由时间系统按新流速继续推进", 120,
+                 std::int32_t{1}, std::int32_t{1440}},
+    OverrideSpec{Category::world, "BaseCampAreaRange", "据点半径(cm)",
+                 "据点覆盖半径；已建据点需重进存档后体现", 5000.0F, 1000.0F, 20000.0F},
     // ── 便利性 ──
     OverrideSpec{Category::qualityOfLife, "ReturnOtomoPalCoolTime", "收回帕鲁冷却",
-                 "收回出战帕鲁的冷却时间（秒）", 0.0F, 0.0F, 30.0F},
+                 "收回出战帕鲁的冷却时间（秒）；下次收回时生效", 0.0F, 0.0F, 30.0F},
     OverrideSpec{Category::qualityOfLife, "ConsumStamina_PalThrow", "投掷帕鲁消耗体力",
-                 "投出帕鲁球消耗的体力", 0, std::int32_t{0}, std::int32_t{100}},
+                 "投出帕鲁球消耗的体力；下次投掷时生效", 0, std::int32_t{0}, std::int32_t{100}},
     OverrideSpec{Category::qualityOfLife, "WorkAmountBySecForPlayer", "玩家工作速度",
-                 "玩家每秒工作量倍率", 10.0F, 0.1F, 100.0F},
+                 "玩家每秒工作量倍率；进行中的工作即时生效", 10.0F, 0.1F, 100.0F},
 };
 
 /** @brief 目录大小常量。 */
@@ -161,11 +165,22 @@ public:
         return index < kOverrideCount ? desired_[index] : std::nullopt;
     }
 
-    /** @brief 记录一次成功写入的原值。 */
-    auto record_applied(const std::size_t index, const OverrideValue& original) -> void {
-        if (index < kOverrideCount) {
-            originals_[index] = original;
+    /**
+     * @brief 记录一次成功写入。
+     * @param[in] index 参数下标。
+     * @param[in] preWriteValue 本次写入前的字段值（回滚与首次原值快照）。
+     * @param[in] appliedValue 本次实际写入的期望值。
+     * @note 原值只在首次写入时记录，后续改值不覆盖，保证恢复回到游戏原生值。
+     */
+    auto record_applied(const std::size_t index, const OverrideValue& preWriteValue,
+                        const OverrideValue& appliedValue) -> void {
+        if (index >= kOverrideCount) {
+            return;
         }
+        if (!originals_[index].has_value()) {
+            originals_[index] = preWriteValue;
+        }
+        applied_[index] = appliedValue;
     }
 
     /** @return 某参数的原值；无记录返回空。 */
@@ -177,6 +192,7 @@ public:
     auto clear_record(const std::size_t index) -> void {
         if (index < kOverrideCount) {
             originals_[index].reset();
+            applied_[index].reset();
         }
     }
 
@@ -184,6 +200,9 @@ public:
     auto clear_all_records() -> void {
         for (auto& o : originals_) {
             o.reset();
+        }
+        for (auto& a : applied_) {
+            a.reset();
         }
     }
 
@@ -198,11 +217,12 @@ public:
         return result;
     }
 
-    /** @return 当前有期望但尚未写入的参数下标列表（期望有值但无原值记录）。 */
+    /** @return 期望已设置且尚未写入到当前值的参数（首次写入或修改后重写）。 */
     [[nodiscard]] auto pending_indices() const -> std::vector<std::size_t> {
         std::vector<std::size_t> result;
         for (std::size_t i{}; i < kOverrideCount; ++i) {
-            if (desired_[i].has_value() && !originals_[i].has_value()) {
+            if (desired_[i].has_value() &&
+                (!applied_[i].has_value() || *applied_[i] != *desired_[i])) {
                 result.push_back(i);
             }
         }
@@ -249,9 +269,35 @@ public:
         return active_indices().empty() ? RuntimePhase::off : RuntimePhase::active;
     }
 
+    /** @brief UI 状态行使用的纯值汇总。 */
+    struct StatusSummary {
+        std::size_t desiredCount{};   /**< 已设置期望的参数数。 */
+        std::size_t appliedCount{};   /**< 已写入且与期望一致的参数数。 */
+        std::size_t restoringCount{}; /**< 等待恢复原值的参数数。 */
+    };
+
+    /** @brief 单次调用取得 UI 汇总，便于持锁快照。 */
+    [[nodiscard]] auto status_summary() const -> StatusSummary {
+        StatusSummary summary{};
+        for (std::size_t i{}; i < kOverrideCount; ++i) {
+            if (desired_[i].has_value()) {
+                ++summary.desiredCount;
+            }
+            if (desired_[i].has_value() && applied_[i].has_value() &&
+                *applied_[i] == *desired_[i]) {
+                ++summary.appliedCount;
+            }
+            if (!desired_[i].has_value() && originals_[i].has_value()) {
+                ++summary.restoringCount;
+            }
+        }
+        return summary;
+    }
+
 private:
     std::array<std::optional<OverrideValue>, kOverrideCount> desired_{};
     std::array<std::optional<OverrideValue>, kOverrideCount> originals_{};
+    std::array<std::optional<OverrideValue>, kOverrideCount> applied_{};
     bool safetyDisabled_{};
 };
 

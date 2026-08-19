@@ -473,8 +473,10 @@ private:
 
     /** @brief 通知 EngineTick 消费最新的游戏参数覆盖。 */
     std::atomic<bool> gameSettingsDirty_{false};
-    /** @brief 多字段参数覆盖账本；游戏线程写、GUI 读。 */
+    /** @brief 多字段参数覆盖账本；GUI 线程与游戏线程共享，经下方互斥锁访问。 */
     game_settings::OverrideLedger gameSettingsLedger_;
+    /** @brief 保护 gameSettingsLedger_ 的 GUI 读写与 EngineTick 消费互斥。 */
+    std::mutex gameSettingsLedgerMutex_;
     /** @brief 游戏线程发布、GUI 只读的参数覆盖运行阶段。 */
     std::atomic<game_settings::RuntimePhase> gameSettingsPhase_{game_settings::RuntimePhase::off};
 

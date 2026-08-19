@@ -3,6 +3,7 @@
  * @brief 游戏参数覆盖的 ImGui 列表渲染。
  */
 #include <cstddef>
+#include <mutex>
 #include <variant>
 
 #include <imgui.h>
@@ -19,6 +20,23 @@ void PalworldEditorMod::render_game_settings(PalworldEditorMod* self) {
         ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F),
                            "字段布局或写入验证失败；已安全停用，切换开关不会绕过。");
         return;
+    }
+
+    // 账本与 EngineTick 消费共享；渲染期间持锁做一致快照（仅本面板打开时每帧短暂持有）。
+    const std::lock_guard lock(self->gameSettingsLedgerMutex_);
+    const auto summary = self->gameSettingsLedger_.status_summary();
+    if (summary.desiredCount > 0) {
+        if (summary.appliedCount < summary.desiredCount) {
+            ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.3F, 1.0F),
+                               "已写入 %zu/%zu 项，其余等待下一次尝试", summary.appliedCount,
+                               summary.desiredCount);
+        } else {
+            ImGui::TextColored(ImVec4(0.4F, 0.9F, 0.5F, 1.0F), "已写入 %zu 项",
+                               summary.appliedCount);
+        }
+    }
+    if (summary.restoringCount > 0) {
+        ImGui::TextDisabled("正在恢复 %zu 项原值", summary.restoringCount);
     }
 
     // 目录按分类排序：每个分类只创建一个 TreeNode，折叠时整组跳过。

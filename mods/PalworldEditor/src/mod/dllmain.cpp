@@ -249,12 +249,13 @@ auto PalworldEditorMod::on_unreal_init() -> void {
         stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
                                  std::memory_order_release);
         static_cast<void>(reviveTimerLedger_.begin_world(worldSession_.generation()));
-        gameSettingsLedger_.begin_world();
+        {
+            const std::lock_guard lock(gameSettingsLedgerMutex_);
+            gameSettingsLedger_.begin_world();
+            gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
+        }
         fishingBoostLedger_.begin_world();
         fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
-        fishingBoostLedger_.begin_world();
-        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
-        gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
         reviveTimerPhase_.store(reviveTimerLedger_.phase(worldSession_.generation()),
                                 std::memory_order_release);
         baseResourceBridge_.on_world_ready(worldSession_.generation());
@@ -355,6 +356,19 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
             static_cast<void>(restore_revive_timer_overrides(reason));
         },
         STR("PalworldEditor: revive timer could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this, reason] {
+            const std::lock_guard lock(gameSettingsLedgerMutex_);
+            gameSettingsLedger_.clear_all_desired();
+            static_cast<void>(game_settings::restore_overrides(gameSettingsLedger_));
+        },
+        STR("PalworldEditor: game settings could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this] {
+            fishingBoostLedger_.set_desired(false);
+            static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
+        },
+        STR("PalworldEditor: fishing values could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
 }
 
@@ -1014,21 +1028,26 @@ auto PalworldEditorMod::process_game_settings_work(const bool worldContextReady)
     if (!worldContextReady) {
         return;
     }
-    if (gameSettingsLedger_.safety_disabled()) {
-        gameSettingsPhase_.store(game_settings::RuntimePhase::safetyDisabled,
-                                 std::memory_order_release);
-        return;
-    }
-    if (!gameSettingsDirty_.exchange(false, std::memory_order_acq_rel) &&
-        !gameSettingsLedger_.has_work()) {
+    bool workRequired = false;
+    {
+        const std::lock_guard lock(gameSettingsLedgerMutex_);
+        if (gameSettingsLedger_.safety_disabled()) {
+            gameSettingsPhase_.store(game_settings::RuntimePhase::safetyDisabled,
+                                     std::memory_order_release);
+            return;
+        }
+        static_cast<void>(gameSettingsDirty_.exchange(false, std::memory_order_acq_rel));
+        workRequired = gameSettingsLedger_.has_work();
         gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
+    }
+    if (!workRequired) {
         return;
     }
-    // 应用差量
+    // 应用差量并恢复已清除期望的项；整个事务期间持有账本锁。
+    const std::lock_guard lock(gameSettingsLedgerMutex_);
     if (!gameSettingsLedger_.pending_indices().empty()) {
         static_cast<void>(game_settings::apply_overrides(gameSettingsLedger_));
     }
-    // 恢复已清除期望的
     if (!gameSettingsLedger_.restoring_indices().empty()) {
         static_cast<void>(game_settings::restore_overrides(gameSettingsLedger_));
     }
@@ -1172,9 +1191,18 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     reviveTimerSettingDirty_.store(false, std::memory_order_release);
     reviveTimerRetryRequested_.store(false, std::memory_order_release);
     static_cast<void>(reviveTimerLedger_.begin_world(nextWorldGeneration));
-    gameSettingsLedger_.clear_all_desired();
-    gameSettingsDirty_.store(false, std::memory_order_release);
-    gameSettingsLedger_.begin_world();
+    // 游戏设置与钓鱼参数可能挂在跨世界存活的数据资产上；切图前按账本尽力恢复原值，
+    // 实例已不可解析时由新世界实例的原生值接管。
+    {
+        const std::lock_guard lock(gameSettingsLedgerMutex_);
+        gameSettingsLedger_.clear_all_desired();
+        static_cast<void>(game_settings::restore_overrides(gameSettingsLedger_));
+        gameSettingsDirty_.store(false, std::memory_order_release);
+        gameSettingsLedger_.begin_world();
+        gameSettingsPhase_.store(gameSettingsLedger_.phase(), std::memory_order_release);
+    }
+    fishingBoostLedger_.set_desired(false);
+    static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
     fishingBoostLedger_.begin_world();
     fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),

@@ -129,6 +129,19 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME PalworldEditor.WaypointTeleport
         COMMAND PalworldEditorWaypointTeleportTests)
+
+    add_executable(PalworldEditorGameSettingsTests
+        tests/game_settings_tests.cpp
+    )
+    target_include_directories(PalworldEditorGameSettingsTests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+    target_compile_features(PalworldEditorGameSettingsTests PRIVATE cxx_std_23)
+    if(MSVC)
+        target_compile_options(PalworldEditorGameSettingsTests
+            PRIVATE /utf-8 /W4 /permissive-)
+    endif()
+    add_test(NAME PalworldEditor.GameSettings
+        COMMAND PalworldEditorGameSettingsTests)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
