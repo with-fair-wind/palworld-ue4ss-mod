@@ -61,8 +61,8 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
   RE-UE4SS 提供 `UE4SS` 静态库 target（头文件、编译宏、C++23）；每个 mod 是链接它的 `SHARED` 库；
 - **UE4SS triplet**：preset 显式设 `CMAKE_BUILD_TYPE=Game__Shipping__Win64` 以驱动
   `UE_GAME` 等宏；产物落在 `build/Game__Shipping__Win64/bin/`；
-- **三层分层**：纯值领域层（`inc/`，只依赖标准库，可单测）→ 游戏线程适配层（`src/pal_*`，反射
-  读写只在 EngineTick 或 UFunction 回调内）→ ImGui UI 层（`src/*_ui.cpp`，只传标准库快照/原子
+- **三层分层**：纯值领域层（`inc/`，只依赖标准库，可单测）→ 游戏线程适配层（`src/<feature>/`，反射
+  读写只在 EngineTick 或 UFunction 回调内）→ ImGui UI 层（`src/<feature>/*_ui.cpp`，只传标准库快照/原子
   请求/互斥锁参数）；
 - **入口点契约**：`PalworldEditorMod : RC::CppUserModBase` 导出 `start_mod()` / `uninstall_mod()`；
   日志走 `RC::Output::send`。部署契约：`ue4ss/Mods/<ModName>/dlls/main.dll` + 空 `enabled.txt`。

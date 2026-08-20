@@ -71,12 +71,12 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 提交前至少执行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-六个测试 target/CTest 覆盖不依赖 Unreal 的物品目录、技能目录、技能编辑服务、配置、资源池、能力
+七个测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、物品目录、技能目录、技能编辑服务、配置、资源池、能力
 判断、恢复账本、远程终端、捕获覆盖、复活计时与标记传送决策和生命周期逻辑。反射调用、ImGui 和 Palworld 存档效果仍需
 游戏内端到端验证。
 

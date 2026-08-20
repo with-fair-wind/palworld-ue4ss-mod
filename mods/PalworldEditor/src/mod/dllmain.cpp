@@ -281,8 +281,14 @@ auto PalworldEditorMod::on_update() -> void {}
 
 auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     if (unloadRequested_.load(std::memory_order_acquire)) {
-        shutdown_runtime_on_game_thread("卸载");
-        signal_unload_cleanup_finished();
+        // 清理只执行一次：卸载超时保留实例后游戏线程恢复时，不得在后续每个
+        // EngineTick 重复执行 shutdown（避免重复日志并与重新加载的新实例竞争）。
+        std::unique_lock lock(unloadMutex_);
+        if (!unloadCleanupFinished_) {
+            lock.unlock();
+            shutdown_runtime_on_game_thread("卸载");
+            signal_unload_cleanup_finished();
+        }
         return;
     }
     if (runtimeSafetyDisabled_.load(std::memory_order_acquire) ||

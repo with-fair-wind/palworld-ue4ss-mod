@@ -179,13 +179,16 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
 [[nodiscard]] auto read_model_center(UObject* model, FVector& output) -> bool {
     const auto readTranslation = [&output](FStructProperty* transformProperty,
                                            const void* container) -> bool {
-        if (transformProperty == nullptr || transformProperty->GetStruct() == nullptr) {
+        // 外层必须是 FTransform（GetTransform 返回值或 Transform 属性），内层
+        // Translation 必须是 FVector；只验证 FStructProperty 会让任意同名字段被复制。
+        if (!pal_game::matches_struct_identity(transformProperty, STR("Transform"),
+                                               sizeof(FTransform))) {
             return false;
         }
         auto* const translation = transformProperty->GetStruct()->GetPropertyByNameInChain(
             FName(STR("Translation"), FNAME_Find));
         auto* const translationStruct = CastField<FStructProperty>(translation);
-        if (translationStruct == nullptr) {
+        if (!pal_game::matches_struct_identity(translationStruct, STR("Vector"), sizeof(FVector))) {
             return false;
         }
         translationStruct->CopyCompleteValue(
@@ -691,7 +694,8 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
             dispatchParameter->GetPropertyByNameInChain(STR("BaseCampId")));
         auto* const ownerProperty = CastField<FStructProperty>(
             dispatchParameter->GetPropertyByNameInChain(STR("OwnerMapObjectInstanceId")));
-        if (baseCampIdProperty == nullptr || ownerProperty == nullptr) {
+        if (!pal_game::matches_struct_identity(baseCampIdProperty, STR("Guid"), sizeof(FGuid)) ||
+            !pal_game::matches_struct_identity(ownerProperty, STR("Guid"), sizeof(FGuid))) {
             note("PalBox 参数字段布局不可用", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }

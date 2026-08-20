@@ -99,7 +99,7 @@ auto find_concrete_model(UObject* manager, const FGuid& instanceId, UObject*& co
                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
     if (!pal_game::has_exact_parameter_count(function, 2) ||
         !pal_game::is_input_parameter(inputProperty) ||
-        static_cast<std::size_t>(inputProperty->GetElementSize()) != sizeof(FGuid) ||
+        !pal_game::matches_struct_identity(inputProperty, STR("Guid"), sizeof(FGuid)) ||
         !pal_game::is_return_parameter(returnProperty)) {
         return false;
     }

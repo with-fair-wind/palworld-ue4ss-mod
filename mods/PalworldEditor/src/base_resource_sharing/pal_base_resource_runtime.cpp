@@ -9,6 +9,7 @@
 #include <Unreal/Core/Containers/ScriptArray.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
@@ -204,11 +205,24 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
         containerIdStruct == nullptr
             ? nullptr
             : CastField<FStructProperty>(containerIdStruct->GetPropertyByNameInChain(STR("ID")));
-    auto* typeProperty =
+    auto* const typeProperty =
         infoStruct == nullptr ? nullptr : infoStruct->GetPropertyByNameInChain(STR("Type"));
-    if (containerInfo == nullptr || ownerProperty == nullptr || containerIdProperty == nullptr ||
-        idProperty == nullptr || (containerType != nullptr && typeProperty == nullptr)) {
+    if (containerInfo == nullptr || containerIdProperty == nullptr ||
+        !pal_game::matches_struct_identity(ownerProperty, STR("Guid"), sizeof(FGuid)) ||
+        !pal_game::matches_struct_identity(idProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
+    }
+    // Type 是容器类型枚举：只接受 1 字节的 FByteProperty/FEnumProperty，避免
+    // CopyCompleteValue 按漂移后的元素大小向固定 uint8 目标越界写入。
+    if (containerType != nullptr) {
+        auto* const enumType = CastField<FEnumProperty>(typeProperty);
+        const bool typeIsOneByte =
+            CastField<FByteProperty>(typeProperty) != nullptr ||
+            (enumType != nullptr && enumType->GetUnderlyingProperty() != nullptr &&
+             enumType->GetUnderlyingProperty()->GetElementSize() == 1);
+        if (!typeIsOneByte) {
+            return false;
+        }
     }
 
     ownerProperty->CopyCompleteValue(&ownerMapObjectId,
