@@ -88,8 +88,12 @@ private:
     /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
     static auto unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void;
 
-    /** @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。 */
-    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept -> void;
+    /**
+     * @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。
+     * @retval true 全部必需恢复与 Hook 注销成功。
+     * @retval false 部分恢复/注销失败（保留恢复责任；卸载路径不得放行销毁实例）。
+     */
+    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept -> bool;
 
     /** @brief 通知等待卸载的 UE4SS UpdateThread，游戏线程清理已经结束。 */
     auto signal_unload_cleanup_finished() noexcept -> void;

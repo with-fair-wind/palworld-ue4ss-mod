@@ -107,8 +107,9 @@ PalworldEditorMod::~PalworldEditorMod() {
 auto PalworldEditorMod::request_unload_cleanup() -> void {
     unloadRequested_.store(true, std::memory_order_release);
     if (IsGameThreadInitialized() && IsInGameThread()) {
-        shutdown_runtime_on_game_thread("卸载");
-        signal_unload_cleanup_finished();
+        if (shutdown_runtime_on_game_thread("卸载")) {
+            signal_unload_cleanup_finished();
+        }
     }
 }
 
@@ -283,11 +284,14 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     if (unloadRequested_.load(std::memory_order_acquire)) {
         // 清理只执行一次：卸载超时保留实例后游戏线程恢复时，不得在后续每个
         // EngineTick 重复执行 shutdown（避免重复日志并与重新加载的新实例竞争）。
+        // 只有全部必需恢复与 Hook 注销成功才标记完成；失败保留实例，下一帧重试
+        // 并让 uninstall_mod() 的等待走超时路径（放弃销毁、保留恢复责任）。
         std::unique_lock lock(unloadMutex_);
         if (!unloadCleanupFinished_) {
             lock.unlock();
-            shutdown_runtime_on_game_thread("卸载");
-            signal_unload_cleanup_finished();
+            if (shutdown_runtime_on_game_thread("卸载")) {
+                signal_unload_cleanup_finished();
+            }
         }
         return;
     }
@@ -321,15 +325,17 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
 }
 
 auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view reason) noexcept
-    -> void {
+    -> bool {
     if (!IsGameThreadInitialized() || !IsInGameThread()) {
-        return;
+        return false;
     }
 
-    const auto run_cleanup = [](const auto& cleanup, const TCHAR* failure) noexcept {
+    bool allOk = true;
+    const auto run_cleanup = [&allOk](const auto& cleanup, const TCHAR* failure) noexcept {
         try {
             cleanup();
         } catch (...) {
+            allOk = false;
             log_noexcept<LogLevel::Error>(failure);
         }
     };
@@ -345,27 +351,39 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
 
     run_cleanup([this] { captureRuntime_.shutdown(); },
                 STR("PalworldEditor: capture hooks could not be removed during shutdown.\n"));
-    run_cleanup([this] { baseResourceBridge_.shutdown_hooks(); },
-                STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
     run_cleanup(
-        [this, reason] {
+        [this, &allOk] {
+            if (!baseResourceBridge_.shutdown_hooks()) {
+                allOk = false;
+            }
+        },
+        STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
+    run_cleanup(
+        [this, reason, &allOk] {
             grappleLedger_.set_desired(false);
-            static_cast<void>(restore_grapple_overrides(reason));
+            if (!restore_grapple_overrides(reason)) {
+                allOk = false;
+            }
         },
         STR("PalworldEditor: grapple values could not be restored during shutdown.\n"));
     run_cleanup(
-        [this, reason] {
+        [this, reason, &allOk] {
             stack_limit_ledger_.set_desired(false);
-            static_cast<void>(restore_stack_limit_overrides(reason));
+            if (!restore_stack_limit_overrides(reason)) {
+                allOk = false;
+            }
         },
         STR("PalworldEditor: stack limits could not be restored during shutdown.\n"));
     run_cleanup(
-        [this, reason] {
+        [this, reason, &allOk] {
             reviveTimerLedger_.set_desired(false);
-            static_cast<void>(restore_revive_timer_overrides(reason));
+            if (!restore_revive_timer_overrides(reason)) {
+                allOk = false;
+            }
         },
         STR("PalworldEditor: revive timer could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
+    return allOk;
 }
 
 auto PalworldEditorMod::signal_unload_cleanup_finished() noexcept -> void {

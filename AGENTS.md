@@ -53,7 +53,7 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 
 # 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorCommonTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）

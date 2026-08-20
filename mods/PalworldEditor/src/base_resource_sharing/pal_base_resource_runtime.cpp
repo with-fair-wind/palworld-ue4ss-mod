@@ -212,14 +212,15 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
         !pal_game::matches_struct_identity(idProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
     }
-    // Type 是容器类型枚举：只接受 1 字节的 FByteProperty/FEnumProperty，避免
-    // CopyCompleteValue 按漂移后的元素大小向固定 uint8 目标越界写入。
+    // Type 是容器类型枚举：底层必须是无符号 1 字节 FByteProperty（宽度与有无符号
+    // 精确匹配），避免接受 FInt8Property 等有符号类型或按漂移后的元素大小向固定
+    // uint8 目标越界写入。
     if (containerType != nullptr) {
         auto* const enumType = CastField<FEnumProperty>(typeProperty);
         const bool typeIsOneByte =
             CastField<FByteProperty>(typeProperty) != nullptr ||
-            (enumType != nullptr && enumType->GetUnderlyingProperty() != nullptr &&
-             enumType->GetUnderlyingProperty()->GetElementSize() == 1);
+            (enumType != nullptr &&
+             CastField<FByteProperty>(enumType->GetUnderlyingProperty()) != nullptr);
         if (!typeIsOneByte) {
             return false;
         }
