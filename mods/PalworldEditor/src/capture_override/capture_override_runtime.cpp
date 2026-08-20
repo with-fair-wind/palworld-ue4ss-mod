@@ -624,6 +624,7 @@ struct CaptureOverrideRuntime::Impl {
     std::array<PendingHookCall, kMaximumNestedHookCalls> calls{};
     std::size_t callDepth{};
     std::size_t ignoredDepth{};
+    bool shutdown_restore_failed_{};
 };
 
 CaptureOverrideRuntime::CaptureOverrideRuntime() : impl_{std::make_unique<Impl>()} {}
@@ -650,9 +651,13 @@ auto CaptureOverrideRuntime::tick() -> void {
     reconcile_hooks();
 }
 
-auto CaptureOverrideRuntime::shutdown() -> void {
-    unregister_hooks();
+auto CaptureOverrideRuntime::shutdown() -> bool {
+    const bool all_restored = restore_pending_transactions();
+    impl_->shutdown_restore_failed_ = impl_->shutdown_restore_failed_ || !all_restored;
+    impl_->hookRegistry.unregister_all();
+    state_.hooks_removed();
     state_.end_world();
+    return !impl_->shutdown_restore_failed_;
 }
 
 auto CaptureOverrideRuntime::phase() const noexcept -> CaptureRuntimePhase {
@@ -765,20 +770,30 @@ auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
     state_.hooks_registered();
 }
 
-auto CaptureOverrideRuntime::unregister_hooks() -> void {
+auto CaptureOverrideRuntime::restore_pending_transactions() -> bool {
+    bool all_restored = true;
     for (std::size_t index = impl_->callDepth; index > 0; --index) {
         auto& pending = impl_->calls[index - 1];
+        bool restored = true;
         try {
-            if (pending.transaction.has_value() && !restore_transaction(*pending.transaction)) {
-                state_.disable_for_world();
-            }
+            restored =
+                !pending.transaction.has_value() || restore_transaction(*pending.transaction);
         } catch (...) {
+            restored = false;
+        }
+        if (!restored) {
             state_.disable_for_world();
+            all_restored = false;
         }
         pending = {};
     }
     impl_->callDepth = 0;
     impl_->ignoredDepth = 0;
+    return all_restored;
+}
+
+auto CaptureOverrideRuntime::unregister_hooks() -> void {
+    static_cast<void>(restore_pending_transactions());
     impl_->hookRegistry.unregister_all();
     state_.hooks_removed();
 }

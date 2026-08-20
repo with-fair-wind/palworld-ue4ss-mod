@@ -87,6 +87,9 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
     register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
         UE4SS_ENABLE_IMGUI()
         auto* self = static_cast<PalworldEditorMod*>(mod);
+        if (self == nullptr || self->unloadRequested_.load(std::memory_order_acquire)) {
+            return;
+        }
         render_main_window(self);
     });
 }
@@ -94,7 +97,13 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
 PalworldEditorMod::~PalworldEditorMod() {
     // 卸载清理由 uninstall_mod() 在删除前等待游戏线程完成（超时则放弃销毁实例），
     // 因此这里只注销全局回调；业务 Hook 与可逆覆盖已由游戏线程恢复。
-    if (!unloadCleanupFinished_) {
+    bool cleanup_succeeded{};
+    {
+        const std::lock_guard lock(unloadMutex_);
+        cleanup_succeeded =
+            unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
+    }
+    if (!cleanup_succeeded) {
         log_noexcept<LogLevel::Error>(
             STR("PalworldEditor: 析构时卸载清理未完成；必须经由 uninstall_mod() 等待游戏线程。\n"));
     }
@@ -107,19 +116,21 @@ PalworldEditorMod::~PalworldEditorMod() {
 auto PalworldEditorMod::request_unload_cleanup() -> void {
     unloadRequested_.store(true, std::memory_order_release);
     if (IsGameThreadInitialized() && IsInGameThread()) {
-        if (shutdown_runtime_on_game_thread("卸载")) {
-            signal_unload_cleanup_finished();
-        }
+        attempt_unload_cleanup_on_game_thread(0.0F);
     }
 }
 
 auto PalworldEditorMod::wait_for_unload_cleanup(const std::chrono::milliseconds timeout) -> bool {
     if (engineTickCallbackId_ == Hook::ERROR_ID) {
         // 回调从未注册（on_unreal_init 未执行）：没有需要游戏线程执行的清理。
-        return true;
+        const std::lock_guard lock(unloadMutex_);
+        unload_cleanup_scheduler_.mark_not_required();
+        return unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
     }
     std::unique_lock lock(unloadMutex_);
-    return unloadCondition_.wait_for(lock, timeout, [this] { return unloadCleanupFinished_; });
+    return unloadCondition_.wait_for(lock, timeout, [this] {
+        return unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
+    });
 }
 
 auto PalworldEditorMod::on_unreal_init() -> void {
@@ -171,7 +182,8 @@ auto PalworldEditorMod::on_unreal_init() -> void {
                     return;
                 }
                 const RuntimeCallbackLease lease{*callbackGate};
-                if (!runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+                if (!unloadRequested_.load(std::memory_order_acquire) &&
+                    !runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
                     try {
                         begin_world_transition();
                     } catch (...) {
@@ -197,7 +209,8 @@ auto PalworldEditorMod::on_unreal_init() -> void {
                     return;
                 }
                 const RuntimeCallbackLease lease{*callbackGate};
-                if (!runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+                if (!unloadRequested_.load(std::memory_order_acquire) &&
+                    !runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
                     try {
                         finish_world_transition();
                     } catch (...) {
@@ -282,17 +295,8 @@ auto PalworldEditorMod::on_update() -> void {}
 
 auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
     if (unloadRequested_.load(std::memory_order_acquire)) {
-        // 清理只执行一次：卸载超时保留实例后游戏线程恢复时，不得在后续每个
-        // EngineTick 重复执行 shutdown（避免重复日志并与重新加载的新实例竞争）。
-        // 只有全部必需恢复与 Hook 注销成功才标记完成；失败保留实例，下一帧重试
-        // 并让 uninstall_mod() 的等待走超时路径（放弃销毁、保留恢复责任）。
-        std::unique_lock lock(unloadMutex_);
-        if (!unloadCleanupFinished_) {
-            lock.unlock();
-            if (shutdown_runtime_on_game_thread("卸载")) {
-                signal_unload_cleanup_finished();
-            }
-        }
+        // 失败时低频、有限重试；耗尽后只保留实例，不再执行反射。
+        attempt_unload_cleanup_on_game_thread(deltaSeconds);
         return;
     }
     if (runtimeSafetyDisabled_.load(std::memory_order_acquire) ||
@@ -330,12 +334,15 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
         return false;
     }
 
-    bool allOk = true;
-    const auto run_cleanup = [&allOk](const auto& cleanup, const TCHAR* failure) noexcept {
+    bool all_ok = true;
+    const auto run_cleanup = [&all_ok](const auto& cleanup, const TCHAR* failure) noexcept {
         try {
-            cleanup();
+            if (!cleanup()) {
+                all_ok = false;
+                log_noexcept<LogLevel::Error>(failure);
+            }
         } catch (...) {
-            allOk = false;
+            all_ok = false;
             log_noexcept<LogLevel::Error>(failure);
         }
     };
@@ -349,49 +356,49 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
     grappleSettingDirty_.store(false, std::memory_order_release);
     stack_setting_dirty_.store(false, std::memory_order_release);
 
-    run_cleanup([this] { captureRuntime_.shutdown(); },
-                STR("PalworldEditor: capture hooks could not be removed during shutdown.\n"));
+    run_cleanup([this] { return captureRuntime_.shutdown(); },
+                STR("PalworldEditor: capture overrides could not be restored during shutdown.\n"));
+    run_cleanup([this] { return baseResourceBridge_.shutdown_hooks(); },
+                STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
     run_cleanup(
-        [this, &allOk] {
-            if (!baseResourceBridge_.shutdown_hooks()) {
-                allOk = false;
-            }
-        },
-        STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
-    run_cleanup(
-        [this, reason, &allOk] {
+        [this, reason] {
             grappleLedger_.set_desired(false);
-            if (!restore_grapple_overrides(reason)) {
-                allOk = false;
-            }
+            return restore_grapple_overrides(reason);
         },
         STR("PalworldEditor: grapple values could not be restored during shutdown.\n"));
     run_cleanup(
-        [this, reason, &allOk] {
+        [this, reason] {
             stack_limit_ledger_.set_desired(false);
-            if (!restore_stack_limit_overrides(reason)) {
-                allOk = false;
-            }
+            return restore_stack_limit_overrides(reason);
         },
         STR("PalworldEditor: stack limits could not be restored during shutdown.\n"));
     run_cleanup(
-        [this, reason, &allOk] {
+        [this, reason] {
             reviveTimerLedger_.set_desired(false);
-            if (!restore_revive_timer_overrides(reason)) {
-                allOk = false;
-            }
+            return restore_revive_timer_overrides(reason);
         },
         STR("PalworldEditor: revive timer could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
-    return allOk;
+    return all_ok;
 }
 
-auto PalworldEditorMod::signal_unload_cleanup_finished() noexcept -> void {
+auto PalworldEditorMod::attempt_unload_cleanup_on_game_thread(const float delta_seconds) noexcept
+    -> void {
     {
         const std::lock_guard lock(unloadMutex_);
-        unloadCleanupFinished_ = true;
+        if (!unload_cleanup_scheduler_.advance(delta_seconds)) {
+            return;
+        }
     }
-    unloadCondition_.notify_all();
+
+    const bool succeeded = shutdown_runtime_on_game_thread("卸载");
+    {
+        const std::lock_guard lock(unloadMutex_);
+        unload_cleanup_scheduler_.complete(succeeded);
+    }
+    if (succeeded) {
+        unloadCondition_.notify_all();
+    }
 }
 
 auto PalworldEditorMod::process_runtime_services(const float deltaSeconds) -> void {
@@ -940,18 +947,18 @@ auto PalworldEditorMod::restore_stack_limit_overrides(const std::string_view rea
 
     auto result = item_stack_limit::restore_stack_limit_override(stack_limit_ledger_.records());
     const bool succeeded = result.succeeded();
-    const bool ledgerAccepted =
+    const bool ledger_accepted =
         stack_limit_ledger_.complete_restore(succeeded, std::move(result.records));
     std::string message{reason};
     message.append("：");
     message.append(result.message);
-    if (!ledgerAccepted) {
+    if (!ledger_accepted) {
         message.append(" 反射结果与恢复账本不一致；已保留原账本并安全停用。");
     }
     publish_stack_limit_status(std::move(message));
     stack_limit_phase_.store(stack_limit_ledger_.phase(worldSession_.generation()),
                              std::memory_order_release);
-    return succeeded;
+    return succeeded && ledger_accepted;
 }
 
 auto PalworldEditorMod::publish_stack_limit_status(std::string message) -> void {

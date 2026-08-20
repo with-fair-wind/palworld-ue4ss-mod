@@ -773,6 +773,10 @@ void test_stack_limit_restore_rejects_inconsistent_gateway_result() {
     CHECK(!ledger.complete_restore(false, {unknown}));
     CHECK(ledger.records().size() == 1);
     CHECK(ledger.records().front().itemId == "Wood");
+
+    CHECK(!ledger.complete_restore(true, {ledger.records().front()}));
+    CHECK(ledger.records().size() == 1);
+    CHECK(ledger.records().front().itemId == "Wood");
 }
 
 class FakeSkillGateway final : public skill_editor::ISkillGateway {

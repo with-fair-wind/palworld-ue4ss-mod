@@ -62,9 +62,10 @@ public:
     auto ensure_hooks_registered() -> void;
     /**
      * @brief 恢复持久登记边并注销本模块全部 Hook。
+     * @retval true 持久登记账本已清空且 Hook 注销未抛出异常。
+     * @retval false 恢复责任仍未解除；调用方不得放行实例销毁。
      * @warning 只允许在游戏线程调用；完成后对象析构不再访问 Unreal。
      */
-    /** @brief 恢复持久登记并注销全部资源 Hook；false=恢复责任未解除。 */
     auto shutdown_hooks() -> bool;
     [[nodiscard]] auto snapshot() const -> BaseResourceSharingSnapshot;
 

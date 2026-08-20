@@ -1,10 +1,11 @@
 /**
  * @file parameter_direction_tests.cpp
- * @brief 参数方向纯标志判定测试：覆盖 CPF_Parm/OutParm/ConstParm/ReturnParm 全部 16 种组合。
+ * @brief 参数方向判定与卸载清理调度器的纯值测试。
  */
 #include <iostream>
 
 #include <common/parameter_direction.hpp>
+#include <mod/unload_cleanup_scheduler.hpp>
 
 namespace {
 int failures = 0;
@@ -15,8 +16,6 @@ void check(const bool condition, const char* expression, const int line) {
         ++failures;
     }
 }
-}  // namespace
-
 #define CHECK(expression) check((expression), #expression, __LINE__)
 
 void test_all_flag_combinations() {
@@ -79,12 +78,61 @@ void test_non_parm_or_null_flags_are_rejected() {
     }
 }
 
+void test_unload_cleanup_scheduler_retries_at_a_bounded_rate() {
+    using mod_lifecycle::UnloadCleanupPhase;
+    using mod_lifecycle::UnloadCleanupScheduler;
+
+    UnloadCleanupScheduler scheduler;
+    CHECK(scheduler.advance(0.0F));
+    CHECK(scheduler.attempts() == 1);
+    CHECK(scheduler.phase() == UnloadCleanupPhase::inFlight);
+    CHECK(!scheduler.advance(UnloadCleanupScheduler::kRetryIntervalSeconds));
+
+    while (scheduler.attempts() < UnloadCleanupScheduler::kMaximumAttempts) {
+        scheduler.complete(false);
+        CHECK(scheduler.phase() == UnloadCleanupPhase::waitingToRetry);
+        CHECK(!scheduler.advance(-1.0F));
+        CHECK(!scheduler.advance(UnloadCleanupScheduler::kRetryIntervalSeconds - 0.25F));
+        CHECK(scheduler.advance(0.25F));
+    }
+
+    scheduler.complete(false);
+    CHECK(scheduler.phase() == UnloadCleanupPhase::failed);
+    CHECK(scheduler.attempts() == UnloadCleanupScheduler::kMaximumAttempts);
+    CHECK(!scheduler.advance(60.0F));
+}
+
+void test_unload_cleanup_scheduler_stops_after_success_or_no_work() {
+    using mod_lifecycle::UnloadCleanupPhase;
+    using mod_lifecycle::UnloadCleanupScheduler;
+
+    UnloadCleanupScheduler scheduler;
+    CHECK(scheduler.advance(0.0F));
+    scheduler.complete(false);
+    scheduler.mark_not_required();
+    CHECK(scheduler.phase() == UnloadCleanupPhase::waitingToRetry);
+    CHECK(scheduler.advance(UnloadCleanupScheduler::kRetryIntervalSeconds));
+    scheduler.complete(true);
+    CHECK(scheduler.phase() == UnloadCleanupPhase::succeeded);
+    CHECK(scheduler.attempts() == 2);
+    CHECK(!scheduler.advance(60.0F));
+
+    UnloadCleanupScheduler noWork;
+    noWork.mark_not_required();
+    CHECK(noWork.phase() == UnloadCleanupPhase::succeeded);
+    CHECK(noWork.attempts() == 0);
+    CHECK(!noWork.advance(60.0F));
+}
+}  // namespace
+
 int main() {
     test_all_flag_combinations();
     test_const_reference_is_input_only();
     test_plain_output_is_writable();
     test_return_value_is_never_input_or_output();
     test_non_parm_or_null_flags_are_rejected();
+    test_unload_cleanup_scheduler_retries_at_a_bounded_rate();
+    test_unload_cleanup_scheduler_stops_after_success_or_no_work();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

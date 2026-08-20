@@ -38,9 +38,12 @@ public:
 
     /**
      * @brief 卸载前恢复在途事务并注销全部 Hook。
-     * @warning 只允许在游戏线程调用；完成后对象析构不再访问 Unreal。
+     * @retval true 全部在途事务均已恢复。
+     * @retval false 至少一个事务恢复失败；调用方必须保留实例并放弃热卸载。
+     * @note 恢复失败会在当前实例中锁存，后续幂等调用不会把失败改报为成功。
+     * @warning 只允许在游戏线程调用；仅返回 true 后才可析构对象。
      */
-    auto shutdown() -> void;
+    [[nodiscard]] auto shutdown() -> bool;
 
     /** @return 当前运行阶段。 */
     [[nodiscard]] auto phase() const noexcept -> CaptureRuntimePhase;
@@ -50,6 +53,11 @@ private:
 
     auto reconcile_hooks() -> void;
     auto ensure_hooks_registered() -> void;
+    /**
+     * @retval true 全部在途事务均已恢复。
+     * @retval false 至少一个事务恢复失败；失败状态上报调用方，Unreal 句柄不会跨帧保留。
+     */
+    [[nodiscard]] auto restore_pending_transactions() -> bool;
     auto unregister_hooks() -> void;
 
     CaptureOverrideState state_;

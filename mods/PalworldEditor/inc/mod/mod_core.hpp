@@ -30,6 +30,7 @@
 #include <imgui.h>
 #include <items/item_catalog.hpp>
 #include <items/stack_limit_gateway.hpp>
+#include <mod/unload_cleanup_scheduler.hpp>
 #include <pal_identity/pal_identity.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
@@ -70,7 +71,7 @@ public:
     /**
      * @brief 等待游戏线程完成卸载清理，最长 timeout。
      * @retval true 清理已完成（或无需清理）。
-     * @retval false 超时；调用方必须放弃销毁实例，避免回调悬垂。
+     * @retval false 清理失败或超时；调用方必须放弃销毁实例，避免回调悬垂。
      */
     [[nodiscard]] auto wait_for_unload_cleanup(std::chrono::milliseconds timeout) -> bool;
 
@@ -95,8 +96,12 @@ private:
      */
     auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept -> bool;
 
-    /** @brief 通知等待卸载的 UE4SS UpdateThread，游戏线程清理已经结束。 */
-    auto signal_unload_cleanup_finished() noexcept -> void;
+    /**
+     * @brief 在游戏线程按低频、有界调度尝试卸载清理，并发布成功或失败状态。
+     * @param[in] delta_seconds 自上次 EngineTick 起经过的秒数；同步首次调用传 0。
+     * @warning 只允许在游戏线程调用。
+     */
+    auto attempt_unload_cleanup_on_game_thread(float delta_seconds) noexcept -> void;
 
     /** @brief 推进爪钩、资源共享、远程终端及一次性诊断请求。 */
     auto process_runtime_services(float deltaSeconds) -> void;
@@ -626,6 +631,6 @@ private:
     std::mutex unloadMutex_;
     /** @brief UpdateThread 等待游戏线程完成 Hook 注销和可逆恢复。 */
     std::condition_variable unloadCondition_;
-    /** @brief 仅在 unloadMutex_ 下访问的游戏线程清理完成标志。 */
-    bool unloadCleanupFinished_{};
+    /** @brief 仅在 unloadMutex_ 下访问；限制卸载清理频率并在耗尽次数后停止。 */
+    mod_lifecycle::UnloadCleanupScheduler unload_cleanup_scheduler_;
 };
