@@ -279,7 +279,7 @@ struct SelectedPalTarget {
             : CastField<FStructProperty>(
                   palIdResult->GetStruct()->FindProperty(FName(STR("InstanceId"), FNAME_Find)));
     if (!has_exact_parameter_count(getPalIdFunction, 1) || !is_return_parameter(palIdResult) ||
-        instanceIdProperty == nullptr || instanceIdProperty->GetElementSize() != sizeof(FGuid)) {
+        !matches_struct_identity(instanceIdProperty, STR("Guid"), sizeof(FGuid))) {
         return failure(getPalIdFunctionUnavailable);
     }
     FunctionParams palIdParams{getPalIdFunction};

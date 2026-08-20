@@ -29,8 +29,8 @@ auto read_base_ids(UObject* manager, std::vector<FGuid>& output) -> bool {
     auto* const guidProperty =
         arrayProperty == nullptr ? nullptr : CastField<FStructProperty>(arrayProperty->GetInner());
     if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_output_parameter(arrayProperty) || guidProperty == nullptr ||
-        static_cast<std::size_t>(guidProperty->GetElementSize()) != sizeof(FGuid)) {
+        !pal_game::is_output_parameter(arrayProperty) ||
+        !pal_game::matches_struct_identity(guidProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
     }
 
@@ -67,7 +67,7 @@ auto try_get_base_model(UObject* manager, const FGuid& baseId, UObject*& model) 
         function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
     if (!pal_game::has_exact_parameter_count(function, 3) ||
         !pal_game::is_input_parameter(idProperty) ||
-        static_cast<std::size_t>(idProperty->GetElementSize()) != sizeof(FGuid) ||
+        !pal_game::matches_struct_identity(idProperty, STR("Guid"), sizeof(FGuid)) ||
         !pal_game::is_output_parameter(modelProperty) ||
         !pal_game::is_return_parameter(returnProperty)) {
         return false;

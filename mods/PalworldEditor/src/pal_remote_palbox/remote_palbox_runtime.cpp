@@ -28,6 +28,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
+#include <common/game_foreground.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
 #include <game/pal_base_camp_reflection.hpp>
@@ -114,7 +115,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
     if (!pal_game::has_exact_parameter_count(function, 1) ||
         !pal_game::is_return_parameter(returnProperty) ||
-        returnProperty->GetElementSize() != sizeof(FGuid)) {
+        !pal_game::matches_struct_identity(returnProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
     }
     pal_game::FunctionParams params{function};
@@ -167,11 +168,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         return false;
     }
     return read_location(pawn, output);
-}
-
-/** @brief 本地玩家是否处于战斗模式：已提取为 pal_game 公共原语，此处委托。 */
-[[nodiscard]] auto player_in_battle_mode(UObject* controller) -> bool {
-    return pal_game::player_in_battle_mode(controller);
 }
 
 /** @brief 读取基地模型中心（UPalBaseCampModel 的 Transform.Translation）。
@@ -363,17 +359,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return cursorBool != nullptr && cursorBool->GetPropertyValueInContainer(controller);
 }
 
-/** @brief 游戏是否处于前台（前台窗口属于本进程）。 */
-[[nodiscard]] auto foreground_is_game() -> bool {
-    auto* const foreground = GetForegroundWindow();
-    if (foreground == nullptr) {
-        return false;
-    }
-    DWORD pid{};
-    GetWindowThreadProcessId(foreground, &pid);
-    return pid == GetCurrentProcessId();
-}
-
 }  // namespace
 
 auto RemotePalboxRuntime::load_config(const std::string_view iniPath) -> void {
@@ -425,7 +410,7 @@ auto RemotePalboxRuntime::tick(const float deltaSeconds,
         config = config_;
     }
     const bool pressed = (GetAsyncKeyState(config.hotkeyVk) & 0x8000) != 0;
-    const bool foreground = foreground_is_game();
+    const bool foreground = pal_game::foreground_is_game();
     // 状态机每帧无条件推进：按下为真、松开/失焦为假。若只在按下时调用 update，
     // 松开的下降沿会丢失，pressed_ 将永远为真，此后所有按键都不会再触发。
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
@@ -512,17 +497,38 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return finish(RemotePalboxTriggerResult::blocked);
     }
 
-    if (config.disableInDungeon && call_bool(playerState, STR("IsInStage")).value_or(false)) {
-        note("地牢内已禁用", true);
-        return finish(RemotePalboxTriggerResult::blocked);
+    if (config.disableInDungeon) {
+        const auto inStage = call_bool(playerState, STR("IsInStage"));
+        if (!inStage.has_value()) {
+            note("地牢状态不可读，已拦截", true);
+            return finish(RemotePalboxTriggerResult::blocked);
+        }
+        if (*inStage) {
+            note("地牢内已禁用", true);
+            return finish(RemotePalboxTriggerResult::blocked);
+        }
     }
-    if (config.disableWhileMounted && call_bool(controller, STR("IsRiding")).value_or(false)) {
-        note("骑乘中已禁用", true);
-        return finish(RemotePalboxTriggerResult::blocked);
+    if (config.disableWhileMounted) {
+        const auto riding = call_bool(controller, STR("IsRiding"));
+        if (!riding.has_value()) {
+            note("骑乘状态不可读，已拦截", true);
+            return finish(RemotePalboxTriggerResult::blocked);
+        }
+        if (*riding) {
+            note("骑乘中已禁用", true);
+            return finish(RemotePalboxTriggerResult::blocked);
+        }
     }
-    if (config.disableDuringCombat && player_in_battle_mode(controller)) {
-        note("战斗中已禁用", true);
-        return finish(RemotePalboxTriggerResult::blocked);
+    if (config.disableDuringCombat) {
+        const auto battle = pal_game::player_in_battle_mode(controller);
+        if (!battle.has_value()) {
+            note("战斗状态不可读，已拦截", true);
+            return finish(RemotePalboxTriggerResult::blocked);
+        }
+        if (*battle) {
+            note("战斗中已禁用", true);
+            return finish(RemotePalboxTriggerResult::blocked);
+        }
     }
     // 已有界面打开时拒绝：避免在已有菜单上叠出第二个帕鲁箱。
     if (palbox_menu_is_open(controller)) {

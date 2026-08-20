@@ -70,6 +70,21 @@ void test_serialize_contains_all_keys() {
     CHECK(text.find("DisableDuringCombat=false") != std::string::npos);
 }
 
+void test_parse_crlf_and_whitespace() {
+    // Windows 编辑器产生的 CRLF 行尾与键值两侧空白都必须被接受。
+    const auto config = pal_remote_palbox::parse_remote_palbox_config(
+        "HotkeyVk = 75\r\n"
+        "DisableWhileMounted = false \r\n"
+        "DisableInDungeon=false\r\n"
+        "OnlyInsideBaseCircle = true\r\n"
+        "DisableDuringCombat = true\r\n");
+    CHECK(config.hotkeyVk == 75);
+    CHECK(!config.disableWhileMounted);
+    CHECK(!config.disableInDungeon);
+    CHECK(config.onlyInsideBaseCircle);
+    CHECK(config.disableDuringCombat);
+}
+
 void test_edge_trigger_basic() {
     using clock = std::chrono::steady_clock;
     pal_remote_palbox::HotkeyEdgeTrigger trigger;
@@ -172,6 +187,7 @@ int main() {
     test_parse_full_and_roundtrip();
     test_parse_invalid_values_fall_back();
     test_serialize_contains_all_keys();
+    test_parse_crlf_and_whitespace();
     test_edge_trigger_basic();
     test_edge_trigger_debounce_and_repeat();
     test_edge_trigger_held_key_does_not_repeat();

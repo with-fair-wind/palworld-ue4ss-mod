@@ -86,6 +86,21 @@ void test_config_unknown_keys_ignored() {
     CHECK(parsed.hotkeyVk == 66);
 }
 
+void test_config_crlf_and_whitespace() {
+    // Windows 编辑器产生的 CRLF 行尾与键值两侧空白都必须被接受。
+    const auto parsed = waypoint_teleport::parse_waypoint_teleport_config(
+        "HotkeyVk = 75\r\n"
+        "DisableWhileMounted = false \r\n"
+        "DisableInDungeon=false\r\n"
+        "DisableDuringCombat = true\r\n"
+        "ArrivalHeightOffset = 120.5\r\n");
+    CHECK(parsed.hotkeyVk == 75);
+    CHECK(!parsed.disableWhileMounted);
+    CHECK(!parsed.disableInDungeon);
+    CHECK(parsed.disableDuringCombat);
+    CHECK(parsed.arrivalHeightOffset == 120.5F);
+}
+
 void test_hotkey_edge_trigger_reuse() {
     // 公共原语自远程终端提取；回归其在重复触发、防连点与重置下的核心行为。
     pal_game::HotkeyEdgeTrigger trigger;
@@ -116,6 +131,7 @@ int main() {
     test_config_defaults_and_round_trip();
     test_config_invalid_values_fall_back();
     test_config_unknown_keys_ignored();
+    test_config_crlf_and_whitespace();
     test_hotkey_edge_trigger_reuse();
     if (failures > 0) {
         std::cerr << failures << " failure(s)\n";

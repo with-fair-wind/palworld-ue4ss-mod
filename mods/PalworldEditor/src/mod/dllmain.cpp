@@ -64,6 +64,9 @@ auto log_noexcept(const TCHAR* format, Args&&... args) noexcept -> void {
                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
                reinterpret_cast<LPCWSTR>(&pin_current_module), &module) != FALSE;
 }
+
+/** @brief 卸载时等待游戏线程完成清理的期限；正常热重载只需一个 EngineTick。 */
+constexpr auto kUnloadCleanupTimeout = std::chrono::seconds{10};
 }  // namespace
 
 PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
@@ -89,24 +92,33 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
 }
 
 PalworldEditorMod::~PalworldEditorMod() {
-    unloadRequested_.store(true, std::memory_order_release);
-    if (IsGameThreadInitialized() && IsInGameThread()) {
-        shutdown_runtime_on_game_thread("卸载");
-        signal_unload_cleanup_finished();
-    } else if (engineTickCallbackId_ != Hook::ERROR_ID) {
-        // UE4SS hot-unloads C++ mods on its UpdateThread. Keep the object and DLL alive until
-        // the next EngineTick has restored values and removed every UFunction hook on the game
-        // thread. A timeout would reintroduce the exact dangling-callback race this barrier avoids.
-        std::unique_lock lock(unloadMutex_);
-        unloadCondition_.wait(lock, [this] { return unloadCleanupFinished_; });
+    // 卸载清理由 uninstall_mod() 在删除前等待游戏线程完成（超时则放弃销毁实例），
+    // 因此这里只注销全局回调；业务 Hook 与可逆覆盖已由游戏线程恢复。
+    if (!unloadCleanupFinished_) {
+        log_noexcept<LogLevel::Error>(
+            STR("PalworldEditor: 析构时卸载清理未完成；必须经由 uninstall_mod() 等待游戏线程。\n"));
     }
-
-    // Global detour callbacks provide executor waiting, so remove them only after the game-thread
-    // cleanup has signalled and the EngineTick callback is allowed to return.
     runtimeCallbackGate_->deactivate_and_wait();
     unregister_callback(engineTickCallbackId_);
     unregister_callback(loadMapPostCallbackId_);
     unregister_callback(loadMapPreCallbackId_);
+}
+
+auto PalworldEditorMod::request_unload_cleanup() -> void {
+    unloadRequested_.store(true, std::memory_order_release);
+    if (IsGameThreadInitialized() && IsInGameThread()) {
+        shutdown_runtime_on_game_thread("卸载");
+        signal_unload_cleanup_finished();
+    }
+}
+
+auto PalworldEditorMod::wait_for_unload_cleanup(const std::chrono::milliseconds timeout) -> bool {
+    if (engineTickCallbackId_ == Hook::ERROR_ID) {
+        // 回调从未注册（on_unreal_init 未执行）：没有需要游戏线程执行的清理。
+        return true;
+    }
+    std::unique_lock lock(unloadMutex_);
+    return unloadCondition_.wait_for(lock, timeout, [this] { return unloadCleanupFinished_; });
 }
 
 auto PalworldEditorMod::on_unreal_init() -> void {
@@ -1274,6 +1286,18 @@ PALWORLD_EDITOR_API CppUserModBase* start_mod() {
  * @param[in] mod 要销毁的拥有型指针；必须来自本 DLL 的 start_mod()，可为 `nullptr`。
  */
 PALWORLD_EDITOR_API void uninstall_mod(CppUserModBase* mod) {
+    auto* const self = static_cast<PalworldEditorMod*>(mod);
+    if (self == nullptr) {
+        return;
+    }
+    self->request_unload_cleanup();
+    if (!self->wait_for_unload_cleanup(kUnloadCleanupTimeout)) {
+        // 游戏线程未在期限内完成清理（如已停止 Tick）：保留实例与已固定的 DLL，放弃
+        // 销毁，避免在游戏线程回调仍可能执行时释放对象；进程退出时统一回收。
+        Output::send<LogLevel::Error>(
+            STR("PalworldEditor: 游戏线程未在期限内完成卸载清理；放弃销毁实例以避免回调悬垂。\n"));
+        return;
+    }
     delete mod;
 }
 }  // extern "C"

@@ -18,6 +18,7 @@
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
+#include <common/game_foreground.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
 #include <waypoint_teleport/waypoint_teleport_runtime.hpp>
@@ -46,17 +47,6 @@ inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
 inline constexpr double kRefinementMinDeltaCm{100.0};
 /** @brief 到达点离地间隙（cm）：高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。 */
 inline constexpr double kArrivalClearanceCm{150.0};
-
-/** @brief 游戏是否处于前台（前台窗口属于本进程）。 */
-[[nodiscard]] auto foreground_is_game() -> bool {
-    auto* const foreground = GetForegroundWindow();
-    if (foreground == nullptr) {
-        return false;
-    }
-    DWORD pid{};
-    GetWindowThreadProcessId(foreground, &pid);
-    return pid == GetCurrentProcessId();
-}
 
 /** @brief 解析 LocationManager（PalUtility:GetLocationManager）。 */
 [[nodiscard]] auto location_manager(UObject* worldContext) -> UObject* {
@@ -101,7 +91,8 @@ inline constexpr double kArrivalClearanceCm{150.0};
     auto* const map =
         mapProperty == nullptr ? nullptr : mapProperty->ContainerPtrToValuePtr<FScriptMap>(manager);
     if (mapProperty == nullptr || keyProperty == nullptr || valueProperty == nullptr ||
-        map == nullptr || keyProperty->GetElementSize() != sizeof(FGuid)) {
+        map == nullptr ||
+        !pal_game::matches_struct_identity(keyProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
     }
     auto* const valueStruct = valueProperty->GetStruct().Get();
@@ -109,7 +100,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
                                        ? nullptr
                                        : CastField<FStructProperty>(valueStruct->FindProperty(
                                              FName(STR("IconLocation"), FNAME_Find)));
-    if (locationProperty == nullptr || locationProperty->GetElementSize() != sizeof(FVector)) {
+    if (!pal_game::matches_struct_identity(locationProperty, STR("Vector"), sizeof(FVector))) {
         return false;
     }
 
@@ -174,8 +165,8 @@ inline constexpr double kArrivalClearanceCm{150.0};
         !pal_game::is_input_parameter(ignoreSelfProperty) ||
         !pal_game::is_output_parameter(outHitProperty) ||
         !pal_game::is_return_parameter(resultProperty) ||
-        startProperty->GetElementSize() != sizeof(FVector) ||
-        endProperty->GetElementSize() != sizeof(FVector)) {
+        !pal_game::matches_struct_identity(startProperty, STR("Vector"), sizeof(FVector)) ||
+        !pal_game::matches_struct_identity(endProperty, STR("Vector"), sizeof(FVector))) {
         return std::nullopt;
     }
     auto* const hitStruct = outHitProperty->GetStruct().Get();
@@ -183,7 +174,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
         hitStruct == nullptr ? nullptr
                              : CastField<FStructProperty>(
                                    hitStruct->FindProperty(FName(STR("ImpactPoint"), FNAME_Find)));
-    if (impactProperty == nullptr || impactProperty->GetElementSize() != sizeof(FVector)) {
+    if (!pal_game::matches_struct_identity(impactProperty, STR("Vector"), sizeof(FVector))) {
         return std::nullopt;
     }
 
@@ -286,7 +277,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
         !pal_game::is_output_parameter(hitProperty) ||
         !pal_game::is_input_parameter(teleportProperty) ||
         !pal_game::is_return_parameter(resultProperty) ||
-        locationProperty->GetElementSize() != sizeof(FVector)) {
+        !pal_game::matches_struct_identity(locationProperty, STR("Vector"), sizeof(FVector))) {
         return std::nullopt;
     }
 
@@ -349,7 +340,7 @@ auto WaypointTeleportRuntime::tick(const float deltaSeconds,
         config = config_;
     }
     const bool pressed = (GetAsyncKeyState(config.hotkeyVk) & 0x8000) != 0;
-    const bool foreground = foreground_is_game();
+    const bool foreground = pal_game::foreground_is_game();
     // 状态机每帧无条件推进，避免丢失松开的下降沿（同远程终端）。
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
     if (session.can_access_unreal()) {
@@ -420,16 +411,32 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
     if (syncBool != nullptr && !syncBool->GetPropertyValueInContainer(playerState)) {
         return finish(WaypointTeleportResult::blocked, "世界尚未同步完成", true);
     }
-    if (config.disableInDungeon &&
-        pal_game::invoke<bool>(playerState, STR("IsInStage")).value_or(false)) {
-        return finish(WaypointTeleportResult::blocked, "地牢内已禁用", true);
+    if (config.disableInDungeon) {
+        const auto inStage = pal_game::invoke<bool>(playerState, STR("IsInStage"));
+        if (!inStage.has_value()) {
+            return finish(WaypointTeleportResult::blocked, "地牢状态不可读，已拦截", true);
+        }
+        if (*inStage) {
+            return finish(WaypointTeleportResult::blocked, "地牢内已禁用", true);
+        }
     }
-    if (config.disableWhileMounted &&
-        pal_game::invoke<bool>(controller, STR("IsRiding")).value_or(false)) {
-        return finish(WaypointTeleportResult::blocked, "骑乘中已禁用", true);
+    if (config.disableWhileMounted) {
+        const auto riding = pal_game::invoke<bool>(controller, STR("IsRiding"));
+        if (!riding.has_value()) {
+            return finish(WaypointTeleportResult::blocked, "骑乘状态不可读，已拦截", true);
+        }
+        if (*riding) {
+            return finish(WaypointTeleportResult::blocked, "骑乘中已禁用", true);
+        }
     }
-    if (config.disableDuringCombat && pal_game::player_in_battle_mode(controller)) {
-        return finish(WaypointTeleportResult::blocked, "战斗中已禁用", true);
+    if (config.disableDuringCombat) {
+        const auto battle = pal_game::player_in_battle_mode(controller);
+        if (!battle.has_value()) {
+            return finish(WaypointTeleportResult::blocked, "战斗状态不可读，已拦截", true);
+        }
+        if (*battle) {
+            return finish(WaypointTeleportResult::blocked, "战斗中已禁用", true);
+        }
     }
 
     // 地图标记 Z 不可靠（实测会落在地表下方传送入地）：以标记 Z 为中心 ±1km 向下

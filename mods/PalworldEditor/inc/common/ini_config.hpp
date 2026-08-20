@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <charconv>
 #include <optional>
 #include <string_view>
@@ -12,38 +13,54 @@
 
 namespace pal_game {
 
+/** @brief 去除键值首尾的空白字符（含 CRLF，兼容 Windows 编辑器行尾）。 */
+[[nodiscard]] inline auto trim_ini_value(const std::string_view value) noexcept
+    -> std::string_view {
+    const auto is_space = [](const char c) noexcept {
+        return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+    };
+    const auto begin = std::find_if_not(value.begin(), value.end(), is_space);
+    const auto end = std::find_if_not(value.rbegin(), value.rend(), is_space).base();
+    return begin < end ? std::string_view{begin, end} : std::string_view{};
+}
+
 /** @brief 键位必须是合法 VK 码（1–255）。 */
 [[nodiscard]] inline auto valid_hotkey_vk(const int vk) noexcept -> bool {
     return vk >= 1 && vk <= 255;
 }
 
-/** @brief 解析布尔值；非 true/false 回退 fallback。 */
+/** @brief 解析布尔值；非 true/false（含带空白/CRLF 的写法）回退 fallback。 */
 [[nodiscard]] inline auto parse_ini_bool(const std::string_view value, const bool fallback) noexcept
     -> bool {
-    if (value == "true") {
+    const auto trimmed = trim_ini_value(value);
+    if (trimmed == "true") {
         return true;
     }
-    if (value == "false") {
+    if (trimmed == "false") {
         return false;
     }
     return fallback;
 }
 
-/** @brief 解析整数；失败返回空。 */
+/** @brief 解析整数；失败（含带空白/CRLF）返回空。 */
 [[nodiscard]] inline auto parse_ini_int(const std::string_view value) -> std::optional<int> {
+    const auto trimmed = trim_ini_value(value);
     int result{};
-    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), result);
-    if (error != std::errc{} || end != value.data() + value.size()) {
+    const auto [end, error] =
+        std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), result);
+    if (error != std::errc{} || end != trimmed.data() + trimmed.size()) {
         return std::nullopt;
     }
     return result;
 }
 
-/** @brief 解析浮点；失败返回空。 */
+/** @brief 解析浮点；失败（含带空白/CRLF）返回空。 */
 [[nodiscard]] inline auto parse_ini_float(const std::string_view value) -> std::optional<float> {
+    const auto trimmed = trim_ini_value(value);
     double result{};
-    const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), result);
-    if (error != std::errc{} || end != value.data() + value.size()) {
+    const auto [end, error] =
+        std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), result);
+    if (error != std::errc{} || end != trimmed.data() + trimmed.size()) {
         return std::nullopt;
     }
     return static_cast<float>(result);

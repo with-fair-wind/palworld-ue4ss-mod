@@ -62,6 +62,19 @@ public:
     auto on_update() -> void override;
 
     /**
+     * @brief 请求游戏线程执行卸载清理（设置标志；若已在游戏线程则同步执行）。
+     * @details 由 uninstall_mod() 在 UE4SS UpdateThread 上调用。
+     */
+    auto request_unload_cleanup() -> void;
+
+    /**
+     * @brief 等待游戏线程完成卸载清理，最长 timeout。
+     * @retval true 清理已完成（或无需清理）。
+     * @retval false 超时；调用方必须放弃销毁实例，避免回调悬垂。
+     */
+    [[nodiscard]] auto wait_for_unload_cleanup(std::chrono::milliseconds timeout) -> bool;
+
+    /**
      * @brief 在 EngineTick 游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
      * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口。
      */

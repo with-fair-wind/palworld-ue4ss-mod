@@ -350,6 +350,10 @@ struct ActiveWriteFunctions {
         current->size() + values.size() > static_cast<std::size_t>(kMaxMasteredWazaCount)) {
         return false;
     }
+    // 写路径不能走 FScriptArrayHelper::AddValues：其 freezable 数组分支引用
+    // FMemoryImageAllocatorBase::ResizeAllocation，本 UE4SS 构建未导出该符号，无法链接。
+    // 这里按 property 的元素大小/对齐直接调用 FScriptArray::Add + InitializeValue，
+    // 与 helper 对堆数组（Palworld 可编辑数组均为堆数组）的执行路径一致。
     auto* const inner = access.arrayProperty->GetInner();
     auto* const array =
         access.arrayProperty->ContainerPtrToValuePtr<FScriptArray>(access.saveParameter);
@@ -379,6 +383,8 @@ struct ActiveWriteFunctions {
         return false;
     }
 
+    // 同 append_mastered_waza：FScriptArrayHelper::RemoveValues 的 freezable 分支在本
+    // UE4SS 构建无法链接，按 property 大小/对齐直接调用 FScriptArray::Remove。
     auto* const inner = access.arrayProperty->GetInner();
     auto* const array =
         access.arrayProperty->ContainerPtrToValuePtr<FScriptArray>(access.saveParameter);

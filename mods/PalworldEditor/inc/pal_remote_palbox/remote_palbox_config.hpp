@@ -41,7 +41,7 @@ inline constexpr RemotePalboxConfig kDefaultRemotePalboxConfig{};
         if (eq == std::string_view::npos || eq == 0) {
             continue;
         }
-        const auto key = line.substr(0, eq);
+        const auto key = pal_game::trim_ini_value(line.substr(0, eq));
         const auto value = line.substr(eq + 1);
         if (key == "HotkeyVk") {
             const auto parsed = pal_game::parse_ini_int(value);

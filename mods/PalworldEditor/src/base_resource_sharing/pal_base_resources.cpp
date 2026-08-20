@@ -36,10 +36,6 @@ auto log_shutdown_error_noexcept(const TCHAR* message) noexcept -> void {
     }
 }
 
-[[nodiscard]] auto object_name(UObject* object) -> std::wstring {
-    return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
-}
-
 [[nodiscard]] auto registration_key(const PersistentUnionEdge& edge)
     -> ConcreteModelRegistrationKey {
     return {.moduleFullName = edge.targetModuleFullName, .ownerMapObjectId = edge.ownerMapObjectId};
@@ -258,9 +254,7 @@ public:
 
 private:
     auto remember_world_context(UObject* context) -> void {
-        if (context != nullptr) {
-            worldContextFullName_ = object_name(context);
-        }
+        worldContextFullName_ = pal_game::object_full_name(context);
     }
 
     [[nodiscard]] auto resolve_world_context(UObject* hint) -> UObject* {
@@ -584,8 +578,7 @@ private:
                 ? nullptr
                 : CastField<FStructProperty>(
                       concreteModel->GetPropertyByNameInChain(STR("InstanceId")));
-        if (instanceIdProperty == nullptr ||
-            instanceIdProperty->GetElementSize() != sizeof(FGuid)) {
+        if (!pal_game::matches_struct_identity(instanceIdProperty, STR("Guid"), sizeof(FGuid))) {
             return ConcreteModelRegistrationMembership::unknown;
         }
 
@@ -598,7 +591,8 @@ private:
         }
 
         return registrationIndex_.membership(
-            {.moduleFullName = object_name(context.Context), .ownerMapObjectId = ownerId});
+            {.moduleFullName = pal_game::object_full_name(context.Context),
+             .ownerMapObjectId = ownerId});
     }
 
     auto handle_structure_changed(const StructureChangeSource source,

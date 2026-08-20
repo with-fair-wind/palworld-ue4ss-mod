@@ -7,7 +7,8 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 ## 项目概览
 
 一个面向 **Palworld 1.0** 的 **UE4SS C++ mod** 工程（C++23 / CMake / Ninja）。当前 mod 名为
-`PalworldEditor`（版本 1.7.0），构建产物是 `PalworldEditor.dll`。
+`PalworldEditor`（版本 1.7.0），构建产物是 `PalworldEditor.dll`。兼容基线为 Palworld 1.0；
+正文中出现的 1.0.1 等补丁号说明仅作历史行为记录，不表示声明支持多个补丁版本。
 
 该 mod 通过 UE4SS GUI 提供物品浏览与修改、背包数量修改，数字键当前高亮、下一次按 E 会召唤的队伍
 帕鲁主动/被动技能编辑（含被动分类与四词条预设）、属性编辑、Alpha/Lucky/觉醒形态修改、队伍复活、
@@ -121,18 +122,20 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
 过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；传送不删除、不修改任何标记（曾实现"传送后自动删除标记"，但地图控件图标 TMap 在活跃 Slate 状态下结构移除多次实测崩溃、收起后重开地图又重建，需求已整体移除；到达标记会霸占最近选择，连续传送需在地图中手动删除或远离该标记）；
-地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截；无标记、世界未同步时给出对应提示；
+地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截，
+门控状态不可读取时按拦截处理（fail-closed）；无标记、世界未同步时给出对应提示；
 LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原语为 `AActor:K2_SetActorLocation`（bSweep=false 无扫掠精确放置，落点由地面追踪+离地间隙保证）；`K2_TeleportTo` 带路径扫掠，玩家到目标直线穿山时会在阻挡点停下放入地形（实测首次入地、二次正常），不得回退；
 `PalSyncTeleportComponent:SyncTeleport` 为有状态序列原语，从 EngineTick 前置
 相位调用即使参数/归属/守卫全对齐参考实现仍三次实测内部 -1 崩溃，本 mod 不得回退使用。
 
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common
 主背包就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。实际帧时间改善必须在游戏内测量。
-还应在分别启用捕获覆盖、爪钩覆盖、无限堆叠与资源共享后执行 UE4SS 热重载：卸载线程必须等待下一次
-EngineTick 在游戏线程恢复覆盖并注销业务 Hook，随后正常重新加载；日志不得出现非游戏线程
-`ProcessEvent`、残留回调、死锁或访问已卸载 DLL。由于 UE4SS 将失效的全局回调闭包交给独立 GC 线程
-延迟销毁，而 `CppMod` 会立即 `FreeLibrary`，本 Mod 在构造时固定自身 DLL 到进程退出；热重载只重建
-实例与 Hook，不承诺重新映射已替换的 DLL 文件。进程退出路径不以热重载结果替代验证。
+还应在分别启用捕获覆盖、爪钩覆盖、无限堆叠与资源共享后执行 UE4SS 热重载：卸载线程有界等待
+下一次 EngineTick 在游戏线程恢复覆盖并注销业务 Hook，随后正常重新加载；等待超时（10 秒）时必须
+放弃销毁实例与 Hook（DLL 已固定，进程退出统一回收），不得在清理未完成时释放对象。日志不得出现
+非游戏线程 `ProcessEvent`、残留回调、死锁或访问已卸载 DLL。由于 UE4SS 将失效的全局回调闭包交给
+独立 GC 线程延迟销毁，而 `CppMod` 会立即 `FreeLibrary`，本 Mod 在构造时固定自身 DLL 到进程退出；
+热重载只重建实例与 Hook，不承诺重新映射已替换的 DLL 文件。进程退出路径不以热重载结果替代验证。
 
 ## 分支与协作流程
 
@@ -180,9 +183,12 @@ EngineTick 在游戏线程恢复覆盖并注销业务 Hook，随后正常重新�
   `CPF_OutParm`，语义仍是只读输入；不得把任意 `OutParm` 直接认作可写输出。输入、输出与返回值统一
   通过 `is_input_parameter` / `is_output_parameter` / `is_return_parameter` 和预期属性类型共同判断；
 - **通过属性 API 读写**：输入使用 `SetPropertyValueInContainer` 或 `CopyCompleteValue`，输出和返回值
-  使用对应 Property getter；动态数组使用 `FScriptArrayHelper_InContainer`，不得把参数缓冲区强转为
-  `TArray<T>`。读取数组前验证 `Num()` 非负且不超过领域上限，完成范围校验后才能 `reserve`、遍历或做
-  窄化转换；
+  使用对应 Property getter；动态数组读取使用 `FScriptArrayHelper_InContainer`，不得把参数缓冲区强转为
+  `TArray<T>`。数组写路径（Add/Remove）因本 UE4SS 构建未导出
+  `FMemoryImageAllocatorBase::ResizeAllocation`（helper 的 freezable 分支无法链接）而按 property 的
+  元素大小/对齐直接调用 `FScriptArray::Add/Remove`，并配 `InitializeValue`/`DestroyValue`——与 helper
+  的堆数组执行路径语义一致，Palworld 可编辑数组均为堆数组。读取数组前验证 `Num()` 非负且不超过领域
+  上限，完成范围校验后才能 `reserve`、遍历或做窄化转换；
 - **反射对象都是短期非拥有句柄**：`UObject*`、`UFunction*`、`FProperty*` 与 Unreal 容器地址只在
   当前游戏线程调用链内有效；跨帧只保存 GUID、对象全名和标准库纯值。每次 `ProcessEvent` 后若还要
   继续修改，必须重新解析或至少重新验证目标；对象返回值在使用前再次执行 `pal_game::is_valid`；
@@ -267,7 +273,7 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 若不显式指定，这个默认就会"赢"，使 `$<CONFIG>` 变成 `Debug` 而不匹配任何 triplet，UE4SS 的关键
 宏不会被定义，编译会失败。这就是输出 DLL 落在 `build/Game__Shipping__Win64/bin/` 的原因。
 
-**Mod 入口点契约**（`mods/PalworldEditor/src/dllmain.cpp`）：`PalworldEditorMod` 继承
+**Mod 入口点契约**（`mods/PalworldEditor/src/mod/dllmain.cpp`）：`PalworldEditorMod` 继承
 `RC::CppUserModBase`，设置元数据并重写 `on_update`、`on_unreal_init`；`on_update()` 保持为空，
 `on_unreal_init()` 注册 EngineTick 与 LoadMap 前/后回调；DLL 导出 `start_mod()`（构造实例）和
 `uninstall_mod()`（销毁实例）。日志用 `RC::Output::send<LogLevel::Verbose>(STR("...{ }...\n"))`
@@ -279,7 +285,7 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 **三层分层。** ① 纯值领域层（`inc/` 下 `*_editor.hpp`、`*_service.hpp`、`*_catalog.hpp`、
 `*_state.hpp` 等）：只依赖标准库，承载值、快照、请求、队列、校验、账本、帧预算等全部决策逻辑；
 ② 游戏线程适配层（`src/` 下 `pal_*.cpp`、`*_gateway.cpp`）：在 EngineTick 或对应 UFunction 回调
-内做反射查找与读写；③ UI 层（`src/editor_ui.cpp` 与 `src/*_ui.cpp`）：ImGui 回调只做展示与输入。
+内做反射查找与读写；③ UI 层（`src/mod/editor_ui.cpp` 与各业务模块 `src/*/*_ui.cpp`）：ImGui 回调只做展示与输入。
 
 **线程模型。** ImGui 回调与游戏线程之间只传递标准库快照、互斥锁保护的请求参数和原子请求标志。
 所有 UObject 指针都视为非拥有句柄；跨帧状态不得持有 UObject 指针或 Unreal 数组地址，解析得到的
@@ -295,22 +301,22 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
   状态；`active_skill_definitions.hpp` 由 `scripts/generate-active-skill-definitions.ps1` 从
   Palworld 1.0 UHT dump 生成，不读取运行时 `UEnum` 内存布局，更新 Palworld/UHT dump 后必须重新
   运行生成脚本；
-- `inc/pal_stats/pal_stat_editor.hpp` + `src/pal_stats.cpp`：属性编辑领域与 `SaveParameter`/原生
+- `inc/pal_stats/pal_stat_editor.hpp` + `src/pal_stats/pal_stats.cpp`：属性编辑领域与 `SaveParameter`/原生
   setter 的事务适配；
-- `inc/pal_identity/` + `src/pal_identity.cpp`：Alpha、Lucky、觉醒三维形态编辑；
-- `inc/pal_revive/` + `src/pal_revive.cpp`：队伍帕鲁复活的反射适配与结果分类；
-- `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩冷却覆盖与恢复；
+- `inc/pal_identity/` + `src/pal_identity/pal_identity.cpp`：Alpha、Lucky、觉醒三维形态编辑；
+- `inc/pal_revive/` + `src/pal_revive/pal_revive.cpp`：队伍帕鲁复活的反射适配与结果分类；
+- `inc/grappling_hook/` + `src/grappling_hook/grapple_cooldown_gateway.cpp`：爪钩冷却覆盖与恢复；
 - `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除的单字段可逆覆盖与恢复账本；
 - `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（CustomMarkers 读取
   + 最近标记纯值选择 + K2_SetActorLocation 无扫掠放置）；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿
   状态机 300ms 防连点、基地选择策略）与游戏线程运行时；
-- `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：
-  同公会跨据点制作/建造材料共享；
+- `inc/base_resource_sharing/` + `src/base_resource_sharing/pal_base_resources.*`、
+  `src/base_resource_sharing/pal_base_resource_runtime.*`：同公会跨据点制作/建造材料共享；
 - `inc/common/` + `src/common/`：多个模块实际复用的反射参数 RAII、签名判断和 Hook 登记原语；
-- `src/dllmain.cpp`：mod 生命周期、ImGui 和线程间请求交接；
-- `src/*_ui.cpp`：各业务模块的 ImGui 界面。
+- `src/mod/dllmain.cpp`：mod 生命周期、ImGui 和线程间请求交接；
+- `src/*/*_ui.cpp`：各业务模块的 ImGui 界面。
 
 ### 反射与目标锁定契约
 
@@ -358,7 +364,9 @@ UObject 扫描；所有 Map 地址和 UObject 指针只在当次 EngineTick 使�
 远程终端契约：按键触发采用上升沿状态机 + 300ms 防连点 + 进行中保护；圈内判定读取世界设置
 `BaseCampAreaRange`（视觉建造圈，通过 `PalUtility:GetGameSetting` 获取），不使用随据点等级膨胀的
 据点模型 `AreaRange` 属性；战斗中禁用读取 `APalCharacter::bIsBattleMode` 属性（`IsInCombat` /
-`IsInBattle` 函数名在 Palworld 1.0 不存在）。基地选择策略为纯值函数：优先玩家所在圈，否则最近据点。
+`IsInBattle` 函数名在 Palworld 1.0 不存在）。地牢/骑乘/战斗门控启用时，对应状态不可读取（函数或
+属性缺失、签名漂移）按拦截处理（fail-closed），不视为安全放行。基地选择策略为纯值函数：优先玩家
+所在圈，否则最近据点。
 
 ### 资源共享契约
 

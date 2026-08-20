@@ -36,10 +36,6 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return FGuid{key.words[0], key.words[1], key.words[2], key.words[3]};
 }
 
-[[nodiscard]] auto object_name(UObject* object) -> std::wstring {
-    return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
-}
-
 [[nodiscard]] auto pal_utility() -> UObject* {
     return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr,
                                                       STR("/Script/Pal.Default__PalUtility"));
@@ -103,7 +99,8 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     auto* const result =
         function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
     if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_return_parameter(result) || result->GetElementSize() != sizeof(FGuid)) {
+        !pal_game::is_return_parameter(result) ||
+        !pal_game::matches_struct_identity(result, STR("Guid"), sizeof(FGuid))) {
         return false;
     }
     FunctionParams params{function};
@@ -149,7 +146,8 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
         !pal_game::has_exact_parameter_count(function, 3) ||
         !pal_game::is_input_parameter(context) || !pal_game::is_input_parameter(player) ||
-        player->GetElementSize() != sizeof(FGuid) || !pal_game::is_return_parameter(result)) {
+        !pal_game::matches_struct_identity(player, STR("Guid"), sizeof(FGuid)) ||
+        !pal_game::is_return_parameter(result)) {
         return false;
     }
     FunctionParams params{function};
@@ -278,6 +276,9 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     if (property == nullptr || target == nullptr || source == nullptr) {
         return false;
     }
+    // 写路径不能走 FScriptArrayHelper::AddValues：其 freezable 数组分支引用
+    // FMemoryImageAllocatorBase::ResizeAllocation，本 UE4SS 构建未导出该符号，无法链接。
+    // 按 property 的元素大小/对齐直接调用 FScriptArray::Add + InitializeValue。
     auto* inner = property->GetInner();
     auto* array = property->ContainerPtrToValuePtr<FScriptArray>(target);
     if (inner == nullptr || array == nullptr) {
@@ -298,6 +299,7 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     if (property == nullptr || target == nullptr) {
         return false;
     }
+    // 同 append_array_copy：FScriptArrayHelper::RemoveValues 在本 UE4SS 构建无法链接。
     auto* inner = property->GetInner();
     auto* array = property->ContainerPtrToValuePtr<FScriptArray>(target);
     if (inner == nullptr || array == nullptr) {
@@ -587,7 +589,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
             continue;
         }
 
-        const auto storageModuleName = object_name(storageModule);
+        const auto storageModuleName = pal_game::object_full_name(storageModule);
         if (!sameGuild) {
             result.ignoredModuleNames.push_back(storageModuleName);
             continue;
@@ -777,7 +779,7 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
                                   ? nullptr
                                   : CastField<FObjectPropertyBase>(containersProperty->GetInner());
     UnionLedgerEntry helperLedger{
-        .objectFullName = object_name(helper),
+        .objectFullName = pal_game::object_full_name(helper),
         .helperArray = true,
     };
     if (containerProperty == nullptr ||
