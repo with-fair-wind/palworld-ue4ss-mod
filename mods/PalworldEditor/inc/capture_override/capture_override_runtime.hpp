@@ -40,7 +40,8 @@ public:
      * @brief 卸载前恢复在途事务并注销全部 Hook。
      * @retval true 全部在途事务均已恢复。
      * @retval false 至少一个事务恢复失败；调用方必须保留实例并放弃热卸载。
-     * @note 恢复失败会在当前实例中锁存，后续幂等调用不会把失败改报为成功。
+     * @note 失败是永久性的：失败的 pending 事务已被丢弃，锁存后任何重试都无法挽回，
+     *       调用方应把 false 映射为卸载清理结果的 permanentFailure。
      * @warning 只允许在游戏线程调用；仅返回 true 后才可析构对象。
      */
     [[nodiscard]] auto shutdown() -> bool;
@@ -56,6 +57,8 @@ private:
     /**
      * @retval true 全部在途事务均已恢复。
      * @retval false 至少一个事务恢复失败；失败状态上报调用方，Unreal 句柄不会跨帧保留。
+     * @note unregister_hooks 的运行期路径（关闭开关/LoadMap/安全停用）会丢弃该结果——
+     *       域级安全停用已在 restore 内生效；仅 shutdown 需要消费结果锁存失败。
      */
     [[nodiscard]] auto restore_pending_transactions() -> bool;
     auto unregister_hooks() -> void;

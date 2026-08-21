@@ -67,6 +67,13 @@ auto log_noexcept(const TCHAR* format, Args&&... args) noexcept -> void {
 
 /** @brief 卸载时等待游戏线程完成清理的期限；正常热重载只需一个 EngineTick。 */
 constexpr auto kUnloadCleanupTimeout = std::chrono::seconds{10};
+// 有界重试预算（首次立即 + 最多 kMaximumAttempts-1 次间隔重试）必须完整落在等待窗口内，
+// 否则最后一次重试会发生在卸载线程已超时放弃之后，等待语义与重试日程悄然脱节。
+static_assert(std::chrono::duration<float>(
+                  mod_lifecycle::UnloadCleanupScheduler::kRetryIntervalSeconds* static_cast<float>(
+                      mod_lifecycle::UnloadCleanupScheduler::kMaximumAttempts - 1)) <
+                  std::chrono::duration<float>(kUnloadCleanupTimeout),
+              "bounded unload retry budget must stay inside the unload wait window");
 }  // namespace
 
 PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
@@ -87,7 +94,7 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
     register_tab(STR("PalworldEditor"), [](CppUserModBase* mod) {
         UE4SS_ENABLE_IMGUI()
         auto* self = static_cast<PalworldEditorMod*>(mod);
-        if (self == nullptr || self->unloadRequested_.load(std::memory_order_acquire)) {
+        if (self->unloadRequested_.load(std::memory_order_acquire)) {
             return;
         }
         render_main_window(self);
@@ -97,15 +104,18 @@ PalworldEditorMod::PalworldEditorMod() : CppUserModBase() {
 PalworldEditorMod::~PalworldEditorMod() {
     // 卸载清理由 uninstall_mod() 在删除前等待游戏线程完成（超时则放弃销毁实例），
     // 因此这里只注销全局回调；业务 Hook 与可逆覆盖已由游戏线程恢复。
-    bool cleanup_succeeded{};
-    {
-        const std::lock_guard lock(unloadMutex_);
-        cleanup_succeeded =
-            unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
-    }
-    if (!cleanup_succeeded) {
-        log_noexcept<LogLevel::Error>(
-            STR("PalworldEditor: 析构时卸载清理未完成；必须经由 uninstall_mod() 等待游戏线程。\n"));
+    // 只在确实发起过卸载请求时才把未完成当作错误——进程退出直接析构不是卸载路径。
+    if (unloadRequested_.load(std::memory_order_acquire)) {
+        bool cleanup_succeeded{};
+        {
+            const std::lock_guard lock(unloadMutex_);
+            cleanup_succeeded =
+                unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
+        }
+        if (!cleanup_succeeded) {
+            log_noexcept<LogLevel::Error>(STR(
+                "PalworldEditor: 析构时卸载清理未完成；必须经由 uninstall_mod() 等待游戏线程。\n"));
+        }
     }
     runtimeCallbackGate_->deactivate_and_wait();
     unregister_callback(engineTickCallbackId_);
@@ -120,17 +130,31 @@ auto PalworldEditorMod::request_unload_cleanup() -> void {
     }
 }
 
-auto PalworldEditorMod::wait_for_unload_cleanup(const std::chrono::milliseconds timeout) -> bool {
+auto PalworldEditorMod::wait_for_unload_cleanup(const std::chrono::milliseconds timeout)
+    -> mod_lifecycle::UnloadCleanupWaitResult {
+    using mod_lifecycle::UnloadCleanupPhase;
+    using mod_lifecycle::UnloadCleanupWaitResult;
     if (engineTickCallbackId_ == Hook::ERROR_ID) {
         // 回调从未注册（on_unreal_init 未执行）：没有需要游戏线程执行的清理。
         const std::lock_guard lock(unloadMutex_);
         unload_cleanup_scheduler_.mark_not_required();
-        return unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
+        return unload_cleanup_scheduler_.phase() == UnloadCleanupPhase::succeeded
+                   ? UnloadCleanupWaitResult::cleanupSucceeded
+                   : UnloadCleanupWaitResult::cleanupFailed;
     }
     std::unique_lock lock(unloadMutex_);
-    return unloadCondition_.wait_for(lock, timeout, [this] {
-        return unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
+    const bool decided = unloadCondition_.wait_for(lock, timeout, [this] {
+        return unload_cleanup_scheduler_.phase() == UnloadCleanupPhase::succeeded ||
+               unload_cleanup_scheduler_.destruction_blocked();
     });
+    if (!decided) {
+        return UnloadCleanupWaitResult::timedOut;
+    }
+    // 永久失败一旦锁存就不得被后续任何状态覆盖：销毁判定以它为先。
+    if (unload_cleanup_scheduler_.destruction_blocked()) {
+        return UnloadCleanupWaitResult::cleanupFailed;
+    }
+    return UnloadCleanupWaitResult::cleanupSucceeded;
 }
 
 auto PalworldEditorMod::on_unreal_init() -> void {
@@ -329,20 +353,23 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
 }
 
 auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view reason) noexcept
-    -> bool {
+    -> mod_lifecycle::CleanupOutcome {
+    using mod_lifecycle::CleanupOutcome;
     if (!IsGameThreadInitialized() || !IsInGameThread()) {
-        return false;
+        return CleanupOutcome::transientFailure;
     }
 
-    bool all_ok = true;
-    const auto run_cleanup = [&all_ok](const auto& cleanup, const TCHAR* failure) noexcept {
+    CleanupOutcome worst = CleanupOutcome::succeeded;
+    const auto run_cleanup = [&worst](const auto& cleanup, const TCHAR* failure) noexcept {
         try {
-            if (!cleanup()) {
-                all_ok = false;
+            const CleanupOutcome outcome = cleanup();
+            if (outcome != CleanupOutcome::succeeded) {
+                worst = mod_lifecycle::worse_outcome(worst, outcome);
                 log_noexcept<LogLevel::Error>(failure);
             }
         } catch (...) {
-            all_ok = false;
+            // 反射路径异常按瞬态处理：账本仍持有恢复责任，交给有界重试。
+            worst = mod_lifecycle::worse_outcome(worst, CleanupOutcome::transientFailure);
             log_noexcept<LogLevel::Error>(failure);
         }
     };
@@ -356,30 +383,43 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
     grappleSettingDirty_.store(false, std::memory_order_release);
     stack_setting_dirty_.store(false, std::memory_order_release);
 
-    run_cleanup([this] { return captureRuntime_.shutdown(); },
-                STR("PalworldEditor: capture overrides could not be restored during shutdown.\n"));
-    run_cleanup([this] { return baseResourceBridge_.shutdown_hooks(); },
-                STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
+    // 捕获事务恢复失败是永久性的：pending 事务在失败时已被丢弃，锁存后任何重试都
+    // 无法挽回，因此映射为 permanentFailure 让等待线程立即得到失败结论。
+    run_cleanup(
+        [this] {
+            return captureRuntime_.shutdown() ? CleanupOutcome::succeeded
+                                              : CleanupOutcome::permanentFailure;
+        },
+        STR("PalworldEditor: capture overrides could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this] {
+            return baseResourceBridge_.shutdown_hooks() ? CleanupOutcome::succeeded
+                                                        : CleanupOutcome::transientFailure;
+        },
+        STR("PalworldEditor: resource hooks could not be removed during shutdown.\n"));
     run_cleanup(
         [this, reason] {
             grappleLedger_.set_desired(false);
-            return restore_grapple_overrides(reason);
+            return restore_grapple_overrides(reason) ? CleanupOutcome::succeeded
+                                                     : CleanupOutcome::transientFailure;
         },
         STR("PalworldEditor: grapple values could not be restored during shutdown.\n"));
     run_cleanup(
         [this, reason] {
             stack_limit_ledger_.set_desired(false);
-            return restore_stack_limit_overrides(reason);
+            return restore_stack_limit_overrides(reason) ? CleanupOutcome::succeeded
+                                                         : CleanupOutcome::transientFailure;
         },
         STR("PalworldEditor: stack limits could not be restored during shutdown.\n"));
     run_cleanup(
         [this, reason] {
             reviveTimerLedger_.set_desired(false);
-            return restore_revive_timer_overrides(reason);
+            return restore_revive_timer_overrides(reason) ? CleanupOutcome::succeeded
+                                                          : CleanupOutcome::transientFailure;
         },
-        STR("PalworldEditor: revive timer could not be restored during shutdown.\n"));
+        STR("PalworldEditor: revive timer values could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
-    return all_ok;
+    return worst;
 }
 
 auto PalworldEditorMod::attempt_unload_cleanup_on_game_thread(const float delta_seconds) noexcept
@@ -391,12 +431,19 @@ auto PalworldEditorMod::attempt_unload_cleanup_on_game_thread(const float delta_
         }
     }
 
-    const bool succeeded = shutdown_runtime_on_game_thread("卸载");
+    const auto outcome = shutdown_runtime_on_game_thread("卸载");
+    bool should_notify = false;
     {
         const std::lock_guard lock(unloadMutex_);
-        unload_cleanup_scheduler_.complete(succeeded);
+        const bool blocked_before = unload_cleanup_scheduler_.destruction_blocked();
+        unload_cleanup_scheduler_.complete(outcome);
+        // 成功或新近判定不可恢复失败时立即释放等待线程；纯瞬态失败继续按日程重试，
+        // 等待线程保持等待直到得出结论或超时。
+        should_notify =
+            unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded ||
+            (!blocked_before && unload_cleanup_scheduler_.destruction_blocked());
     }
-    if (succeeded) {
+    if (should_notify) {
         unloadCondition_.notify_all();
     }
 }
@@ -1322,13 +1369,23 @@ PALWORLD_EDITOR_API void uninstall_mod(CppUserModBase* mod) {
         return;
     }
     self->request_unload_cleanup();
-    if (!self->wait_for_unload_cleanup(kUnloadCleanupTimeout)) {
-        // 游戏线程未在期限内完成清理（如已停止 Tick）：保留实例与已固定的 DLL，放弃
-        // 销毁，避免在游戏线程回调仍可能执行时释放对象；进程退出时统一回收。
-        Output::send<LogLevel::Error>(
-            STR("PalworldEditor: 游戏线程未在期限内完成卸载清理；放弃销毁实例以避免回调悬垂。\n"));
-        return;
+    switch (self->wait_for_unload_cleanup(kUnloadCleanupTimeout)) {
+        case mod_lifecycle::UnloadCleanupWaitResult::cleanupSucceeded:
+            delete mod;
+            return;
+        case mod_lifecycle::UnloadCleanupWaitResult::cleanupFailed:
+            // 存在不可恢复的恢复损失（如捕获事务已丢失）：保留实例与已固定的 DLL，放弃
+            // 销毁；游戏线程仍会按有界日程重试瞬态失败域。进程退出时统一回收。
+            Output::send<LogLevel::Error>(STR(
+                "PalworldEditor: "
+                "卸载清理已判定失败（存在不可恢复的恢复损失）；放弃销毁实例以避免回调悬垂。\n"));
+            return;
+        case mod_lifecycle::UnloadCleanupWaitResult::timedOut:
+            // 游戏线程未在期限内得出结论（如已停止 Tick）：保留实例与已固定的 DLL，放弃
+            // 销毁，避免在游戏线程回调仍可能执行时释放对象；进程退出时统一回收。
+            Output::send<LogLevel::Error>(STR(
+                "PalworldEditor: 游戏线程未在期限内完成卸载清理；放弃销毁实例以避免回调悬垂。\n"));
+            return;
     }
-    delete mod;
 }
 }  // extern "C"

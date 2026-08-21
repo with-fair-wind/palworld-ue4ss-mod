@@ -67,6 +67,8 @@ if(BUILD_TESTING)
         tests/skill_editor_tests.cpp)
     palworld_add_unit_test(PalworldEditorCommonTests PalworldEditor.Common
         tests/parameter_direction_tests.cpp)
+    palworld_add_unit_test(PalworldEditorModLifecycleTests PalworldEditor.ModLifecycle
+        tests/unload_cleanup_scheduler_tests.cpp)
     palworld_add_unit_test(PalworldEditorBaseResourceSharingTests PalworldEditor.BaseResourceSharing
         tests/base_resource_sharing_tests.cpp)
     palworld_add_unit_test(PalworldEditorRemotePalboxTests PalworldEditor.RemotePalbox

@@ -652,10 +652,12 @@ auto CaptureOverrideRuntime::tick() -> void {
 }
 
 auto CaptureOverrideRuntime::shutdown() -> bool {
+    // 先显式恢复在途事务以拿回成败结果；锁存后失败不可逆转，重试只会重复失败。
     const bool all_restored = restore_pending_transactions();
     impl_->shutdown_restore_failed_ = impl_->shutdown_restore_failed_ || !all_restored;
-    impl_->hookRegistry.unregister_all();
-    state_.hooks_removed();
+    // 复用 unregister_hooks 的"恢复在途事务 + 注销全部 Hook"序列；上面的恢复已把
+    // callDepth 清零，这里的二次恢复是幂等空操作，只为避免两处维护同一注销序列。
+    unregister_hooks();
     state_.end_world();
     return !impl_->shutdown_restore_failed_;
 }
@@ -793,6 +795,9 @@ auto CaptureOverrideRuntime::restore_pending_transactions() -> bool {
 }
 
 auto CaptureOverrideRuntime::unregister_hooks() -> void {
+    // 运行期（关闭开关/LoadMap/安全停用）路径丢弃恢复结果：restore 内部已对每个失败
+    // 调用 disable_for_world 完成域级安全停用，符合"恢复失败→安全停用域"的运行契约；
+    // 只有销毁门控（shutdown）需要消费结果并锁存失败以阻止实例销毁。
     static_cast<void>(restore_pending_transactions());
     impl_->hookRegistry.unregister_all();
     state_.hooks_removed();

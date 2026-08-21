@@ -69,11 +69,14 @@ public:
     auto request_unload_cleanup() -> void;
 
     /**
-     * @brief 等待游戏线程完成卸载清理，最长 timeout。
-     * @retval true 清理已完成（或无需清理）。
-     * @retval false 清理失败或超时；调用方必须放弃销毁实例，避免回调悬垂。
+     * @brief 等待游戏线程得出卸载清理结论，最长 timeout。
+     * @retval cleanupSucceeded 清理成功或无需清理；可以销毁实例。
+     * @retval cleanupFailed 已判定失败（存在不可恢复的恢复损失）；必须放弃销毁实例。
+     * @retval timedOut 期限内未得出结论；必须放弃销毁实例，避免回调悬垂。
+     * @note 判定失败与超时对实例的处置相同（保留到进程退出），但日志与诊断应区分两者。
      */
-    [[nodiscard]] auto wait_for_unload_cleanup(std::chrono::milliseconds timeout) -> bool;
+    [[nodiscard]] auto wait_for_unload_cleanup(std::chrono::milliseconds timeout)
+        -> mod_lifecycle::UnloadCleanupWaitResult;
 
     /**
      * @brief 在 EngineTick 游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
@@ -91,10 +94,12 @@ private:
 
     /**
      * @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。
-     * @retval true 全部必需恢复与 Hook 注销成功。
-     * @retval false 部分恢复/注销失败（保留恢复责任；卸载路径不得放行销毁实例）。
+     * @return 各域结果中最严重的一个（succeeded &lt; transientFailure &lt; permanentFailure）。
+     * @note permanentFailure 意味着恢复责任已不可挽回地丢失（如捕获事务被丢弃），
+     *       卸载路径不得放行实例销毁；transientFailure 的账本仍保留恢复责任，可重试。
      */
-    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept -> bool;
+    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept
+        -> mod_lifecycle::CleanupOutcome;
 
     /**
      * @brief 在游戏线程按低频、有界调度尝试卸载清理，并发布成功或失败状态。
