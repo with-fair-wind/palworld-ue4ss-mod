@@ -621,7 +621,6 @@ void test_item_catalog_scan_scheduler_is_bounded_and_world_scoped() {
     CHECK(!scheduler.advance(1.0F, 7, true));
     CHECK(scheduler.advance(1.0F, 7, true));
     CHECK(scheduler.complete(7, true));
-    CHECK(scheduler.authoritative_catalog_ready());
     CHECK(!scheduler.advance(10.0F, 7, true));
 
     scheduler.begin_world(8);

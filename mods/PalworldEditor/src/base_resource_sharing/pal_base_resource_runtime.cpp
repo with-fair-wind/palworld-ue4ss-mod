@@ -383,6 +383,14 @@ auto notify_array_changed(UObject* object, const CharType* functionName) -> void
     if (targetModule == nullptr || targetProperty == nullptr || sourceProperty == nullptr) {
         return false;
     }
+    // 跨对象结构元素拷贝：source/target 数组的 inner 必须是同一结构身份，防止把
+    // 漂移后的异构元素复制到目标容器。
+    auto* const targetInner = CastField<FStructProperty>(targetProperty->GetInner());
+    auto* const sourceInner = CastField<FStructProperty>(sourceProperty->GetInner());
+    if (targetInner == nullptr || sourceInner == nullptr ||
+        targetInner->GetStruct().Get() != sourceInner->GetStruct().Get()) {
+        return false;
+    }
     FScriptArrayHelper_InContainer infos(sourceProperty, sourceObject);
     const int32 count = infos.Num();
     if (count < 0 || count > kMaximumContainersPerModule) {

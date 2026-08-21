@@ -257,7 +257,8 @@ struct ActiveWriteFunctions {
     if (!pal_game::has_exact_parameter_count(clear, 0) || clear->GetReturnProperty() != nullptr ||
         !pal_game::has_exact_parameter_count(add, 1) || add->GetReturnProperty() != nullptr ||
         !pal_game::is_input_parameter(wazaId) || underlying == nullptr ||
-        !underlying->IsInteger()) {
+        !underlying->IsInteger() ||
+        static_cast<std::size_t>(underlying->GetElementSize()) != sizeof(EPalWazaID)) {
         return std::nullopt;
     }
     return ActiveWriteFunctions{
@@ -311,6 +312,7 @@ struct ActiveWriteFunctions {
         saveProperty == nullptr ? nullptr : saveProperty->ContainerPtrToValuePtr<void>(pal);
     if (saveParameter == nullptr || arrayProperty == nullptr || elementProperty == nullptr ||
         underlyingProperty == nullptr || !underlyingProperty->IsInteger() ||
+        static_cast<std::size_t>(underlyingProperty->GetElementSize()) != sizeof(EPalWazaID) ||
         !!(arrayProperty->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator)) {
         return std::nullopt;
     }

@@ -10,6 +10,7 @@
 #include <string_view>
 #include <vector>
 
+#include <common/hotkey_edge_trigger.hpp>
 #include <pal_remote_palbox/remote_palbox.hpp>
 #include <pal_remote_palbox/remote_palbox_config.hpp>
 
@@ -87,7 +88,7 @@ void test_parse_crlf_and_whitespace() {
 
 void test_edge_trigger_basic() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(!trigger.update(t0, false));                            // 未按不触发
     CHECK(!trigger.update(t0 + std::chrono::seconds(1), false));  // 仍未按
@@ -100,7 +101,7 @@ void test_edge_trigger_basic() {
 
 void test_edge_trigger_debounce_and_repeat() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(trigger.update(t0, true));
     trigger.end_trigger();
@@ -115,7 +116,7 @@ void test_edge_trigger_debounce_and_repeat() {
 
 void test_edge_trigger_held_key_does_not_repeat() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(trigger.update(t0, true));
     trigger.end_trigger();
@@ -130,7 +131,7 @@ void test_edge_trigger_held_key_does_not_repeat() {
 
 void test_edge_trigger_reset() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(trigger.update(t0, true));
     trigger.reset();

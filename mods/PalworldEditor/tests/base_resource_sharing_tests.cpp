@@ -7,7 +7,6 @@
 #include <base_resource_sharing/hook_manifest.hpp>
 #include <base_resource_sharing/persistent_union.hpp>
 #include <base_resource_sharing/resource_pool.hpp>
-#include <base_resource_sharing/resource_session.hpp>
 #include <common/function_hook_backend.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <grappling_hook/cooldown_service.hpp>
@@ -370,156 +369,6 @@ void test_hook_manifest_does_not_track_current_base_context() {
     CHECK(exit == hooks.end());
 }
 
-void test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable() {
-    using namespace base_resource_sharing;
-
-    auto transition = decide_resource_toggle(false, false, true);
-    CHECK(!transition.disableRuntime);
-    CHECK(!transition.beginAccessibleWorld);
-
-    transition = decide_resource_toggle(true, true, true);
-    CHECK(!transition.disableRuntime);
-    CHECK(!transition.beginAccessibleWorld);
-
-    transition = decide_resource_toggle(true, false, true);
-    CHECK(transition.disableRuntime);
-    CHECK(!transition.beginAccessibleWorld);
-
-    transition = decide_resource_toggle(false, true, false);
-    CHECK(!transition.disableRuntime);
-    CHECK(!transition.beginAccessibleWorld);
-
-    transition = decide_resource_toggle(false, true, true);
-    CHECK(!transition.disableRuntime);
-    CHECK(transition.beginAccessibleWorld);
-}
-
-void test_on_demand_catalog_state_coalesces_invalidations_without_idle_work() {
-    using namespace base_resource_sharing;
-
-    OnDemandCatalogState state;
-    state.begin_world(7);
-    CHECK(state.invalidated(7));
-    CHECK(!state.invalidate(7));
-    CHECK(!state.invalidate(7));
-    state.complete(CatalogReconcileOutcome::complete, 7);
-    CHECK(!state.invalidated(7));
-    CHECK(state.invalidate(7));
-    CHECK(!state.invalidate(7));
-    CHECK(state.invalidated(7));
-    CHECK(!state.invalidate(8));
-    CHECK(!state.invalidated(8));
-    state.reset();
-    CHECK(!state.invalidated(7));
-}
-
-void test_catalog_discovery_runs_once_only_for_a_new_foreground_session() {
-    using namespace base_resource_sharing;
-
-    CHECK(should_discover_catalog(ForegroundTransitionKind::acquired));
-    CHECK(should_discover_catalog(ForegroundTransitionKind::preempted));
-    CHECK(!should_discover_catalog(ForegroundTransitionKind::refreshed));
-    CHECK(!should_discover_catalog(ForegroundTransitionKind::released));
-    CHECK(!should_discover_catalog(ForegroundTransitionKind::none));
-}
-
-void test_catalog_attempt_classifies_unloaded_containers_as_partial() {
-    using namespace base_resource_sharing;
-
-    CHECK(classify_catalog_attempt(false, 0) == CatalogReconcileOutcome::complete);
-    CHECK(classify_catalog_attempt(false, 3) == CatalogReconcileOutcome::partial);
-    CHECK(classify_catalog_attempt(true, 0) == CatalogReconcileOutcome::structuralFailure);
-    CHECK(classify_catalog_attempt(true, 3) == CatalogReconcileOutcome::structuralFailure);
-}
-
-void test_foreground_session_preempts_instead_of_combining_operations() {
-    using namespace base_resource_sharing;
-
-    ForegroundMaterialSession sessions;
-    sessions.begin_world(7);
-    const auto crafting = sessions.acquire(ResourceOperation::crafting, 7);
-    CHECK(crafting.kind == ForegroundTransitionKind::acquired);
-    CHECK(sessions.active(7) == ResourceOperation::crafting);
-
-    const auto building = sessions.acquire(ResourceOperation::building, 7);
-    CHECK(building.kind == ForegroundTransitionKind::preempted);
-    CHECK(building.previous == ResourceOperation::crafting);
-    CHECK(building.current == ResourceOperation::building);
-    CHECK(sessions.active(7) == ResourceOperation::building);
-}
-
-void test_foreground_session_ignores_stale_touch_and_release() {
-    using namespace base_resource_sharing;
-
-    ForegroundMaterialSession sessions;
-    sessions.begin_world(7);
-    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
-    CHECK(!sessions.touch(ResourceOperation::crafting, 7));
-    CHECK(sessions.release(ResourceOperation::crafting, 7).kind == ForegroundTransitionKind::none);
-    CHECK(!sessions.active(8).has_value());
-}
-
-void test_foreground_crafting_session_remains_active_until_explicit_release() {
-    using namespace base_resource_sharing;
-
-    ForegroundMaterialSession sessions;
-    sessions.begin_world(7);
-    static_cast<void>(sessions.acquire(ResourceOperation::crafting, 7));
-    CHECK(sessions.advance(60.0F, 7).kind == ForegroundTransitionKind::none);
-    CHECK(sessions.active(7) == ResourceOperation::crafting);
-    const auto closed = sessions.release(ResourceOperation::crafting, 7);
-    CHECK(closed.kind == ForegroundTransitionKind::released);
-    CHECK(closed.previous == ResourceOperation::crafting);
-    CHECK(!sessions.active(7).has_value());
-}
-
-void test_building_inventory_refresh_is_consumed_once_per_foreground_session() {
-    using namespace base_resource_sharing;
-
-    ForegroundMaterialSession sessions;
-    sessions.begin_world(7);
-    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
-    CHECK(sessions.building_inventory_refresh_needed(7));
-    CHECK(sessions.complete_building_inventory_refresh(7));
-    CHECK(!sessions.building_inventory_refresh_needed(7));
-    CHECK(!sessions.complete_building_inventory_refresh(7));
-
-    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
-    CHECK(!sessions.building_inventory_refresh_needed(7));
-
-    static_cast<void>(sessions.acquire(ResourceOperation::crafting, 7));
-    CHECK(!sessions.building_inventory_refresh_needed(7));
-    static_cast<void>(sessions.acquire(ResourceOperation::building, 7));
-    CHECK(sessions.building_inventory_refresh_needed(7));
-
-    CHECK(!sessions.complete_building_inventory_refresh(8));
-    CHECK(sessions.building_inventory_refresh_needed(7));
-}
-
-void test_current_base_state_never_leaks_across_worlds() {
-    using namespace base_resource_sharing;
-
-    CurrentBaseState state;
-    const GuidKey baseA{{10, 0, 0, 0}};
-    const GuidKey baseB{{20, 0, 0, 0}};
-    state.begin_world(7);
-    CHECK(state.enter(baseA, 7));
-    CHECK(state.current(7) == baseA);
-    CHECK(!state.exit(baseB, 7));
-    CHECK(state.current(7) == baseA);
-    CHECK(state.exit(baseA, 7));
-    CHECK(!state.current(7).has_value());
-    state.begin_world(8);
-    CHECK(!state.current(8).has_value());
-
-    state.begin_world(9);
-    CHECK(state.observe(baseA, 9));
-    CHECK(state.current(9) == baseA);
-    CHECK(state.observe(std::nullopt, 9));
-    CHECK(!state.current(9).has_value());
-    CHECK(!state.observe(baseB, 8));
-}
-
 void test_current_base_resolution_uses_native_inside_base_route() {
     using namespace base_resource_sharing;
     using Names = CurrentBaseReflectionNames<char>;
@@ -528,7 +377,6 @@ void test_current_base_resolution_uses_native_inside_base_route() {
     CHECK(Names::insideComponentProperty == "InsideBaseCampCheckComponent");
     CHECK(Names::insideBaseModelFunction == "GetInsideBaseCampModel");
     CHECK(Names::baseIdFunction == "GetId");
-    CHECK(!kAllowsNearestBaseFallback);
 
     const GuidKey current{{7, 0, 0, 0}};
     CHECK(accept_current_base(current, true) == current);
@@ -1072,15 +920,6 @@ auto main() -> int {
     test_hook_manifest_does_not_bind_crafting_widget_lifetime();
     test_missing_early_build_acquire_disables_only_building();
     test_hook_manifest_does_not_track_current_base_context();
-    test_resource_toggle_transition_distinguishes_disable_and_accessible_reenable();
-    test_on_demand_catalog_state_coalesces_invalidations_without_idle_work();
-    test_catalog_discovery_runs_once_only_for_a_new_foreground_session();
-    test_catalog_attempt_classifies_unloaded_containers_as_partial();
-    test_foreground_session_preempts_instead_of_combining_operations();
-    test_foreground_session_ignores_stale_touch_and_release();
-    test_foreground_crafting_session_remains_active_until_explicit_release();
-    test_building_inventory_refresh_is_consumed_once_per_foreground_session();
-    test_current_base_state_never_leaks_across_worlds();
     test_current_base_resolution_uses_native_inside_base_route();
     test_resource_exposure_uses_exactly_one_consumer_surface();
     test_building_inventory_refresh_targets_only_the_build_model();

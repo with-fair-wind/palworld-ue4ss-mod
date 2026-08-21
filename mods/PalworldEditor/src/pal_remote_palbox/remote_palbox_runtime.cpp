@@ -68,13 +68,8 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return UObjectGlobals::FindFirstOf(className);
 }
 
-/** @brief 本地玩家控制器：已提取为 pal_game 公共原语，此处委托保持本模块引用不变。 */
-[[nodiscard]] auto local_player_controller(UObject* worldContext) -> UObject* {
-    return pal_game::local_player_controller(worldContext);
-}
-
 /** @brief 获取 Palworld 世界设置对象（PalUtility::GetGameSetting）。
- *  @details 与 local_player_controller 同模式：PalUtility 是蓝图函数库，静态蓝图
+ *  @details 与 pal_game::local_player_controller 同模式：PalUtility 是蓝图函数库，静态蓝图
  *           UFunction 在 CDO 上 ProcessEvent 调用；返回值持有 BaseCampAreaRange。 */
 [[nodiscard]] auto get_game_setting(UObject* worldContext) -> UObject* {
     auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
@@ -98,13 +93,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     auto* const setting =
         output->GetObjectPropertyValue(output->ContainerPtrToValuePtr<void>(params.data()));
     return pal_game::is_valid(setting) ? setting : nullptr;
-}
-
-/** @brief 无参 bool 返回的 UFunction 调用；不可用时返回 nullopt。
- *  @note 不能以 GetParmsSize()!=0 判定“有入参”：UFunction::ParmsSize 包含返回值槽位，
- *        任何带返回值的无参函数都 >0。这里只按函数名调用已知的无参函数。 */
-[[nodiscard]] auto call_bool(UObject* target, const wchar_t* functionName) -> std::optional<bool> {
-    return pal_game::invoke<bool>(target, functionName);
 }
 
 /** @brief 从模型 getter 读取 FGuid 字段。 */
@@ -151,23 +139,13 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return output > 0.0F;
 }
 
-/** @brief 读取 Actor 位置：已提取为 pal_game::read_actor_location，此处委托。 */
-[[nodiscard]] auto read_location(UObject* object, FVector& output) -> bool {
-    return pal_game::read_actor_location(object, output);
-}
-
-/** @brief 本地玩家的 Pawn：已提取为 pal_game 公共原语（属性优先 + K2_GetPawn 兜底）。 */
-[[nodiscard]] auto get_player_pawn(UObject* controller) -> UObject* {
-    return pal_game::player_pawn(controller);
-}
-
 /** @brief 玩家当前位置（Pawn → K2_GetActorLocation）。 */
 [[nodiscard]] auto read_player_location(UObject* controller, FVector& output) -> bool {
-    auto* const pawn = get_player_pawn(controller);
+    auto* const pawn = pal_game::player_pawn(controller);
     if (pawn == nullptr) {
         return false;
     }
-    return read_location(pawn, output);
+    return pal_game::read_actor_location(pawn, output);
 }
 
 /** @brief 读取基地模型中心（UPalBaseCampModel 的 Transform.Translation）。
@@ -257,7 +235,8 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
 
 /** @brief widget 是否在视口内（IsInViewport 为真）；函数不可用时返回 nullopt。
  *  @details 与 AnywherePalbox 一致：函数不可用的元素不视为打开（由调用方跳过）。
- *  @note 不能以 GetParmsSize()!=0 判定“有入参”，见 call_bool 说明。 */
+ *  @note 不能以 GetParmsSize()!=0 判定“有入参”：UFunction::ParmsSize 包含返回值槽位，
+ *        任何带返回值的无参函数都 >0；这里只按函数名调用已知的无参函数。 */
 [[nodiscard]] auto widget_is_in_viewport(UObject* widget) -> std::optional<bool> {
     return pal_game::invoke<bool>(widget, STR("IsInViewport"));
 }
@@ -483,7 +462,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return finish(RemotePalboxTriggerResult::disabled);
     }
     auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
-    auto* const controller = local_player_controller(worldContext);
+    auto* const controller = pal_game::local_player_controller(worldContext);
     auto* const playerState = find_singleton(STR("PalPlayerState"));
     if (controller == nullptr || playerState == nullptr) {
         note("无法解析本地玩家状态", true);
@@ -501,7 +480,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     }
 
     if (config.disableInDungeon) {
-        const auto inStage = call_bool(playerState, STR("IsInStage"));
+        const auto inStage = pal_game::invoke<bool>(playerState, STR("IsInStage"));
         if (!inStage.has_value()) {
             note("地牢状态不可读，已拦截", true);
             return finish(RemotePalboxTriggerResult::blocked);
@@ -512,7 +491,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         }
     }
     if (config.disableWhileMounted) {
-        const auto riding = call_bool(controller, STR("IsRiding"));
+        const auto riding = pal_game::invoke<bool>(controller, STR("IsRiding"));
         if (!riding.has_value()) {
             note("骑乘状态不可读，已拦截", true);
             return finish(RemotePalboxTriggerResult::blocked);

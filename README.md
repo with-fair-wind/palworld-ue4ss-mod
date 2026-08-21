@@ -73,8 +73,9 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
 - **业务模块**：`game/`（背包/队伍帕鲁反射）、`items/`（物品目录）、`skills/`（技能目录、分类、
   编辑、预设、目标锁定；主动技能数值来自 UHT dump 生成的表）、`pal_stats/`（属性编辑 +
   `SaveParameter` 适配）、`pal_identity/`（Alpha/Lucky/觉醒）、`grappling_hook/`（冷却覆盖）、
-  `capture_override/`（临时捕获覆盖）、`pal_remote_palbox/`（远程终端）、
-  `base_resource_sharing/`（跨据点资源共享）；
+  `capture_override/`（临时捕获覆盖）、`pal_remote_palbox/`（远程终端）、`pal_revive/`（队伍复活）、
+  `revive_timer/`（终端复活计时移除）、`waypoint_teleport/`（标记传送）、
+  `base_resource_sharing/`（跨据点资源共享）、`common/`（跨模块反射原语）、`mod/`（生命周期与 UI 编排）；
 - **安全契约**：跨帧不持有 UObject 指针；修改前重查 GUID 与目标/世界代次；LoadMap 清空请求并撤销
   写权限；形态修改只允许收回状态；每项编辑带写后重读验证与失败回滚/安全停用域；
 - **资源共享**：只接受同公会、已加载、`Chest` 类型普通仓储；通过原生

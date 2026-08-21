@@ -13,6 +13,7 @@
 #include <string>
 #include <string_view>
 
+#include <common/hotkey_edge_trigger.hpp>
 #include <pal_remote_palbox/remote_palbox.hpp>
 #include <pal_remote_palbox/remote_palbox_config.hpp>
 #include <skills/world_session_state.hpp>
@@ -86,7 +87,7 @@ private:
     auto note(const std::string& message, bool isFailure) -> void;
 
     RemotePalboxConfig config_{kDefaultRemotePalboxConfig};
-    HotkeyEdgeTrigger trigger_;
+    pal_game::HotkeyEdgeTrigger trigger_;
     std::string iniPath_;
     std::atomic<bool> requestedOpen_{false};
     /** @brief GUI 写入配置后置位；下一帧 tick 在游戏线程重置按键状态机。 */

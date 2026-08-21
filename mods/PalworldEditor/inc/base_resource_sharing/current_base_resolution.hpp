@@ -33,9 +33,6 @@ struct CurrentBaseReflectionNames<wchar_t> {
     static constexpr std::wstring_view baseIdFunction{L"GetId"};
 };
 
-/** @brief 当前据点解析不得以空间距离猜测据点。 */
-inline constexpr bool kAllowsNearestBaseFallback{false};
-
 /**
  * @brief 只接受有效且存在同公会普通仓储模块的当前据点。
  */

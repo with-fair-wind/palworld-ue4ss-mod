@@ -50,9 +50,9 @@ struct CooldownWritePlan {
     }
     void* const itemId = itemIdProperty->ContainerPtrToValuePtr<void>(weapon);
     auto* const staticIdProperty = itemIdStruct->FindProperty(FName(STR("StaticId"), FNAME_Find));
-    auto* const staticId = staticIdProperty == nullptr
-                               ? nullptr
-                               : staticIdProperty->ContainerPtrToValuePtr<FName>(itemId);
+    auto* const staticIdName = CastField<FNameProperty>(staticIdProperty);
+    auto* const staticId =
+        staticIdName == nullptr ? nullptr : staticIdName->ContainerPtrToValuePtr<FName>(itemId);
     return staticId == nullptr ? std::string{} : text_encoding::to_utf8(staticId->ToString());
 }
 

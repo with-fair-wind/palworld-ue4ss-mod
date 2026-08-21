@@ -599,6 +599,8 @@ if (config_.disableDuringCombat && player_state_bool("IsInCombat")) { note("战�
 `player_state_bool`/`player_controller_bool`：`UObjectGlobals::FindFirstOf(STR("PalPlayerState"))` / `STR("PalPlayerController")`（与现有代码同款，见 `pal_base_resource_runtime.cpp:145` 的 `GetLocalPalPlayerController` 模式），`GetFunctionByNameInChain` + `ProcessEvent`，返回 `FBoolProperty` 的 `ReturnValue`。
 
 **战斗检测为验证点（fail-open）**：dump 中 `PalPlayerState`/`PalPlayerController` 均未发现 `IsInCombat`/`IsInBattle`。实现时在 `PalPlayerState` 与 `PalPlayerController` 上依次探测 `IsInCombat`、`IsInBattle`、`IsInDungeonBattle` 候选函数名；全部不可用 → 该门控视为 false（fail-open，战斗不拦截）。默认开关为关，风险低；验证结果回填设计文档。
+> **已过时（superseded）**：战斗门控最终实现为 fail-closed——启用时状态不可读即拦截
+> （`remote_palbox_runtime.cpp` 的 `pal_game::player_in_battle_mode` 返回空 → `blocked`）。
 
 3. **基地解析**（镜像 `pal_base_resource_runtime.cpp:157-216` 的 `read_base_ids`/`try_get_base_model`）：
 
