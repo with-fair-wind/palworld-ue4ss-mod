@@ -162,6 +162,11 @@ auto PalworldEditorMod::wait_for_unload_cleanup(const std::chrono::milliseconds 
     return UnloadCleanupWaitResult::cleanupSucceeded;
 }
 
+auto PalworldEditorMod::unload_failure_is_permanent() -> bool {
+    const std::lock_guard lock(unloadMutex_);
+    return unload_cleanup_scheduler_.destruction_blocked();
+}
+
 auto PalworldEditorMod::on_unreal_init() -> void {
     if (runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
         skillRuntimeSnapshot_.lastResult =
@@ -204,26 +209,29 @@ auto PalworldEditorMod::on_unreal_init() -> void {
             .OwnerModName = STR("PalworldEditor"),
             .HookName = STR("WorldTransitionBegin"),
         };
-        loadMapPreCallbackId_ = Hook::RegisterLoadMapPreCallback(
-            [this, callbackGate](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&,
-                                 FURL, UPendingNetGame*, FString&) {
-                if (!callbackGate->try_enter()) {
-                    return;
-                }
-                const RuntimeCallbackLease lease{*callbackGate};
-                if (!unloadRequested_.load(std::memory_order_acquire) &&
-                    !runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
-                    try {
-                        begin_world_transition();
-                    } catch (...) {
-                        log_noexcept<LogLevel::Error>(
-                            STR("PalworldEditor: LoadMap pre-callback threw; runtime disabled.\n"));
-                        runtimeSafetyDisabled_.store(true, std::memory_order_release);
-                        shutdown_runtime_on_game_thread("LoadMap 前置回调异常");
+        {
+            const std::lock_guard lock(unloadMutex_);
+            loadMapPreCallbackId_ = Hook::RegisterLoadMapPreCallback(
+                [this, callbackGate](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&,
+                                     FURL, UPendingNetGame*, FString&) {
+                    if (!callbackGate->try_enter()) {
+                        return;
                     }
-                }
-            },
-            loadMapPreOptions);
+                    const RuntimeCallbackLease lease{*callbackGate};
+                    if (!unloadRequested_.load(std::memory_order_acquire) &&
+                        !runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+                        try {
+                            begin_world_transition();
+                        } catch (...) {
+                            log_noexcept<LogLevel::Error>(STR(
+                                "PalworldEditor: LoadMap pre-callback threw; runtime disabled.\n"));
+                            runtimeSafetyDisabled_.store(true, std::memory_order_release);
+                            shutdown_runtime_on_game_thread("LoadMap 前置回调异常");
+                        }
+                    }
+                },
+                loadMapPreOptions);
+        }
 
         const Hook::FCallbackOptions loadMapPostOptions{
             .bOnce = false,
@@ -231,26 +239,30 @@ auto PalworldEditorMod::on_unreal_init() -> void {
             .OwnerModName = STR("PalworldEditor"),
             .HookName = STR("WorldTransitionFinish"),
         };
-        loadMapPostCallbackId_ = Hook::RegisterLoadMapPostCallback(
-            [this, callbackGate](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&,
-                                 FURL, UPendingNetGame*, FString&) {
-                if (!callbackGate->try_enter()) {
-                    return;
-                }
-                const RuntimeCallbackLease lease{*callbackGate};
-                if (!unloadRequested_.load(std::memory_order_acquire) &&
-                    !runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
-                    try {
-                        finish_world_transition();
-                    } catch (...) {
-                        log_noexcept<LogLevel::Error>(STR(
-                            "PalworldEditor: LoadMap post-callback threw; runtime disabled.\n"));
-                        runtimeSafetyDisabled_.store(true, std::memory_order_release);
-                        shutdown_runtime_on_game_thread("LoadMap 后置回调异常");
+        {
+            const std::lock_guard lock(unloadMutex_);
+            loadMapPostCallbackId_ = Hook::RegisterLoadMapPostCallback(
+                [this, callbackGate](Hook::TCallbackIterationData<bool>&, UEngine*, FWorldContext&,
+                                     FURL, UPendingNetGame*, FString&) {
+                    if (!callbackGate->try_enter()) {
+                        return;
                     }
-                }
-            },
-            loadMapPostOptions);
+                    const RuntimeCallbackLease lease{*callbackGate};
+                    if (!unloadRequested_.load(std::memory_order_acquire) &&
+                        !runtimeSafetyDisabled_.load(std::memory_order_acquire)) {
+                        try {
+                            finish_world_transition();
+                        } catch (...) {
+                            log_noexcept<LogLevel::Error>(
+                                STR("PalworldEditor: LoadMap post-callback threw; runtime "
+                                    "disabled.\n"));
+                            runtimeSafetyDisabled_.store(true, std::memory_order_release);
+                            shutdown_runtime_on_game_thread("LoadMap 后置回调异常");
+                        }
+                    }
+                },
+                loadMapPostOptions);
+        }
 
         const Hook::FCallbackOptions engineTickOptions{
             .bOnce = false,
@@ -258,16 +270,19 @@ auto PalworldEditorMod::on_unreal_init() -> void {
             .OwnerModName = STR("PalworldEditor"),
             .HookName = STR("GameThreadTick"),
         };
-        engineTickCallbackId_ = Hook::RegisterEngineTickPreCallback(
-            [this, callbackGate](Hook::TCallbackIterationData<void>&, UEngine*,
-                                 const float deltaSeconds, bool) {
-                if (!callbackGate->try_enter()) {
-                    return;
-                }
-                const RuntimeCallbackLease lease{*callbackGate};
-                game_thread_tick(deltaSeconds);
-            },
-            engineTickOptions);
+        {
+            const std::lock_guard lock(unloadMutex_);
+            engineTickCallbackId_ = Hook::RegisterEngineTickPreCallback(
+                [this, callbackGate](Hook::TCallbackIterationData<void>&, UEngine*,
+                                     const float deltaSeconds, bool) {
+                    if (!callbackGate->try_enter()) {
+                        return;
+                    }
+                    const RuntimeCallbackLease lease{*callbackGate};
+                    game_thread_tick(deltaSeconds);
+                },
+                engineTickOptions);
+        }
     } catch (...) {
         log_noexcept<LogLevel::Error>(
             STR("PalworldEditor: registering required lifecycle callbacks threw an exception.\n"));
@@ -807,6 +822,7 @@ auto PalworldEditorMod::process_utility_requests() -> void {
 }
 
 auto PalworldEditorMod::unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void {
+    const std::lock_guard lock(unloadMutex_);
     if (callbackId == Hook::ERROR_ID) {
         return;
     }
@@ -1379,15 +1395,20 @@ PALWORLD_EDITOR_API void uninstall_mod(CppUserModBase* mod) {
         case mod_lifecycle::UnloadCleanupWaitResult::cleanupSucceeded:
             delete mod;
             return;
-        case mod_lifecycle::UnloadCleanupWaitResult::cleanupFailed:
-            // 已判定失败：存在不可恢复的恢复损失（如捕获事务已丢失），或尝试次数耗尽
-            // 仍有瞬态账本未恢复。保留实例与已固定的 DLL，放弃销毁；游戏线程在耗尽前
-            // 已按有界日程尽力重试。进程退出时统一回收。
-            Output::send<LogLevel::Error>(
-                STR("PalworldEditor: "
-                    "卸载清理已判定失败（不可恢复损失或尝试次数耗尽）；放弃销毁实例以避免回调悬垂。"
-                    "\n"));
+        case mod_lifecycle::UnloadCleanupWaitResult::cleanupFailed: {
+            // 已判定失败：区分不可恢复损失与尝试耗尽两种成因（处置相同，仅诊断粒度）。
+            const bool permanent = self->unload_failure_is_permanent();
+            if (permanent) {
+                Output::send<LogLevel::Error>(
+                    STR("PalworldEditor: 卸载清理已判定失败（存在不可恢复的恢复损失，如捕获"
+                        "事务已丢失）；放弃销毁实例以避免回调悬垂。\n"));
+            } else {
+                Output::send<LogLevel::Error>(
+                    STR("PalworldEditor: 卸载清理已判定失败（尝试次数耗尽，仍有瞬态账本未"
+                        "恢复）；放弃销毁实例以避免回调悬垂。\n"));
+            }
             return;
+        }
         case mod_lifecycle::UnloadCleanupWaitResult::timedOut:
             // 游戏线程未在期限内得出结论（如已停止 Tick）：保留实例与已固定的 DLL，放弃
             // 销毁，避免在游戏线程回调仍可能执行时释放对象；进程退出时统一回收。

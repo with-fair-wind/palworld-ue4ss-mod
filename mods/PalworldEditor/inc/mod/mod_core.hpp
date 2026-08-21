@@ -79,6 +79,14 @@ public:
         -> mod_lifecycle::UnloadCleanupWaitResult;
 
     /**
+     * @brief 卸载判定失败的具体成因；仅用于 uninstall_mod() 区分日志。
+     * @retval true  存在不可恢复的恢复损失（permanentFailure 已锁存）。
+     * @retval false 尝试次数耗尽，仍有瞬态账本未恢复。
+     * @note 只在 wait_for_unload_cleanup 返回 cleanupFailed 后调用；两成因处置相同。
+     */
+    [[nodiscard]] auto unload_failure_is_permanent() -> bool;
+
+    /**
      * @brief 在 EngineTick 游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
      * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口。
      */
@@ -89,8 +97,11 @@ private:
     static constexpr std::size_t kPassiveMetadataBatchSize = 8;
     /** @brief 每个 EngineTick 被动技能分类反射的软时间预算。 */
     static constexpr auto kPassiveMetadataBudget = std::chrono::microseconds{500};
-    /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
-    static auto unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void;
+    /**
+     * @brief 注销一个已注册的全局回调并把 id 复位；在 unloadMutex_ 下执行，
+     *        与 wait_for_unload_cleanup 的读侧同步（消除回调 id 的数据竞争）。
+     */
+    auto unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void;
 
     /**
      * @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。

@@ -476,6 +476,8 @@ inline auto read_inventory() -> std::vector<InvEntry> {
         std::string name;
         // ItemId 是 FPalItemId 结构（首成员 StaticId FName），不是 FName 属性：
         // 必须经结构内字段类型化读取，禁止把容器指针直接当 FName 解引用。
+        // 不做 matches_struct_identity 名称校验：UStruct 名（PalItemId）未经 UHT dump
+        // 证实，猜错会导致物品目录全空；字段级类型校验已保证 fail-closed。
         if (FStructProperty* itemIdProp =
                 CastField<FStructProperty>(slot->GetPropertyByNameInChain(STR("ItemId")))) {
             if (UStruct* itemIdStruct = itemIdProp->GetStruct().Get()) {
@@ -812,6 +814,7 @@ inline auto scan_all_items() -> ItemCatalogScanResult {
         FProperty* idProperty = obj->GetPropertyByNameInChain(STR("ID"));
         // Raw ID 可能是 FName 属性或 FPalItemId 结构（首成员 StaticId FName）：
         // 两种布局都经属性类型化读取，类型不匹配时跳过（fail-closed）。
+        // 不做结构名称校验：UStruct 名未经 dump 证实，字段级校验已保证 fail-closed。
         const FName* id = nullptr;
         if (FNameProperty* idName = CastField<FNameProperty>(idProperty)) {
             id = idName->ContainerPtrToValuePtr<FName>(obj);
