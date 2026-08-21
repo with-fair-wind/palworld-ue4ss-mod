@@ -58,12 +58,13 @@ cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
 提交前至少运行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-- 七个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖参数方向判定、卸载清理调度、物品目录、
+- 八个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖参数方向判定、卸载清理调度（有界重试、
+  永久失败销毁阻断）、物品目录、
   技能目录与编辑、配置、资源共享、远程终端、捕获覆盖、复活计时和标记传送等纯值逻辑；反射调用、
   ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
 - 游戏内应看到 `PalworldEditor loaded (v1.7.0)`；除物品、技能与世界切换回归外，逐项验证清单见

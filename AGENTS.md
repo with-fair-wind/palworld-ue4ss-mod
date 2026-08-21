@@ -71,12 +71,12 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 提交前至少执行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-七个测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、卸载清理调度、物品目录、技能目录、技能编辑
+八个测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、卸载清理调度、物品目录、技能目录、技能编辑
 服务、配置、资源池、能力判断、恢复账本、远程终端、捕获覆盖、复活计时与标记传送决策和生命周期逻辑。
 反射调用、ImGui 和 Palworld 存档效果仍需游戏内端到端验证。
 
@@ -131,13 +131,20 @@ LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原
 还应从桌面连续冷启动游戏多次，确认进入主界面前不会调用技能目录反射导致崩溃；进入存档、Common
 主背包就绪后目录应自动加载当前语言名称，手动刷新仍能正常工作。实际帧时间改善必须在游戏内测量。
 还应在分别启用捕获覆盖、爪钩覆盖、无限堆叠与资源共享后执行 UE4SS 热重载：卸载线程有界等待
-EngineTick 在游戏线程恢复覆盖并注销业务 Hook；首次失败后只允许每 2 秒重试，最多 5 次，成功后立即
-停止，耗尽次数后不得继续反射轮询。等待超时（10 秒）时必须放弃销毁实例与 Hook（DLL 已固定，进程
-退出统一回收），不得在清理未完成时释放对象；卸载请求发出后，保留的 LoadMap 回调必须立即钝化，
-GUI tab 也不得再渲染或提交请求，不得让失败后遗留的旧实例重新进入世界生命周期。日志不得出现
-非游戏线程 `ProcessEvent`、残留回调、死锁或访问已卸载 DLL。由于 UE4SS 将失效的全局回调闭包交给
-独立 GC 线程延迟销毁，而 `CppMod` 会立即 `FreeLibrary`，本 Mod 在构造时固定自身 DLL 到进程退出；
-热重载只重建实例与 Hook，不承诺重新映射已替换的 DLL 文件。进程退出路径不以热重载结果替代验证。
+EngineTick 在游戏线程恢复覆盖并注销业务 Hook；立即执行一次，失败后每 2 秒重试，总尝试次数（含
+首次）最多 5 次，成功后立即停止，耗尽次数后不得继续反射轮询。清理失败区分瞬态与永久：账本型
+失败（爪钩/堆叠/复活计时/资源共享）与反射异常为瞬态，按上述日程重试；捕获事务恢复失败为永久
+（pending 事务已丢弃、无法挽回），立即锁存并让等待线程马上得到失败结论，但重试日程为其余瞬态
+失败域继续。等待结果三态——成功（销毁实例）、判定失败与超时（均放弃销毁，保留实例与已固定 DLL
+到进程退出，不得在清理未完成时释放对象），日志必须区分判定失败与超时；重试总预算必须完整落在
+10 秒等待窗口内（dllmain 有 static_assert 固化）。卸载请求发出后，保留的 LoadMap 回调必须立即
+钝化，GUI tab 也不得再渲染或提交请求，不得让失败后遗留的旧实例重新进入世界生命周期。日志不得
+出现非游戏线程 `ProcessEvent`、残留回调、死锁或访问已卸载 DLL。析构中的
+`RuntimeCallbackGate::deactivate_and_wait()` 只是排空在途全局回调（保护实例生命周期），与卸载
+线程 `wait_for_unload_cleanup` 的清理等待是两个不同的等待，不得混淆或合并。由于 UE4SS 将失效
+的全局回调闭包交给独立 GC 线程延迟销毁，而 `CppMod` 会立即 `FreeLibrary`，本 Mod 在构造时固定
+自身 DLL 到进程退出；热重载只重建实例与 Hook，不承诺重新映射已替换的 DLL 文件。进程退出路径
+不以热重载结果替代验证。
 
 ## 分支与协作流程
 
@@ -423,8 +430,9 @@ UObject 查找、目录发现、数组读写或日志。所有必需 Hook 已注
 日志只记录目录发现和持久图差量准备/恢复耗时。资源共享与爪钩无冷却都是本次游戏进程内的动态开关，
 每次 DLL 加载默认关闭，不读取、创建或写入 `config.ini`。不要与 IntegratedStorage、UBIM Lite、
 BlueprintResearch 或等价的仓储登记/材料路径 mod 同时启用。热卸载无需用户预先关闭开关；卸载线程
-只请求并等待 EngineTick，由游戏线程按“立即一次、失败后每 2 秒、最多 5 次”的有界策略恢复账本并注销
-业务 Hook，析构线程自身不得访问 Unreal。
+只请求并等待 EngineTick，由游戏线程按"立即一次、失败后每 2 秒、总尝试次数（含首次）最多 5 次"
+的有界策略恢复账本并注销业务 Hook；本模块恢复失败属瞬态（账本保留恢复责任），仅捕获事务恢复
+失败为永久并立即终结等待，析构线程自身不得访问 Unreal。
 
 **部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建
 出的 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，
