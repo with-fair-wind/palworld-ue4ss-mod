@@ -53,7 +53,7 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 
 # 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorCommonTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
@@ -135,8 +135,9 @@ EngineTick 在游戏线程恢复覆盖并注销业务 Hook；立即执行一次�
 首次）最多 5 次，成功后立即停止，耗尽次数后不得继续反射轮询。清理失败区分瞬态与永久：账本型
 失败（爪钩/堆叠/复活计时/资源共享）与反射异常为瞬态，按上述日程重试；捕获事务恢复失败为永久
 （pending 事务已丢弃、无法挽回），立即锁存并让等待线程马上得到失败结论，但重试日程为其余瞬态
-失败域继续。等待结果三态——成功（销毁实例）、判定失败与超时（均放弃销毁，保留实例与已固定 DLL
-到进程退出，不得在清理未完成时释放对象），日志必须区分判定失败与超时；重试总预算必须完整落在
+失败域继续。等待结果三态——成功（销毁实例）、判定失败（存在不可恢复损失**或尝试次数耗尽**）与
+超时（10 秒内未得出结论）均放弃销毁，保留实例与已固定 DLL
+到进程退出，不得在清理未完成时释放对象，日志必须区分判定失败与超时；重试总预算必须完整落在
 10 秒等待窗口内（dllmain 有 static_assert 固化）。卸载请求发出后，保留的 LoadMap 回调必须立即
 钝化，GUI tab 也不得再渲染或提交请求，不得让失败后遗留的旧实例重新进入世界生命周期。日志不得
 出现非游戏线程 `ProcessEvent`、残留回调、死锁或访问已卸载 DLL。析构中的

@@ -113,8 +113,11 @@ PalworldEditorMod::~PalworldEditorMod() {
                 unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded;
         }
         if (!cleanup_succeeded) {
-            log_noexcept<LogLevel::Error>(STR(
-                "PalworldEditor: 析构时卸载清理未完成；必须经由 uninstall_mod() 等待游戏线程。\n"));
+            // 此路径对应卸载已判定失败或超时后保留的实例随进程退出析构，
+            // 卸载请求已由 uninstall_mod() 处理并得出结论；游戏状态可能未完全恢复。
+            log_noexcept<LogLevel::Error>(
+                STR("PalworldEditor: 析构时卸载清理未成功（判定失败或超时）；实例保留至进程"
+                    "退出，游戏状态可能未完全恢复。\n"));
         }
     }
     runtimeCallbackGate_->deactivate_and_wait();
@@ -134,24 +137,26 @@ auto PalworldEditorMod::wait_for_unload_cleanup(const std::chrono::milliseconds 
     -> mod_lifecycle::UnloadCleanupWaitResult {
     using mod_lifecycle::UnloadCleanupPhase;
     using mod_lifecycle::UnloadCleanupWaitResult;
+    std::unique_lock lock(unloadMutex_);
     if (engineTickCallbackId_ == Hook::ERROR_ID) {
         // 回调从未注册（on_unreal_init 未执行）：没有需要游戏线程执行的清理。
-        const std::lock_guard lock(unloadMutex_);
         unload_cleanup_scheduler_.mark_not_required();
         return unload_cleanup_scheduler_.phase() == UnloadCleanupPhase::succeeded
                    ? UnloadCleanupWaitResult::cleanupSucceeded
                    : UnloadCleanupWaitResult::cleanupFailed;
     }
-    std::unique_lock lock(unloadMutex_);
     const bool decided = unloadCondition_.wait_for(lock, timeout, [this] {
         return unload_cleanup_scheduler_.phase() == UnloadCleanupPhase::succeeded ||
+               unload_cleanup_scheduler_.phase() == UnloadCleanupPhase::failed ||
                unload_cleanup_scheduler_.destruction_blocked();
     });
     if (!decided) {
         return UnloadCleanupWaitResult::timedOut;
     }
-    // 永久失败一旦锁存就不得被后续任何状态覆盖：销毁判定以它为先。
-    if (unload_cleanup_scheduler_.destruction_blocked()) {
+    // 永久失败锁存或尝试次数耗尽都是"已判定失败"：一旦锁存就不得被后续任何状态覆盖，
+    // 销毁判定以它为先；瞬态耗尽也归失败（实例保留），而不是按 succeeded 误删实例。
+    if (unload_cleanup_scheduler_.destruction_blocked() ||
+        unload_cleanup_scheduler_.phase() == UnloadCleanupPhase::failed) {
         return UnloadCleanupWaitResult::cleanupFailed;
     }
     return UnloadCleanupWaitResult::cleanupSucceeded;
@@ -437,10 +442,11 @@ auto PalworldEditorMod::attempt_unload_cleanup_on_game_thread(const float delta_
         const std::lock_guard lock(unloadMutex_);
         const bool blocked_before = unload_cleanup_scheduler_.destruction_blocked();
         unload_cleanup_scheduler_.complete(outcome);
-        // 成功或新近判定不可恢复失败时立即释放等待线程；纯瞬态失败继续按日程重试，
-        // 等待线程保持等待直到得出结论或超时。
+        // 成功、进入失败终态（尝试耗尽）或新近判定不可恢复失败时立即释放等待线程；
+        // 纯瞬态失败继续按日程重试，等待线程保持等待直到得出结论或超时。
         should_notify =
             unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::succeeded ||
+            unload_cleanup_scheduler_.phase() == mod_lifecycle::UnloadCleanupPhase::failed ||
             (!blocked_before && unload_cleanup_scheduler_.destruction_blocked());
     }
     if (should_notify) {
@@ -1374,11 +1380,13 @@ PALWORLD_EDITOR_API void uninstall_mod(CppUserModBase* mod) {
             delete mod;
             return;
         case mod_lifecycle::UnloadCleanupWaitResult::cleanupFailed:
-            // 存在不可恢复的恢复损失（如捕获事务已丢失）：保留实例与已固定的 DLL，放弃
-            // 销毁；游戏线程仍会按有界日程重试瞬态失败域。进程退出时统一回收。
-            Output::send<LogLevel::Error>(STR(
-                "PalworldEditor: "
-                "卸载清理已判定失败（存在不可恢复的恢复损失）；放弃销毁实例以避免回调悬垂。\n"));
+            // 已判定失败：存在不可恢复的恢复损失（如捕获事务已丢失），或尝试次数耗尽
+            // 仍有瞬态账本未恢复。保留实例与已固定的 DLL，放弃销毁；游戏线程在耗尽前
+            // 已按有界日程尽力重试。进程退出时统一回收。
+            Output::send<LogLevel::Error>(
+                STR("PalworldEditor: "
+                    "卸载清理已判定失败（不可恢复损失或尝试次数耗尽）；放弃销毁实例以避免回调悬垂。"
+                    "\n"));
             return;
         case mod_lifecycle::UnloadCleanupWaitResult::timedOut:
             // 游戏线程未在期限内得出结论（如已停止 Tick）：保留实例与已固定的 DLL，放弃

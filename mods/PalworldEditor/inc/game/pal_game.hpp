@@ -474,10 +474,18 @@ inline auto read_inventory() -> std::vector<InvEntry> {
         }
         const int32_t count = read_slot_stack_count(slot);
         std::string name;
-        if (FProperty* itemIdProp = slot->GetPropertyByNameInChain(STR("ItemId"))) {
-            if (FName* sid = itemIdProp->ContainerPtrToValuePtr<FName>(slot)) {
-                const std::wstring w = sid->ToString();
-                name = text_encoding::to_utf8(w);
+        // ItemId 是 FPalItemId 结构（首成员 StaticId FName），不是 FName 属性：
+        // 必须经结构内字段类型化读取，禁止把容器指针直接当 FName 解引用。
+        if (FStructProperty* itemIdProp =
+                CastField<FStructProperty>(slot->GetPropertyByNameInChain(STR("ItemId")))) {
+            if (UStruct* itemIdStruct = itemIdProp->GetStruct().Get()) {
+                if (FNameProperty* staticIdProp = CastField<FNameProperty>(
+                        itemIdStruct->FindProperty(FName(STR("StaticId"), FNAME_Find)))) {
+                    if (const FName* sid = staticIdProp->ContainerPtrToValuePtr<FName>(
+                            itemIdProp->ContainerPtrToValuePtr<void>(slot))) {
+                        name = text_encoding::to_utf8(sid->ToString());
+                    }
+                }
             }
         }
         if (count > 0 && !name.empty()) {
@@ -802,10 +810,21 @@ inline auto scan_all_items() -> ItemCatalogScanResult {
         }
         ++passedFilter;
         FProperty* idProperty = obj->GetPropertyByNameInChain(STR("ID"));
-        if (idProperty == nullptr) {
-            return LoopAction::Continue;
+        // Raw ID 可能是 FName 属性或 FPalItemId 结构（首成员 StaticId FName）：
+        // 两种布局都经属性类型化读取，类型不匹配时跳过（fail-closed）。
+        const FName* id = nullptr;
+        if (FNameProperty* idName = CastField<FNameProperty>(idProperty)) {
+            id = idName->ContainerPtrToValuePtr<FName>(obj);
+        } else if (FStructProperty* idStruct = CastField<FStructProperty>(idProperty)) {
+            if (UStruct* idStructType = idStruct->GetStruct().Get()) {
+                if (FNameProperty* staticIdName = CastField<FNameProperty>(
+                        idStructType->FindProperty(FName(STR("StaticId"), FNAME_Find)))) {
+                    id = staticIdName->ContainerPtrToValuePtr<FName>(
+                        idStruct->ContainerPtrToValuePtr<void>(obj));
+                }
+            }
         }
-        if (FName* id = idProperty->ContainerPtrToValuePtr<FName>(obj)) {
+        if (id != nullptr) {
             const std::wstring rawId = id->ToString();
             if (!rawId.empty()) {
                 ++withId;

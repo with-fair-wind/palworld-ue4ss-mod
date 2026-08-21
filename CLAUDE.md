@@ -222,6 +222,9 @@ triplet 时这些宏才生效。Ninja 是单配置生成器，preset 必须**显
 
 1. **纯值领域层**（`inc/` 下 `*_editor.hpp`、`*_service.hpp`、`*_catalog.hpp`、`*_state.hpp` 等）：
    只依赖标准库，承载值、快照、请求、队列、校验、账本、帧预算等全部决策逻辑，可单元测试；
+   （例外：`inc/common/hotkey_capture_ui.hpp` 为被远程终端与标记传送两个 UI 共用的 header-only
+   ImGui 原语，不接触反射，按既有归属保留在 common/；`game_foreground.hpp`/`text_encoding.hpp`
+   为含 Windows.h 的平台工具原语，同属文档化例外。）
 2. **游戏线程适配层**（`src/` 下 `pal_*.cpp`、`*_gateway.cpp`）：在 EngineTick 或对应 UFunction 的
    游戏线程回调内做反射查找与读写，把引擎状态翻译成纯值请求；
 3. **UI 层**（`src/mod/editor_ui.cpp` 与各业务模块 `src/*/*_ui.cpp`）：ImGui 回调只做展示与输入，通过原子请求、

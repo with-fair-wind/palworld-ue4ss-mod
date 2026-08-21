@@ -44,7 +44,9 @@ enum class UnloadCleanupWaitResult : std::uint8_t {
  * @note 永久失败会立即锁存 destruction_blocked() 释放等待线程，但重试日程照常继续——
  *       保留的实例仍可为账本在案的瞬态失败域恢复游戏状态。
  * @note 重试总预算（首次立即 + 最多 kMaximumAttempts-1 次间隔重试）必须完整落在
- *       dllmain 的卸载等待窗口（kUnloadCleanupTimeout）内，那里有 static_assert 固化。
+ *       dllmain 的卸载等待窗口（kUnloadCleanupTimeout）内，那里有 static_assert 固化；
+ *       该预算只含间隔，不含单次清理耗时——清理耗时吃掉余量时退化为等待超时、
+ *       保留实例（安全方向），不会误删。
  */
 class UnloadCleanupScheduler final {
 public:

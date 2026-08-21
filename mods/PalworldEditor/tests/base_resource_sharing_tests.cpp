@@ -298,10 +298,6 @@ void test_hook_manifest_contains_only_exact_foreground_hooks() {
     CHECK(std::ranges::count(hooks, HookEvent::structureChanged, &HookSpec::postEvent) == 1);
 }
 
-void test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete() {
-    using namespace base_resource_sharing;
-}
-
 void test_hook_backend_avoids_the_generic_full_name_dispatcher() {
     using pal_game::FunctionHookBackend;
     using pal_game::select_function_hook_backend;
@@ -914,7 +910,6 @@ auto main() -> int {
     test_hook_manifest_uses_low_frequency_building_menu_boundaries();
     test_persistent_union_hook_manifest_has_no_menu_lifetime_or_high_frequency_queries();
     test_hook_manifest_contains_only_exact_foreground_hooks();
-    test_hook_registration_stops_polling_after_the_minimal_manifest_is_complete();
     test_hook_backend_avoids_the_generic_full_name_dispatcher();
     test_hook_manifest_validates_live_unions_before_original_consumption();
     test_hook_manifest_does_not_bind_crafting_widget_lifetime();

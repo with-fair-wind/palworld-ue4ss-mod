@@ -215,7 +215,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | 字段 | 容器 | 类型 | 源文件:行 |
 |---|---|---|---|
 | `StackCount` | ItemSlot | int | `inc/game/pal_game.hpp:427, 488` |
-| `ItemId` | ItemSlot | FName | `inc/game/pal_game.hpp:457` |
+| `ItemId` | ItemSlot | `FPalItemId` 结构（首成员 `StaticId` FName） | `inc/game/pal_game.hpp:477` |
 | `ID` | StaticItemData/Container | FName | `inc/game/pal_game.hpp:754` 等 |
 | `MaxStackCount` | `PalStaticItemDataBase` | int32 | `src/items/stack_limit_gateway.cpp:93` |
 | `StaticItemDataAsset` | `PalItemIDManager` | object | `inc/game/pal_game.hpp:639` |

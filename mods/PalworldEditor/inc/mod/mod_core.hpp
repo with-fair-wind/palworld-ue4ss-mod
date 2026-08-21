@@ -217,12 +217,6 @@ private:
     };
 
     /**
-     * @brief 把整数限制到闭区间 `[lo, hi]`。
-     * @return 限制后的整数。
-     */
-    static auto clamp(int v, int lo, int hi) -> int;
-
-    /**
      * @brief 在技能目录中查找 Raw ID 对应的本地化标签。
      * @return 找到时返回 `本地化名称 [RawId]`，未找到时回退为原始 ID。
      */
