@@ -30,6 +30,7 @@
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <common/game_foreground.hpp>
 #include <common/game_reflection.hpp>
+#include <common/player_state_gate.hpp>
 #include <common/text_encoding.hpp>
 #include <game/pal_base_camp_reflection.hpp>
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
@@ -481,34 +482,22 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
 
     if (config.disableInDungeon) {
         const auto inStage = pal_game::invoke<bool>(playerState, STR("IsInStage"));
-        if (!inStage.has_value()) {
-            note("地牢状态不可读，已拦截", true);
-            return finish(RemotePalboxTriggerResult::blocked);
-        }
-        if (*inStage) {
-            note("地牢内已禁用", true);
+        if (!pal_game::state_gate_allows(inStage)) {
+            note(inStage.has_value() ? "地牢内已禁用" : "地牢状态不可读，已拦截", true);
             return finish(RemotePalboxTriggerResult::blocked);
         }
     }
     if (config.disableWhileMounted) {
         const auto riding = pal_game::invoke<bool>(controller, STR("IsRiding"));
-        if (!riding.has_value()) {
-            note("骑乘状态不可读，已拦截", true);
-            return finish(RemotePalboxTriggerResult::blocked);
-        }
-        if (*riding) {
-            note("骑乘中已禁用", true);
+        if (!pal_game::state_gate_allows(riding)) {
+            note(riding.has_value() ? "骑乘中已禁用" : "骑乘状态不可读，已拦截", true);
             return finish(RemotePalboxTriggerResult::blocked);
         }
     }
     if (config.disableDuringCombat) {
         const auto battle = pal_game::player_in_battle_mode(controller);
-        if (!battle.has_value()) {
-            note("战斗状态不可读，已拦截", true);
-            return finish(RemotePalboxTriggerResult::blocked);
-        }
-        if (*battle) {
-            note("战斗中已禁用", true);
+        if (!pal_game::state_gate_allows(battle)) {
+            note(battle.has_value() ? "战斗中已禁用" : "战斗状态不可读，已拦截", true);
             return finish(RemotePalboxTriggerResult::blocked);
         }
     }

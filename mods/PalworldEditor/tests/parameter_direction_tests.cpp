@@ -5,7 +5,7 @@
 #include <iostream>
 
 #include <common/parameter_direction.hpp>
-
+#include <common/player_state_gate.hpp>
 namespace {
 int failures = 0;
 
@@ -79,12 +79,18 @@ void test_non_parm_or_null_flags_are_rejected() {
     }
 }
 
+void test_player_state_gate_is_fail_closed() {
+    CHECK(!pal_game::state_gate_allows(std::nullopt));
+    CHECK(!pal_game::state_gate_allows(std::optional<bool>{true}));
+    CHECK(pal_game::state_gate_allows(std::optional<bool>{false}));
+}
+
 int main() {
     test_all_flag_combinations();
     test_const_reference_is_input_only();
     test_plain_output_is_writable();
     test_return_value_is_never_input_or_output();
-    test_non_parm_or_null_flags_are_rejected();
+    test_player_state_gate_is_fail_closed();
     if (failures != 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

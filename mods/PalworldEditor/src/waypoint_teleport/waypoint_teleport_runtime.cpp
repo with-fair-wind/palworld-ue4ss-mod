@@ -20,6 +20,7 @@
 #include <Unreal/UnrealCoreStructs.hpp>
 #include <common/game_foreground.hpp>
 #include <common/game_reflection.hpp>
+#include <common/player_state_gate.hpp>
 #include <common/text_encoding.hpp>
 #include <waypoint_teleport/waypoint_teleport_runtime.hpp>
 
@@ -47,6 +48,21 @@ inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
 inline constexpr double kRefinementMinDeltaCm{100.0};
 /** @brief 到达点离地间隙（cm）：高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。 */
 inline constexpr double kArrivalClearanceCm{150.0};
+
+/**
+ * @brief 校验传送反射中已确认的 FVector 兼容结构。
+ * @details `FHitResult::ImpactPoint` 可能使用 UE 的 Vector_NetQuantize；仅接受两个
+ *          明确的 12 字节向量结构，不放宽为任意同尺寸结构。
+ */
+[[nodiscard]] auto matches_trace_vector_property(FStructProperty* property) -> bool {
+    if (property == nullptr ||
+        static_cast<std::size_t>(property->GetElementSize()) != sizeof(FVector)) {
+        return false;
+    }
+    auto* const structObject = property->GetStruct().Get();
+    return structObject != nullptr && (structObject->GetName() == STR("Vector") ||
+                                       structObject->GetName() == STR("Vector_NetQuantize"));
+}
 
 /** @brief 解析 LocationManager（PalUtility:GetLocationManager）。 */
 [[nodiscard]] auto location_manager(UObject* worldContext) -> UObject* {
@@ -165,8 +181,8 @@ inline constexpr double kArrivalClearanceCm{150.0};
         !pal_game::is_input_parameter(ignoreSelfProperty) ||
         !pal_game::is_output_parameter(outHitProperty) ||
         !pal_game::is_return_parameter(resultProperty) ||
-        !pal_game::matches_struct_identity(startProperty, STR("Vector"), sizeof(FVector)) ||
-        !pal_game::matches_struct_identity(endProperty, STR("Vector"), sizeof(FVector))) {
+        !matches_trace_vector_property(startProperty) ||
+        !matches_trace_vector_property(endProperty)) {
         return std::nullopt;
     }
     auto* const hitStruct = outHitProperty->GetStruct().Get();
@@ -174,7 +190,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
         hitStruct == nullptr ? nullptr
                              : CastField<FStructProperty>(
                                    hitStruct->FindProperty(FName(STR("ImpactPoint"), FNAME_Find)));
-    if (!pal_game::matches_struct_identity(impactProperty, STR("Vector"), sizeof(FVector))) {
+    if (!matches_trace_vector_property(impactProperty)) {
         return std::nullopt;
     }
 
@@ -277,7 +293,7 @@ inline constexpr double kArrivalClearanceCm{150.0};
         !pal_game::is_output_parameter(hitProperty) ||
         !pal_game::is_input_parameter(teleportProperty) ||
         !pal_game::is_return_parameter(resultProperty) ||
-        !pal_game::matches_struct_identity(locationProperty, STR("Vector"), sizeof(FVector))) {
+        !matches_trace_vector_property(locationProperty)) {
         return std::nullopt;
     }
 
@@ -413,29 +429,23 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
     }
     if (config.disableInDungeon) {
         const auto inStage = pal_game::invoke<bool>(playerState, STR("IsInStage"));
-        if (!inStage.has_value()) {
-            return finish(WaypointTeleportResult::blocked, "地牢状态不可读，已拦截", true);
-        }
-        if (*inStage) {
-            return finish(WaypointTeleportResult::blocked, "地牢内已禁用", true);
+        if (!pal_game::state_gate_allows(inStage)) {
+            return finish(WaypointTeleportResult::blocked,
+                          inStage.has_value() ? "地牢内已禁用" : "地牢状态不可读，已拦截", true);
         }
     }
     if (config.disableWhileMounted) {
         const auto riding = pal_game::invoke<bool>(controller, STR("IsRiding"));
-        if (!riding.has_value()) {
-            return finish(WaypointTeleportResult::blocked, "骑乘状态不可读，已拦截", true);
-        }
-        if (*riding) {
-            return finish(WaypointTeleportResult::blocked, "骑乘中已禁用", true);
+        if (!pal_game::state_gate_allows(riding)) {
+            return finish(WaypointTeleportResult::blocked,
+                          riding.has_value() ? "骑乘中已禁用" : "骑乘状态不可读，已拦截", true);
         }
     }
     if (config.disableDuringCombat) {
         const auto battle = pal_game::player_in_battle_mode(controller);
-        if (!battle.has_value()) {
-            return finish(WaypointTeleportResult::blocked, "战斗状态不可读，已拦截", true);
-        }
-        if (*battle) {
-            return finish(WaypointTeleportResult::blocked, "战斗中已禁用", true);
+        if (!pal_game::state_gate_allows(battle)) {
+            return finish(WaypointTeleportResult::blocked,
+                          battle.has_value() ? "战斗中已禁用" : "战斗状态不可读，已拦截", true);
         }
     }
 

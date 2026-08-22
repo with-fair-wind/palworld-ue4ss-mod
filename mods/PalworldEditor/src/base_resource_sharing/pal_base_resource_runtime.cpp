@@ -110,6 +110,33 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return to_key(output).valid();
 }
 
+/**
+ * @brief 读取已加载物品容器的持久 ID 属性。
+ * @details `UPalContainerBase::ID` 的类型是 `FPalContainerId`，其唯一字段 `ID` 是 `FGuid`。
+ *          直接按属性链读取，避免把包装结构的函数返回值误当作 Guid。
+ */
+[[nodiscard]] auto try_get_container_id(UObject* container, FGuid& output) -> bool {
+    if (!pal_game::is_valid(container)) {
+        return false;
+    }
+    auto* const containerIdProperty =
+        CastField<FStructProperty>(container->GetPropertyByNameInChain(STR("ID")));
+    if (containerIdProperty == nullptr || containerIdProperty->GetStruct().Get() == nullptr ||
+        containerIdProperty->GetStruct()->GetName() != STR("PalContainerId") ||
+        static_cast<std::size_t>(containerIdProperty->GetElementSize()) != sizeof(FGuid)) {
+        return false;
+    }
+    auto* const idProperty = CastField<FStructProperty>(
+        containerIdProperty->GetStruct()->GetPropertyByNameInChain(STR("ID")));
+    if (!pal_game::matches_struct_identity(idProperty, STR("Guid"), sizeof(FGuid))) {
+        return false;
+    }
+    idProperty->CopyCompleteValue(
+        &output, idProperty->ContainerPtrToValuePtr<void>(
+                     containerIdProperty->ContainerPtrToValuePtr<void>(container)));
+    return to_key(output).valid();
+}
+
 [[nodiscard]] auto try_get_object(UObject* target, const CharType* functionName, UObject*& output)
     -> bool {
     const auto result = pal_game::invoke<UObject*>(target, functionName);
@@ -352,8 +379,7 @@ auto notify_array_changed(UObject* object, const CharType* functionName) -> void
     FGuid resolvedId{};
     if (!try_get_object(concrete, STR("GetItemContainerModule"), itemContainerModule) ||
         !try_get_object(itemContainerModule, STR("GetContainer"), container) ||
-        !try_get_guid(container, STR("GetId"), resolvedId) ||
-        to_key(resolvedId) != entry.containerId) {
+        !try_get_container_id(container, resolvedId) || to_key(resolvedId) != entry.containerId) {
         return nullptr;
     }
     return container;
