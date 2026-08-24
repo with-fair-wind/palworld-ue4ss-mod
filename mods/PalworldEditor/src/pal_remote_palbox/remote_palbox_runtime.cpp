@@ -12,7 +12,6 @@
 #endif
 
 #include <chrono>
-#include <cstddef>
 #include <fstream>
 #include <mutex>
 #include <optional>
@@ -46,6 +45,66 @@ namespace {
 inline constexpr std::uint64_t kMaxConsecutiveTimeouts = 5;
 /** @brief HUD 可堆叠窗口数组的防御性上限。 */
 inline constexpr int32 kMaximumStackableWidgets = 4'096;
+
+struct CreateDispatchParameterContract {
+    FObjectPropertyBase* worldContextObject{};
+    FClassProperty* parameterClass{};
+    FObjectPropertyBase* returnValue{};
+};
+
+struct PushContract {
+    FClassProperty* widgetClass{};
+    FObjectPropertyBase* parameter{};
+    FStructProperty* returnValue{};
+};
+
+[[nodiscard]] auto resolve_create_dispatch_parameter_contract(UFunction* function)
+    -> std::optional<CreateDispatchParameterContract> {
+    auto* const worldContextObject = function == nullptr
+                                         ? nullptr
+                                         : CastField<FObjectPropertyBase>(function->FindProperty(
+                                               FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const parameterClass =
+        function == nullptr ? nullptr
+                            : CastField<FClassProperty>(
+                                  function->FindProperty(FName(STR("ParameterClass"), FNAME_Find)));
+    auto* const returnValue =
+        function == nullptr ? nullptr
+                            : CastField<FObjectPropertyBase>(
+                                  function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    if (!pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(worldContextObject) ||
+        !pal_game::is_input_parameter(parameterClass) ||
+        !pal_game::is_return_parameter(returnValue)) {
+        return std::nullopt;
+    }
+    return CreateDispatchParameterContract{.worldContextObject = worldContextObject,
+                                           .parameterClass = parameterClass,
+                                           .returnValue = returnValue};
+}
+
+[[nodiscard]] auto resolve_push_contract(UFunction* function) -> std::optional<PushContract> {
+    auto* const widgetClass =
+        function == nullptr ? nullptr
+                            : CastField<FClassProperty>(
+                                  function->FindProperty(FName(STR("WidgetClass"), FNAME_Find)));
+    auto* const parameter = function == nullptr
+                                ? nullptr
+                                : CastField<FObjectPropertyBase>(
+                                      function->FindProperty(FName(STR("Parameter"), FNAME_Find)));
+    auto* const returnValue =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    if (!pal_game::has_exact_parameter_count(function, 3) ||
+        !pal_game::is_input_parameter(widgetClass) || !pal_game::is_input_parameter(parameter) ||
+        !pal_game::is_return_parameter(returnValue) ||
+        !pal_game::matches_struct_identity(returnValue, STR("Guid"), sizeof(FGuid))) {
+        return std::nullopt;
+    }
+    return PushContract{
+        .widgetClass = widgetClass, .parameter = parameter, .returnValue = returnValue};
+}
 
 /** @brief 选择策略输入与打开终端所需 GUID 的单一候选记录。 */
 struct ResolvedBaseCampCandidate {
@@ -635,24 +694,20 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
     }
 
     {
-        pal_game::FunctionParams createParams{createParamFunction};
-        auto* const contextProperty = CastField<FObjectPropertyBase>(
-            createParamFunction->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
-        auto* const classInputProperty = CastField<FClassProperty>(
-            createParamFunction->FindProperty(FName(STR("ParameterClass"), FNAME_Find)));
-        auto* const createReturnProperty =
-            CastField<FObjectPropertyBase>(createParamFunction->GetReturnProperty());
-        if (contextProperty == nullptr || classInputProperty == nullptr ||
-            createReturnProperty == nullptr) {
+        const auto createContract = resolve_create_dispatch_parameter_contract(createParamFunction);
+        if (!createContract.has_value()) {
             note("HUD 参数工厂布局不可用", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
-        contextProperty->SetObjectPropertyValue(
-            contextProperty->ContainerPtrToValuePtr<void>(createParams.data()), worldContext);
-        classInputProperty->SetPropertyValueInContainer(createParams.data(), palBoxParamClass);
+        pal_game::FunctionParams createParams{createParamFunction};
+        createContract->worldContextObject->SetObjectPropertyValue(
+            createContract->worldContextObject->ContainerPtrToValuePtr<void>(createParams.data()),
+            worldContext);
+        createContract->parameterClass->SetPropertyValueInContainer(createParams.data(),
+                                                                    palBoxParamClass);
         hudService->ProcessEvent(createParamFunction, createParams.data());
-        auto* const dispatchParameter = createReturnProperty->GetObjectPropertyValue(
-            createReturnProperty->ContainerPtrToValuePtr<void>(createParams.data()));
+        auto* const dispatchParameter = createContract->returnValue->GetObjectPropertyValue(
+            createContract->returnValue->ContainerPtrToValuePtr<void>(createParams.data()));
         if (!pal_game::is_valid(dispatchParameter)) {
             note("HUD 参数对象创建失败", true);
             return finish(RemotePalboxTriggerResult::unavailable);
@@ -672,24 +727,24 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         ownerProperty->CopyCompleteValue(
             ownerProperty->ContainerPtrToValuePtr<void>(dispatchParameter), &ownerMapObjectId);
 
-        pal_game::FunctionParams pushParams{pushFunction};
-        auto* const widgetClassProperty = CastField<FClassProperty>(
-            pushFunction->FindProperty(FName(STR("WidgetClass"), FNAME_Find)));
-        auto* const parameterProperty = CastField<FObjectPropertyBase>(
-            pushFunction->FindProperty(FName(STR("Parameter"), FNAME_Find)));
-        auto* const pushReturnProperty =
-            CastField<FStructProperty>(pushFunction->GetReturnProperty());
-        if (widgetClassProperty == nullptr || parameterProperty == nullptr ||
-            pushReturnProperty == nullptr) {
+        const auto pushContract = resolve_push_contract(pushFunction);
+        if (!pushContract.has_value()) {
             note("HUD Push 布局不可用", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
-        widgetClassProperty->SetPropertyValueInContainer(pushParams.data(), widgetClass);
-        parameterProperty->SetObjectPropertyValue(
-            parameterProperty->ContainerPtrToValuePtr<void>(pushParams.data()), dispatchParameter);
+        pal_game::FunctionParams pushParams{pushFunction};
+        pushContract->widgetClass->SetPropertyValueInContainer(pushParams.data(), widgetClass);
+        pushContract->parameter->SetObjectPropertyValue(
+            pushContract->parameter->ContainerPtrToValuePtr<void>(pushParams.data()),
+            dispatchParameter);
         hudService->ProcessEvent(pushFunction, pushParams.data());
-        // Push 是异步的：调用成功时 widget ID 可能尚未生成（全零），不能据此判失败；
-        // 界面已成功入栈视为打开成功，返回值仅用于确定流程已走通。
+        FGuid widgetId{};
+        pushContract->returnValue->CopyCompleteValue(
+            &widgetId, pushContract->returnValue->ContainerPtrToValuePtr<void>(pushParams.data()));
+        if (!widgetId.is_valid()) {
+            note("HUD Push 未返回有效 widget ID", true);
+            return finish(RemotePalboxTriggerResult::unavailable);
+        }
     }
 
     {
@@ -710,8 +765,10 @@ auto RemotePalboxRuntime::probe_domain() -> bool {
         return false;
     }
     const bool hudOk =
-        hudService->GetFunctionByNameInChain(STR("CreateDispatchParameterForK2Node")) != nullptr &&
-        hudService->GetFunctionByNameInChain(STR("Push")) != nullptr;
+        resolve_create_dispatch_parameter_contract(
+            hudService->GetFunctionByNameInChain(STR("CreateDispatchParameterForK2Node")))
+            .has_value() &&
+        resolve_push_contract(hudService->GetFunctionByNameInChain(STR("Push"))).has_value();
     const bool managerOk = manager->GetFunctionByNameInChain(STR("GetBaseCampIds")) != nullptr &&
                            manager->GetFunctionByNameInChain(STR("TryGetModel")) != nullptr;
     domainProbed_ = true;

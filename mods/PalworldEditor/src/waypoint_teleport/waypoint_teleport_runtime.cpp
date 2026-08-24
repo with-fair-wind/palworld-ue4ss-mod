@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <fstream>
 #include <optional>
 #include <vector>
@@ -48,20 +49,151 @@ inline constexpr auto kRefinementDelay = std::chrono::milliseconds{1200};
 inline constexpr double kRefinementMinDeltaCm{100.0};
 /** @brief 到达点离地间隙（cm）：高于玩家胶囊半高（~90cm），避免放置后胶囊与地表相交。 */
 inline constexpr double kArrivalClearanceCm{150.0};
+inline constexpr std::size_t kPalworld10HitResultSize{0xE8};
+inline constexpr std::size_t kLinearColorSize{0x10};
 
 /**
- * @brief 校验传送反射中已确认的 FVector 兼容结构。
- * @details `FHitResult::ImpactPoint` 可能使用 UE 的 Vector_NetQuantize；仅接受两个
- *          明确的 12 字节向量结构，不放宽为任意同尺寸结构。
+ * @brief 校验精确 FVector 属性。
  */
-[[nodiscard]] auto matches_trace_vector_property(FStructProperty* property) -> bool {
-    if (property == nullptr ||
-        static_cast<std::size_t>(property->GetElementSize()) != sizeof(FVector)) {
-        return false;
+[[nodiscard]] auto matches_vector_property(FStructProperty* property) -> bool {
+    return pal_game::matches_struct_identity(property, STR("Vector"), sizeof(FVector));
+}
+
+[[nodiscard]] auto matches_trace_impact_property(FStructProperty* property) -> bool {
+    return matches_vector_property(property) ||
+           pal_game::matches_struct_identity(property, STR("Vector_NetQuantize"), sizeof(FVector));
+}
+
+struct LineTraceContract {
+    FObjectPropertyBase* worldContextObject{};
+    FStructProperty* start{};
+    FStructProperty* end{};
+    FByteProperty* traceChannel{};
+    FBoolProperty* traceComplex{};
+    FArrayProperty* actorsToIgnore{};
+    FByteProperty* drawDebugType{};
+    FStructProperty* outHit{};
+    FBoolProperty* ignoreSelf{};
+    FStructProperty* traceColor{};
+    FStructProperty* traceHitColor{};
+    FFloatProperty* drawTime{};
+    FBoolProperty* returnValue{};
+    FStructProperty* impactPoint{};
+};
+
+[[nodiscard]] auto resolve_line_trace_contract(UFunction* function)
+    -> std::optional<LineTraceContract> {
+    if (!pal_game::has_exact_parameter_count(function, 13)) {
+        return std::nullopt;
     }
-    auto* const structObject = property->GetStruct().Get();
-    return structObject != nullptr && (structObject->GetName() == STR("Vector") ||
-                                       structObject->GetName() == STR("Vector_NetQuantize"));
+    auto* const worldContextObject = CastField<FObjectPropertyBase>(
+        function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
+    auto* const start =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("Start"), FNAME_Find)));
+    auto* const end =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("End"), FNAME_Find)));
+    auto* const traceChannel =
+        CastField<FByteProperty>(function->FindProperty(FName(STR("TraceChannel"), FNAME_Find)));
+    auto* const traceComplex =
+        CastField<FBoolProperty>(function->FindProperty(FName(STR("bTraceComplex"), FNAME_Find)));
+    auto* const actorsToIgnore =
+        CastField<FArrayProperty>(function->FindProperty(FName(STR("ActorsToIgnore"), FNAME_Find)));
+    auto* const ignoredActor = actorsToIgnore == nullptr
+                                   ? nullptr
+                                   : CastField<FObjectPropertyBase>(actorsToIgnore->GetInner());
+    auto* const drawDebugType =
+        CastField<FByteProperty>(function->FindProperty(FName(STR("DrawDebugType"), FNAME_Find)));
+    auto* const outHit =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("OutHit"), FNAME_Find)));
+    auto* const ignoreSelf =
+        CastField<FBoolProperty>(function->FindProperty(FName(STR("bIgnoreSelf"), FNAME_Find)));
+    auto* const traceColor =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("TraceColor"), FNAME_Find)));
+    auto* const traceHitColor =
+        CastField<FStructProperty>(function->FindProperty(FName(STR("TraceHitColor"), FNAME_Find)));
+    auto* const drawTime =
+        CastField<FFloatProperty>(function->FindProperty(FName(STR("DrawTime"), FNAME_Find)));
+    auto* const returnValue =
+        CastField<FBoolProperty>(function->FindProperty(FName(STR("ReturnValue"), FNAME_Find)));
+    auto* const hitStruct = outHit == nullptr ? nullptr : outHit->GetStruct().Get();
+    auto* const impactPoint =
+        hitStruct == nullptr ? nullptr
+                             : CastField<FStructProperty>(
+                                   hitStruct->FindProperty(FName(STR("ImpactPoint"), FNAME_Find)));
+    if (!pal_game::is_input_parameter(worldContextObject) || !pal_game::is_input_parameter(start) ||
+        !matches_vector_property(start) || !pal_game::is_input_parameter(end) ||
+        !matches_vector_property(end) || !pal_game::is_input_parameter(traceChannel) ||
+        !pal_game::is_input_parameter(traceComplex) ||
+        !pal_game::is_input_parameter(actorsToIgnore) || ignoredActor == nullptr ||
+        !!(actorsToIgnore->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator) ||
+        !pal_game::is_input_parameter(drawDebugType) || !pal_game::is_output_parameter(outHit) ||
+        !pal_game::matches_struct_identity(outHit, STR("HitResult"), kPalworld10HitResultSize) ||
+        !pal_game::is_input_parameter(ignoreSelf) || !pal_game::is_input_parameter(traceColor) ||
+        !pal_game::matches_struct_identity(traceColor, STR("LinearColor"), kLinearColorSize) ||
+        !pal_game::is_input_parameter(traceHitColor) ||
+        !pal_game::matches_struct_identity(traceHitColor, STR("LinearColor"), kLinearColorSize) ||
+        !pal_game::is_input_parameter(drawTime) || !pal_game::is_return_parameter(returnValue) ||
+        !matches_trace_impact_property(impactPoint)) {
+        return std::nullopt;
+    }
+    return LineTraceContract{.worldContextObject = worldContextObject,
+                             .start = start,
+                             .end = end,
+                             .traceChannel = traceChannel,
+                             .traceComplex = traceComplex,
+                             .actorsToIgnore = actorsToIgnore,
+                             .drawDebugType = drawDebugType,
+                             .outHit = outHit,
+                             .ignoreSelf = ignoreSelf,
+                             .traceColor = traceColor,
+                             .traceHitColor = traceHitColor,
+                             .drawTime = drawTime,
+                             .returnValue = returnValue,
+                             .impactPoint = impactPoint};
+}
+
+struct SetActorLocationContract {
+    FStructProperty* newLocation{};
+    FBoolProperty* sweep{};
+    FStructProperty* sweepHitResult{};
+    FBoolProperty* teleport{};
+    FBoolProperty* returnValue{};
+};
+
+[[nodiscard]] auto resolve_set_actor_location_contract(UFunction* function)
+    -> std::optional<SetActorLocationContract> {
+    auto* const newLocation =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("NewLocation"), FNAME_Find)));
+    auto* const sweep =
+        function == nullptr
+            ? nullptr
+            : CastField<FBoolProperty>(function->FindProperty(FName(STR("bSweep"), FNAME_Find)));
+    auto* const sweepHitResult =
+        function == nullptr ? nullptr
+                            : CastField<FStructProperty>(
+                                  function->FindProperty(FName(STR("SweepHitResult"), FNAME_Find)));
+    auto* const teleport =
+        function == nullptr
+            ? nullptr
+            : CastField<FBoolProperty>(function->FindProperty(FName(STR("bTeleport"), FNAME_Find)));
+    auto* const returnValue = function == nullptr ? nullptr
+                                                  : CastField<FBoolProperty>(function->FindProperty(
+                                                        FName(STR("ReturnValue"), FNAME_Find)));
+    if (!pal_game::has_exact_parameter_count(function, 5) ||
+        !pal_game::is_input_parameter(newLocation) || !matches_vector_property(newLocation) ||
+        !pal_game::is_input_parameter(sweep) || !pal_game::is_output_parameter(sweepHitResult) ||
+        !pal_game::matches_struct_identity(sweepHitResult, STR("HitResult"),
+                                           kPalworld10HitResultSize) ||
+        !pal_game::is_input_parameter(teleport) || !pal_game::is_return_parameter(returnValue)) {
+        return std::nullopt;
+    }
+    return SetActorLocationContract{.newLocation = newLocation,
+                                    .sweep = sweep,
+                                    .sweepHitResult = sweepHitResult,
+                                    .teleport = teleport,
+                                    .returnValue = returnValue};
 }
 
 /** @brief 解析 LocationManager（PalUtility:GetLocationManager）。 */
@@ -159,38 +291,8 @@ inline constexpr double kArrivalClearanceCm{150.0};
         nullptr, nullptr, STR("/Script/Engine.Default__KismetSystemLibrary"));
     auto* const function =
         library == nullptr ? nullptr : library->GetFunctionByNameInChain(STR("LineTraceSingle"));
-    if (!pal_game::is_valid(library) || !pal_game::has_exact_parameter_count(function, 13)) {
-        return std::nullopt;
-    }
-    auto* const contextProperty = CastField<FObjectPropertyBase>(
-        function->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const startProperty =
-        CastField<FStructProperty>(function->FindProperty(FName(STR("Start"), FNAME_Find)));
-    auto* const endProperty =
-        CastField<FStructProperty>(function->FindProperty(FName(STR("End"), FNAME_Find)));
-    auto* const channelProperty =
-        CastField<FByteProperty>(function->FindProperty(FName(STR("TraceChannel"), FNAME_Find)));
-    auto* const ignoreSelfProperty =
-        CastField<FBoolProperty>(function->FindProperty(FName(STR("bIgnoreSelf"), FNAME_Find)));
-    auto* const outHitProperty =
-        CastField<FStructProperty>(function->FindProperty(FName(STR("OutHit"), FNAME_Find)));
-    auto* const resultProperty = CastField<FBoolProperty>(function->GetReturnProperty());
-    if (!pal_game::is_input_parameter(contextProperty) ||
-        !pal_game::is_input_parameter(startProperty) ||
-        !pal_game::is_input_parameter(endProperty) || channelProperty == nullptr ||
-        !pal_game::is_input_parameter(ignoreSelfProperty) ||
-        !pal_game::is_output_parameter(outHitProperty) ||
-        !pal_game::is_return_parameter(resultProperty) ||
-        !matches_trace_vector_property(startProperty) ||
-        !matches_trace_vector_property(endProperty)) {
-        return std::nullopt;
-    }
-    auto* const hitStruct = outHitProperty->GetStruct().Get();
-    auto* const impactProperty =
-        hitStruct == nullptr ? nullptr
-                             : CastField<FStructProperty>(
-                                   hitStruct->FindProperty(FName(STR("ImpactPoint"), FNAME_Find)));
-    if (!matches_trace_vector_property(impactProperty)) {
+    const auto contract = resolve_line_trace_contract(function);
+    if (!pal_game::is_valid(library) || !contract.has_value()) {
         return std::nullopt;
     }
 
@@ -204,24 +306,29 @@ inline constexpr double kArrivalClearanceCm{150.0};
     end.SetZ(markerZ - kTraceWindow);
 
     pal_game::FunctionParams params{function};
-    contextProperty->SetObjectPropertyValue(
-        contextProperty->ContainerPtrToValuePtr<void>(params.data()), worldContext);
-    startProperty->CopyCompleteValue(startProperty->ContainerPtrToValuePtr<void>(params.data()),
-                                     &start);
-    endProperty->CopyCompleteValue(endProperty->ContainerPtrToValuePtr<void>(params.data()), &end);
-    channelProperty->SetPropertyValueInContainer(
+    contract->worldContextObject->SetObjectPropertyValue(
+        contract->worldContextObject->ContainerPtrToValuePtr<void>(params.data()), worldContext);
+    contract->start->CopyCompleteValue(contract->start->ContainerPtrToValuePtr<void>(params.data()),
+                                       &start);
+    contract->end->CopyCompleteValue(contract->end->ContainerPtrToValuePtr<void>(params.data()),
+                                     &end);
+    contract->traceChannel->SetPropertyValueInContainer(
         params.data(), static_cast<std::uint8_t>(0));  // 通道 0（PalSquad 实证）
-    ignoreSelfProperty->SetPropertyValueInContainer(params.data(), true);
+    contract->traceComplex->SetPropertyValueInContainer(params.data(), false);
+    contract->drawDebugType->SetPropertyValueInContainer(params.data(),
+                                                         static_cast<std::uint8_t>(0));
+    contract->ignoreSelf->SetPropertyValueInContainer(params.data(), true);
+    contract->drawTime->SetPropertyValueInContainer(params.data(), 0.0F);
     library->ProcessEvent(function, params.data());
-    if (!resultProperty->GetPropertyValueInContainer(params.data())) {
+    if (!contract->returnValue->GetPropertyValueInContainer(params.data())) {
         return std::optional<double>{};  // 未命中：空 optional 内层
     }
     // ImpactPoint 是 FHitResult 内部字段：容器必须是 OutHit 在参数缓冲中的实例，
     // 而不是参数缓冲本身（否则读到 Start/End 区域的错位数据）。
-    void* const hitInstance = outHitProperty->ContainerPtrToValuePtr<void>(params.data());
+    void* const hitInstance = contract->outHit->ContainerPtrToValuePtr<void>(params.data());
     FVector impact{};
-    impactProperty->CopyCompleteValue(&impact,
-                                      impactProperty->ContainerPtrToValuePtr<void>(hitInstance));
+    contract->impactPoint->CopyCompleteValue(
+        &impact, contract->impactPoint->ContainerPtrToValuePtr<void>(hitInstance));
     return std::optional<double>{impact.Z()};
 }
 
@@ -269,41 +376,18 @@ inline constexpr double kArrivalClearanceCm{150.0};
     auto* const function = pal_game::is_valid(pawn)
                                ? pawn->GetFunctionByNameInChain(STR("K2_SetActorLocation"))
                                : nullptr;
-    auto* const locationProperty =
-        function == nullptr ? nullptr
-                            : CastField<FStructProperty>(
-                                  function->FindProperty(FName(STR("NewLocation"), FNAME_Find)));
-    auto* const sweepProperty =
-        function == nullptr
-            ? nullptr
-            : CastField<FBoolProperty>(function->FindProperty(FName(STR("bSweep"), FNAME_Find)));
-    auto* const hitProperty =
-        function == nullptr ? nullptr
-                            : CastField<FStructProperty>(
-                                  function->FindProperty(FName(STR("SweepHitResult"), FNAME_Find)));
-    auto* const teleportProperty =
-        function == nullptr
-            ? nullptr
-            : CastField<FBoolProperty>(function->FindProperty(FName(STR("bTeleport"), FNAME_Find)));
-    auto* const resultProperty =
-        function == nullptr ? nullptr : CastField<FBoolProperty>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 5) ||
-        !pal_game::is_input_parameter(locationProperty) ||
-        !pal_game::is_input_parameter(sweepProperty) ||
-        !pal_game::is_output_parameter(hitProperty) ||
-        !pal_game::is_input_parameter(teleportProperty) ||
-        !pal_game::is_return_parameter(resultProperty) ||
-        !matches_trace_vector_property(locationProperty)) {
+    const auto contract = resolve_set_actor_location_contract(function);
+    if (!contract.has_value()) {
         return std::nullopt;
     }
 
     pal_game::FunctionParams params{function};
-    locationProperty->CopyCompleteValue(
-        locationProperty->ContainerPtrToValuePtr<void>(params.data()), &destination);
-    sweepProperty->SetPropertyValueInContainer(params.data(), false);
-    teleportProperty->SetPropertyValueInContainer(params.data(), true);
+    contract->newLocation->CopyCompleteValue(
+        contract->newLocation->ContainerPtrToValuePtr<void>(params.data()), &destination);
+    contract->sweep->SetPropertyValueInContainer(params.data(), false);
+    contract->teleport->SetPropertyValueInContainer(params.data(), true);
     pawn->ProcessEvent(function, params.data());
-    return resultProperty->GetPropertyValueInContainer(params.data());
+    return contract->returnValue->GetPropertyValueInContainer(params.data());
 }
 }  // namespace
 

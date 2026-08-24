@@ -1,12 +1,13 @@
 # Palworld SDK 依赖清单（运行时反射核查用）
 
 本清单登记 PalworldEditor mod 通过运行时反射按 `FName` 引用的全部 SDK 标识符，用于每次
-Palworld 更新后快速核查兼容性。权威数据源是仓库内 `Dump/UHTHeaderDump/Pal/Public/`（按类拆分的
-UHT 头）与 `Dump/CXXHeaderDump/Pal.hpp`（合并 CXX 头，含偏移）。
+Palworld 更新后快速核查兼容性。权威数据源是仓库内 `Dump/UHTHeaderDump/`（按类拆分的 UHT 头）
+与 `Dump/CXXHeaderDump/*.hpp`（按模块合并的 CXX 头，含偏移）。
 
 > **设计原则**：mod 遵循 `AGENTS.md` 的反射安全规则，**运行时按名精确校验、失败 fail-closed**，
-> 从不依赖编译期偏移或结构体类型全名。因此本清单只登记「名称存在性」与「值敏感项」，不登记内存
-> 偏移。重命名的标识符会让对应功能安全停用（而非崩溃），但仍需核查以恢复功能。
+> 从不依赖编译期偏移；一般结构按字段与属性子类校验，ABI 敏感结构还会校验运行时类型名与大小。
+> 本清单登记「名称存在性」「值敏感项」和这些精确结构身份，不登记成员偏移。重命名或大小变化会让
+> 对应功能安全停用（而非崩溃），但仍需核查以恢复功能。
 
 ## 核查流程
 
@@ -263,9 +264,13 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `AddPassiveSkill` | 2 参数 `(AddSkill, OverrideSkill)` | 确认仍为 2 参（`pal_skills.cpp:534` 校验 `has_exact_parameter_count(2)`） |
 | `EPalBaseCampItemContainerType` | Chest=0 | 确认 Chest 仍为 0（`pal_base_resource_runtime.cpp:615` 用 `!= 0` 判非箱） |
 | 容器事件 Hook 参数 | `UPalMapObjectConcreteModelBase*` | 确认两 Hook 仍接收 ConcreteModel 指针 |
+| `FPalContainerId` | 类型名 `PalContainerId`、16 字节，内部 `ID` 为 `FGuid` | 容器持久 ID 读取依赖包装结构身份与大小 |
+| `FVector` / `FVector_NetQuantize` | 类型名 `Vector` / `Vector_NetQuantize`、均为 0x18 字节 | 传送输入只接受 `Vector`；追踪命中点允许这两个已确认变体 |
+| `FHitResult` | 类型名 `HitResult`、0xE8 字节 | `LineTraceSingle.OutHit` 与 `K2_SetActorLocation.SweepHitResult` 均精确校验 |
+| `FLinearColor` | 类型名 `LinearColor`、0x10 字节 | `LineTraceSingle.TraceColor` / `TraceHitColor` 精确校验 |
 
-> **注**：项目不校验结构体**类型全名**（如 `FFixedPoint64`、`FPalContainerId`、`EPalStatusPhysicalHealthType`），
-> 仅按字段名 + 子字段名 + `FEnumProperty`/`FStructProperty` 的 C++ 属性子类校验。因此类型全名重命名不影响功能。
+> **注**：未列为 ABI 敏感项的领域结构通常只按字段名、子字段名和具体 `FProperty` 子类校验；上表所列
+> 结构以及 `FGuid`、`FTransform` 等直接复制或解释的结构必须同时匹配运行时类型名与大小。
 
 ---
 
