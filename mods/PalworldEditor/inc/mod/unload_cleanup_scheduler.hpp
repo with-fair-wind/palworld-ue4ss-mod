@@ -27,7 +27,7 @@ enum class CleanupOutcome : std::uint8_t {
 /** @brief 卸载等待线程的最终判定。 */
 enum class UnloadCleanupWaitResult : std::uint8_t {
     cleanupSucceeded, /**< 清理成功或无需清理；可以销毁实例。 */
-    cleanupFailed,    /**< 已判定失败（存在不可恢复的恢复损失）；必须保留实例。 */
+    cleanupFailed,    /**< 已判定失败（不可恢复损失或重试耗尽）；必须保留实例。 */
     timedOut,         /**< 期限内未得出结论；必须保留实例，避免回调悬垂。 */
 };
 

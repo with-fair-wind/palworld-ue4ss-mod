@@ -71,7 +71,7 @@ public:
     /**
      * @brief 等待游戏线程得出卸载清理结论，最长 timeout。
      * @retval cleanupSucceeded 清理成功或无需清理；可以销毁实例。
-     * @retval cleanupFailed 已判定失败（存在不可恢复的恢复损失）；必须放弃销毁实例。
+     * @retval cleanupFailed 已判定失败（不可恢复损失或瞬态恢复重试耗尽）；必须放弃销毁实例。
      * @retval timedOut 期限内未得出结论；必须放弃销毁实例，避免回调悬垂。
      * @note 判定失败与超时对实例的处置相同（保留到进程退出），但日志与诊断应区分两者。
      */
