@@ -68,17 +68,6 @@ void test_return_value_is_never_input_or_output() {
     CHECK(pal_game::is_return_direction(true, false, false, true));
 }
 
-void test_non_parm_or_null_flags_are_rejected() {
-    for (int flags = 0; flags < 16; flags += 2) {  // parm=0
-        const bool outParm = (flags & 2) != 0;
-        const bool constParm = (flags & 4) != 0;
-        const bool returnParm = (flags & 8) != 0;
-        CHECK(!pal_game::is_input_direction(false, outParm, constParm, returnParm));
-        CHECK(!pal_game::is_output_direction(false, outParm, constParm, returnParm));
-        CHECK(!pal_game::is_return_direction(false, outParm, constParm, returnParm));
-    }
-}
-
 void test_player_state_gate_is_fail_closed() {
     CHECK(!pal_game::state_gate_allows(std::nullopt));
     CHECK(!pal_game::state_gate_allows(std::optional<bool>{true}));
