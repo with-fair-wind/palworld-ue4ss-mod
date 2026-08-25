@@ -42,9 +42,14 @@ namespace pal_game {
     return fallback;
 }
 
-/** @brief 解析整数；失败（含带空白/CRLF）返回空。 */
+/** @brief 解析整数；失败（含空白/空串/CRLF）返回空。
+ *  @note 空输入须先短路：默认构造的 string_view 的 data() 为空指针，
+ *        继续做指针算术属于未定义行为。 */
 [[nodiscard]] inline auto parse_ini_int(const std::string_view value) -> std::optional<int> {
     const auto trimmed = trim_ini_value(value);
+    if (trimmed.empty()) {
+        return std::nullopt;
+    }
     int result{};
     const auto [end, error] =
         std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), result);
@@ -54,9 +59,13 @@ namespace pal_game {
     return result;
 }
 
-/** @brief 解析浮点；失败（含带空白/CRLF）返回空。 */
+/** @brief 解析浮点；失败（含空白/空串/CRLF）返回空。
+ *  @note 空输入短路理由同 parse_ini_int。 */
 [[nodiscard]] inline auto parse_ini_float(const std::string_view value) -> std::optional<float> {
     const auto trimmed = trim_ini_value(value);
+    if (trimmed.empty()) {
+        return std::nullopt;
+    }
     double result{};
     const auto [end, error] =
         std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), result);

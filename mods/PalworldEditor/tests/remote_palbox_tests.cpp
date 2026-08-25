@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <common/hotkey_edge_trigger.hpp>
+#include <common/ini_config.hpp>
 #include <pal_remote_palbox/remote_palbox.hpp>
 #include <pal_remote_palbox/remote_palbox_config.hpp>
 
@@ -84,6 +85,17 @@ void test_parse_crlf_and_whitespace() {
     CHECK(!config.disableInDungeon);
     CHECK(config.onlyInsideBaseCircle);
     CHECK(config.disableDuringCombat);
+}
+
+void test_parse_ini_numeric_blank_and_whitespace_rejected() {
+    // 空串与全空白裁剪后为空视图；解析必须短路返回空，而不是对空 data() 做指针算术。
+    CHECK(!pal_game::parse_ini_int("").has_value());
+    CHECK(!pal_game::parse_ini_int(" \t\r\n").has_value());
+    CHECK(!pal_game::parse_ini_float("").has_value());
+    CHECK(!pal_game::parse_ini_float("   ").has_value());
+    // 正常带空白数值仍应成功，确认短路没有误伤裁剪路径。
+    CHECK(pal_game::parse_ini_int(" 75\r\n").value_or(0) == 75);
+    CHECK(pal_game::parse_ini_float(" 1.5 ").value_or(0.0F) == 1.5F);
 }
 
 void test_edge_trigger_basic() {
@@ -189,6 +201,7 @@ int main() {
     test_parse_invalid_values_fall_back();
     test_serialize_contains_all_keys();
     test_parse_crlf_and_whitespace();
+    test_parse_ini_numeric_blank_and_whitespace_rejected();
     test_edge_trigger_basic();
     test_edge_trigger_debounce_and_repeat();
     test_edge_trigger_held_key_does_not_repeat();
