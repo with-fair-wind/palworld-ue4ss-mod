@@ -70,6 +70,7 @@ private:
         double x{};
         double y{};
         double anchorZ{};
+        float arrivalHeightOffset{}; /**< 触发时的离地偏移快照；第二段校正必须保持。 */
         std::chrono::steady_clock::time_point deadline{};
     };
 

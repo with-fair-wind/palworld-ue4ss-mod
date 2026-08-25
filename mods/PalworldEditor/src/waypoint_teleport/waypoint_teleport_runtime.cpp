@@ -570,6 +570,7 @@ auto WaypointTeleportRuntime::teleport_to_candidate(const WaypointTeleportConfig
                               .x = target.x,
                               .y = target.y,
                               .anchorZ = anchorZ,
+                              .arrivalHeightOffset = config.arrivalHeightOffset,
                               .deadline = std::chrono::steady_clock::now() + kRefinementDelay};
         {
             const std::lock_guard lock(snapshotMutex_);
@@ -673,8 +674,13 @@ auto WaypointTeleportRuntime::run_pending_refinement() -> void {
         note("贴地校正失败：无法探测地面", true);
         return;
     }
-    const double correctedZ = **groundZ + kArrivalClearanceCm;
-    if (std::abs(correctedZ - pendingRefinement_.anchorZ) < kRefinementMinDeltaCm) {
+    // 校正目标与比较基线都必须带上第一段使用的离地偏移：偏移丢失会把配置了
+    // ArrivalHeightOffset 的玩家在校正时拉回默认间隙；基线若不含间隙/偏移，
+    // "首次追踪即正确"的场景差值恒为正的间隙量，永远无法跳过二次放置。
+    const double offset = static_cast<double>(pendingRefinement_.arrivalHeightOffset);
+    const double correctedZ = **groundZ + kArrivalClearanceCm + offset;
+    const double firstPlacedZ = pendingRefinement_.anchorZ + kArrivalClearanceCm + offset;
+    if (std::abs(correctedZ - firstPlacedZ) < kRefinementMinDeltaCm) {
         return;  // 首次追踪已正确（或玩家已自行落地），无需二次放置。
     }
     FVector destination{};
