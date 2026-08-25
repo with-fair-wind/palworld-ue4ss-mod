@@ -710,7 +710,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         // TSubclassOf<T> 约束由 FClassProperty::MetaClass 承载：传入的 PalBox 参数类
         // 必须是该元类的子类，否则引擎侧可能按不兼容布局消费参数对象。
         auto* const parameterMetaClass = createContract->parameterClass->GetMetaClass().Get();
-        if (parameterMetaClass == nullptr || !palBoxParamClass->IsA(parameterMetaClass)) {
+        if (parameterMetaClass == nullptr || !palBoxParamClass->IsChildOf(parameterMetaClass)) {
             note("HUD 参数类元数据不兼容", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
@@ -753,7 +753,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
             return finish(RemotePalboxTriggerResult::unavailable);
         }
         auto* const widgetMetaClass = pushContract->widgetClass->GetMetaClass().Get();
-        if (widgetMetaClass == nullptr || !widgetClass->IsA(widgetMetaClass)) {
+        if (widgetMetaClass == nullptr || !widgetClass->IsChildOf(widgetMetaClass)) {
             note("HUD Push 界面类元数据不兼容", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
