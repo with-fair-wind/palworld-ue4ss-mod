@@ -290,9 +290,11 @@ Windows SDK，允许它查询 MSVC 驱动（如
   觉醒写入 `bIsAwakening`，三者可任意组合且不消耗材料。只允许在帕鲁已收回时执行——出战判断以本地
   Holder `TryGetSpawnedOtomoHandle` 为准，不使用可能残留的 Actor 对象；写后重读失败时整笔回滚；
 - 远程终端：圈内判定以世界设置 `BaseCampAreaRange`（视觉建造圈）为准，不使用随据点等级膨胀的据点
-  模型 `AreaRange` 属性；战斗中禁用读取 `APalCharacter::bIsBattleMode` 属性（`IsInCombat` /
-  `IsInBattle` 函数名在 Palworld 1.0 不存在）。地牢/骑乘/战斗门控启用时，对应状态不可读取按拦截
-  处理（fail-closed），不视为安全放行。
+  模型 `AreaRange` 属性，世界设置不可读时按拦截处理而不是回退；战斗中禁用读取
+  `APalCharacter::bIsBattleMode` 属性（`IsInCombat` / `IsInBattle` 函数名在 Palworld 1.0 不存在）。
+  地牢/骑乘/战斗门控启用时，对应状态不可读取按拦截处理（fail-closed），不视为安全放行。基地候选
+  按本地公会（`GetGroupIdBelongTo`）过滤，归属不可读拦截；`PalHUDService:Push` 返回全零 GUID 时
+  进入 600ms 有界确认窗口复查界面是否实际入栈，超时才记失败且不停用域。
 
 ### 资源共享契约
 

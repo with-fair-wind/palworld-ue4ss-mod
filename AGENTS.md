@@ -97,7 +97,9 @@ UE4SS GUI 的 `PalworldEditor` 页签后应能看到浮动窗口。至少验证�
 确认无论是否已确认目标，空闲等待至少 10 秒都不再解析队伍 Holder；数字键切换不会静默改变锁定目标，
 提交修改时会立即重查并拒绝错误目标。远程终端还应验证：圈内判定以世界设置 `BaseCampAreaRange`
 （视觉建造圈）为准，不使用随据点等级膨胀的据点模型 `AreaRange`；战斗中禁用读取
-`APalCharacter::bIsBattleMode` 属性。资源共享还应验证：默认关闭且不跨进程持久化；关闭时工厂/建造
+`APalCharacter::bIsBattleMode` 属性；`Push` 返回全零 GUID 时先报"已请求打开"并在 600ms 确认窗口内
+随界面出现转为成功、超时才记失败（两种路径各验证一次，且都不得停用域）；单机全基地仍可正常选中
+（公会过滤不应误排除自有基地）。资源共享还应验证：默认关闭且不跨进程持久化；关闭时工厂/建造
 界面性能与未启用资源功能一致；开启后反复打开工厂和建造菜单不再持续卡顿，另一据点箱子中的材料变化
 能由原生容器引用直接反映到预览；首次打开建筑菜单时图标即可选择，无需先打开炉子；制作最大数量与
 真实可制作数量一致且不会把同一箱子计算两次；制作/建造能消费同公会另一已加载据点的普通箱子材料；
@@ -122,7 +124,7 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
 过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；传送不删除、不修改任何标记（曾实现"传送后自动删除标记"，但地图控件图标 TMap 在活跃 Slate 状态下结构移除多次实测崩溃、收起后重开地图又重建，需求已整体移除；到达标记会霸占最近选择，连续传送需在地图中手动删除或远离该标记）；
-地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截，
+地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；贴地校正的目标高度与跳过比较基线都必须携带触发时的 ArrivalHeightOffset（非零偏移经远距传送 + 校正后保持不变；首追踪即正确时不得执行二次放置）；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截，
 门控状态不可读取时按拦截处理（fail-closed）；无标记、世界未同步时给出对应提示；
 LoadMap 后域停用解除；结构不兼容时本世界安全停用。传送原语为 `AActor:K2_SetActorLocation`（bSweep=false 无扫掠精确放置，落点由地面追踪+离地间隙保证）；`K2_TeleportTo` 带路径扫掠，玩家到目标直线穿山时会在阻挡点停下放入地形（实测首次入地、二次正常），不得回退；
 `PalSyncTeleportComponent:SyncTeleport` 为有状态序列原语，从 EngineTick 前置
@@ -374,10 +376,14 @@ UObject 扫描；所有 Map 地址和 UObject 指针只在当次 EngineTick 使�
 
 远程终端契约：按键触发采用上升沿状态机 + 300ms 防连点 + 进行中保护；圈内判定读取世界设置
 `BaseCampAreaRange`（视觉建造圈，通过 `PalUtility:GetGameSetting` 获取），不使用随据点等级膨胀的
-据点模型 `AreaRange` 属性；战斗中禁用读取 `APalCharacter::bIsBattleMode` 属性（`IsInCombat` /
-`IsInBattle` 函数名在 Palworld 1.0 不存在）。地牢/骑乘/战斗门控启用时，对应状态不可读取（函数或
-属性缺失、签名漂移）按拦截处理（fail-closed），不视为安全放行。基地选择策略为纯值函数：优先玩家
-所在圈，否则最近据点。
+据点模型 `AreaRange` 属性，世界设置不可读时按拦截处理而不是回退；战斗中禁用读取
+`APalCharacter::bIsBattleMode` 属性（`IsInCombat` / `IsInBattle` 函数名在 Palworld 1.0 不存在）。
+地牢/骑乘/战斗门控启用时，对应状态不可读取（函数或属性缺失、签名漂移）按拦截处理（fail-closed），
+不视为安全放行。基地候选先按本地公会过滤（`GetGroupIdBelongTo` 与本地公会 GUID 逐一比对，归属或
+本地公会不可读时拦截），基地选择策略为纯值函数：优先玩家所在圈，否则最近据点。`PalHUDService:Push`
+可异步完成（界面已入栈时返回 GUID 仍可能全零）：返回非零 GUID 立即确认成功；全零进入 600ms 有界
+确认窗口（每 150ms 复查 HUD StackableUIWidgets/光标状态），窗口内界面出现即确认，超时才记失败且
+不停用域；HUD 反射同时校验 `FClassProperty::MetaClass`、参数对象与 Push 参数的类身份兼容。
 
 ### 资源共享契约
 
