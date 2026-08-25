@@ -116,6 +116,11 @@ struct ResolvedBaseCampCandidate {
 /** @brief 单次触发允许的软耗时上限；超过仅记录日志。 */
 inline constexpr auto kTriggerTimeBudget = std::chrono::milliseconds(2);
 
+/** @brief Push 返回零 GUID 后的有界界面确认窗口总时长。 */
+inline constexpr auto kPushConfirmWindow = std::chrono::milliseconds(600);
+/** @brief 确认窗口内的复查节流间隔。 */
+inline constexpr auto kPushConfirmCheckInterval = std::chrono::milliseconds(150);
+
 /** @brief 帕鲁存储菜单蓝图资产/生成类路径（Palworld 固定资产，与交互打开的箱子一致）。
  *  @details 该类属于延迟加载 UI 资产：未加载时对象数组中不存在，需按资产路径主动加载。 */
 inline constexpr const wchar_t* kPalStorageWidgetAssetPath =
@@ -185,18 +190,6 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
         }
     }
     return false;
-}
-
-/** @brief 世界设置不可用时，从单个基地模型读取兼容性回退半径。 */
-[[nodiscard]] auto read_model_area_range(UObject* model, float& output) -> bool {
-    auto* const property =
-        pal_game::is_valid(model) ? model->GetPropertyByNameInChain(STR("AreaRange")) : nullptr;
-    auto* const floatProperty = CastField<FFloatProperty>(property);
-    if (floatProperty == nullptr) {
-        return false;
-    }
-    output = floatProperty->GetPropertyValueInContainer(model);
-    return output > 0.0F;
 }
 
 /** @brief 玩家当前位置（Pawn → K2_GetActorLocation）。 */
@@ -457,6 +450,9 @@ auto RemotePalboxRuntime::tick(const float deltaSeconds,
     // 松开的下降沿会丢失，pressed_ 将永远为真，此后所有按键都不会再触发。
     const bool edge = trigger_.update(std::chrono::steady_clock::now(), foreground && pressed);
     const bool triggered = guiRequest || edge;
+    if (session.can_access_unreal()) {
+        run_pending_push_confirm();  // Push 零 GUI 确认窗口（空计划为常量时间）。
+    }
     if (!triggered) {
         return;
     }
@@ -475,6 +471,7 @@ auto RemotePalboxRuntime::begin_world_transition() -> void {
     trigger_.reset();
     domainDisabled_.store(false, std::memory_order_release);
     domainProbed_ = false;
+    pendingConfirm_ = {};
     requestedOpen_.store(false);
     consecutiveTimeoutCount_ = 0;
 }
@@ -583,18 +580,36 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         return finish(RemotePalboxTriggerResult::noBase);
     }
 
+    // 候选只保留本地公会的基地：多人环境下 GetBaseCampIds 返回世界全部基地，
+    // 不过滤可能把终端开到其他公会头上；本地归属不可读按拦截处理（fail-closed）。
+    FGuid localGuildId{};
+    if (!pal_base_camp_reflection::resolve_local_guild_id(worldContext, localGuildId)) {
+        note("无法确认基地归属，已拦截", true);
+        return finish(RemotePalboxTriggerResult::blocked);
+    }
+
     auto* const mapObjectManager = find_singleton(STR("PalMapObjectManager"));
     FVector playerLocation{};
     const bool havePlayerLocation = read_player_location(controller, playerLocation);
+    // 视觉圈半径只认世界设置 BaseCampAreaRange；不可读时按拦截处理（fail-closed），
+    // 不回退随据点等级膨胀的模型 AreaRange（那会放宽门控）。
     float worldAreaRange{};
-    const bool haveWorldAreaRange =
-        config.onlyInsideBaseCircle && read_world_build_area_range(worldContext, worldAreaRange);
+    if (config.onlyInsideBaseCircle && !read_world_build_area_range(worldContext, worldAreaRange)) {
+        note("世界建设圈半径不可读，已拦截", true);
+        return finish(RemotePalboxTriggerResult::blocked);
+    }
     std::vector<ResolvedBaseCampCandidate> candidates;
     candidates.reserve(baseIds.size());
     for (const auto& baseId : baseIds) {
         UObject* model{};
         if (!pal_base_camp_reflection::try_get_base_model(manager, baseId, model)) {
             continue;
+        }
+        FGuid ownerGuildId{};
+        if (!read_guid(model, STR("GetGroupIdBelongTo"), ownerGuildId) ||
+            ownerGuildId.A != localGuildId.A || ownerGuildId.B != localGuildId.B ||
+            ownerGuildId.C != localGuildId.C || ownerGuildId.D != localGuildId.D) {
+            continue;  // 非本地公会（或归属不可读）的基地不进入候选。
         }
         FGuid ownerMapObjectId{};
         if (!read_guid(model, STR("GetOwnerMapObjectInstanceId"), ownerMapObjectId)) {
@@ -615,15 +630,9 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         // （检测圈含额外工作范围），两者都大于视觉圈。
         bool playerInside = false;
         if (config.onlyInsideBaseCircle) {
-            float areaRange{};
-            const bool haveAreaRange =
-                haveWorldAreaRange || read_model_area_range(model, areaRange);
-            if (haveWorldAreaRange) {
-                areaRange = worldAreaRange;
-            }
-            playerInside =
-                haveCenter && havePlayerLocation && haveAreaRange &&
-                distanceSquared <= static_cast<double>(areaRange) * static_cast<double>(areaRange);
+            playerInside = haveCenter && havePlayerLocation &&
+                           distanceSquared <= static_cast<double>(worldAreaRange) *
+                                                  static_cast<double>(worldAreaRange);
         }
         candidates.push_back({
             .selection = {.playerInside = playerInside, .distanceSquared = distanceSquared},
@@ -699,6 +708,13 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
             note("HUD 参数工厂布局不可用", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
+        // TSubclassOf<T> 约束由 FClassProperty::MetaClass 承载：传入的 PalBox 参数类
+        // 必须是该元类的子类，否则引擎侧可能按不兼容布局消费参数对象。
+        auto* const parameterMetaClass = createContract->parameterClass->GetMetaClass().Get();
+        if (parameterMetaClass == nullptr || !palBoxParamClass->IsA(parameterMetaClass)) {
+            note("HUD 参数类元数据不兼容", true);
+            return finish(RemotePalboxTriggerResult::unavailable);
+        }
         pal_game::FunctionParams createParams{createParamFunction};
         createContract->worldContextObject->SetObjectPropertyValue(
             createContract->worldContextObject->ContainerPtrToValuePtr<void>(createParams.data()),
@@ -708,8 +724,8 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         hudService->ProcessEvent(createParamFunction, createParams.data());
         auto* const dispatchParameter = createContract->returnValue->GetObjectPropertyValue(
             createContract->returnValue->ContainerPtrToValuePtr<void>(createParams.data()));
-        if (!pal_game::is_valid(dispatchParameter)) {
-            note("HUD 参数对象创建失败", true);
+        if (!pal_game::is_valid(dispatchParameter) || !dispatchParameter->IsA(palBoxParamClass)) {
+            note("HUD 参数对象创建失败或类型不符", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
 
@@ -732,6 +748,16 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
             note("HUD Push 布局不可用", true);
             return finish(RemotePalboxTriggerResult::unavailable);
         }
+        auto* const pushParameterClass = pushContract->parameter->GetPropertyClass().Get();
+        if (pushParameterClass == nullptr || !dispatchParameter->IsA(pushParameterClass)) {
+            note("HUD Push 参数类不兼容", true);
+            return finish(RemotePalboxTriggerResult::unavailable);
+        }
+        auto* const widgetMetaClass = pushContract->widgetClass->GetMetaClass().Get();
+        if (widgetMetaClass == nullptr || !widgetClass->IsA(widgetMetaClass)) {
+            note("HUD Push 界面类元数据不兼容", true);
+            return finish(RemotePalboxTriggerResult::unavailable);
+        }
         pal_game::FunctionParams pushParams{pushFunction};
         pushContract->widgetClass->SetPropertyValueInContainer(pushParams.data(), widgetClass);
         pushContract->parameter->SetObjectPropertyValue(
@@ -741,18 +767,56 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         FGuid widgetId{};
         pushContract->returnValue->CopyCompleteValue(
             &widgetId, pushContract->returnValue->ContainerPtrToValuePtr<void>(pushParams.data()));
-        if (!widgetId.is_valid()) {
-            note("HUD Push 未返回有效 widget ID", true);
-            return finish(RemotePalboxTriggerResult::unavailable);
+        if (widgetId.is_valid()) {
+            note("已打开 PalBox UI", false);
+        } else {
+            // Push 可异步完成（界面已入栈时 widget ID 仍可能全零，develop 时期已记录）：
+            // 零 GUID 不判失败也不计结构故障，改为有界确认窗口内复查界面是否实际入栈；
+            // 超时才记失败，且不停用域。
+            const auto now = std::chrono::steady_clock::now();
+            pendingConfirm_ = {.active = true,
+                               .deadline = now + kPushConfirmWindow,
+                               .nextCheck = now + kPushConfirmCheckInterval};
+            note("已请求打开 PalBox UI，等待界面确认", false);
         }
     }
 
     {
         const std::lock_guard lock(snapshotMutex_);
         ++openCount_;
-        lastMessage_ = "已打开 PalBox UI";
     }
     return finish(RemotePalboxTriggerResult::opened);
+}
+
+auto RemotePalboxRuntime::run_pending_push_confirm() -> void {
+    if (!pendingConfirm_.active) {
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now < pendingConfirm_.nextCheck) {
+        return;
+    }
+    auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
+    auto* const controller = pal_game::local_player_controller(worldContext);
+    if (controller == nullptr) {
+        // 世界上下文暂不可用：窗口内顺延，不做结论；超时只能按未确认记失败。
+        if (now >= pendingConfirm_.deadline) {
+            pendingConfirm_.active = false;
+            note("HUD Push 确认窗口内无法解析玩家控制器", true);
+        }
+        return;
+    }
+    if (palbox_menu_is_open(controller)) {
+        pendingConfirm_.active = false;
+        note("已打开 PalBox UI", false);
+        return;
+    }
+    if (now >= pendingConfirm_.deadline) {
+        pendingConfirm_.active = false;
+        note("HUD Push 未能在确认窗口内打开界面", true);
+        return;
+    }
+    pendingConfirm_.nextCheck = now + kPushConfirmCheckInterval;
 }
 
 auto RemotePalboxRuntime::probe_domain() -> bool {

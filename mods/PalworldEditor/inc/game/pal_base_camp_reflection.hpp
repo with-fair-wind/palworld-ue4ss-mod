@@ -26,4 +26,13 @@ namespace pal_base_camp_reflection {
 [[nodiscard]] auto find_concrete_model(RC::Unreal::UObject* manager,
                                        const RC::Unreal::FGuid& instanceId,
                                        RC::Unreal::UObject*& concreteModel) -> bool;
+
+/**
+ * @brief 解析本地玩家所属公会的 GUID。
+ * @details 链路：PalUtility:GetLocalPalPlayerController → 控制器 GetPlayerUId →
+ *          PalUtility:GetGuildByPlayerUId → 公会 GetId。任一环节签名漂移或返回无效
+ *          对象即失败（fail-closed），由调用方决定拦截语义。
+ */
+[[nodiscard]] auto resolve_local_guild_id(RC::Unreal::UObject* worldContext,
+                                          RC::Unreal::FGuid& guildId) -> bool;
 }  // namespace pal_base_camp_reflection

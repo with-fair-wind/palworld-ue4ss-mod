@@ -154,52 +154,6 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
                : property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
 }
 
-[[nodiscard]] auto try_get_player_guild(UObject* worldContext, const FGuid& playerId,
-                                        UObject*& guild) -> bool {
-    guild = nullptr;
-    auto* utility = pal_utility();
-    auto* function = utility == nullptr
-                         ? nullptr
-                         : utility->GetFunctionByNameInChain(STR("GetGuildByPlayerUId"));
-    auto* const context = function == nullptr
-                              ? nullptr
-                              : CastField<FObjectPropertyBase>(function->FindProperty(
-                                    FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const player = function == nullptr ? nullptr
-                                             : CastField<FStructProperty>(function->FindProperty(
-                                                   FName(STR("PlayerUId"), FNAME_Find)));
-    auto* const result = function == nullptr
-                             ? nullptr
-                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !pal_game::has_exact_parameter_count(function, 3) ||
-        !pal_game::is_input_parameter(context) || !pal_game::is_input_parameter(player) ||
-        !pal_game::matches_struct_identity(player, STR("Guid"), sizeof(FGuid)) ||
-        !pal_game::is_return_parameter(result)) {
-        return false;
-    }
-    FunctionParams params{function};
-    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
-                                    worldContext);
-    player->CopyCompleteValue(player->ContainerPtrToValuePtr<void>(params.data()), &playerId);
-    utility->ProcessEvent(function, params.data());
-    guild = result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(guild);
-}
-
-[[nodiscard]] auto try_resolve_local_guild(UObject* worldContext, FGuid& guildId) -> bool {
-    UObject* controller{};
-    if (!call_utility_object(worldContext, STR("GetLocalPalPlayerController"), controller)) {
-        return false;
-    }
-
-    FGuid playerId{};
-    UObject* guild{};
-    return try_get_guid(controller, STR("GetPlayerUId"), playerId) &&
-           try_get_player_guild(controller, playerId, guild) &&
-           try_get_guid(guild, STR("GetId"), guildId);
-}
-
 [[nodiscard]] auto find_concrete_model(UObject* manager, const GuidKey& ownerMapObjectId)
     -> UObject* {
     if (manager == nullptr || !ownerMapObjectId.valid()) {
@@ -575,7 +529,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
     FGuid guildId{};
     UObject* baseCampManager{};
     UObject* mapObjectManager{};
-    if (!try_resolve_local_guild(worldContext, guildId) ||
+    if (!pal_base_camp_reflection::resolve_local_guild_id(worldContext, guildId) ||
         !call_utility_object(worldContext, STR("GetBaseCampManager"), baseCampManager) ||
         !call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager)) {
         result.error = "无法解析本地公会、据点管理器或地图物体管理器。";
