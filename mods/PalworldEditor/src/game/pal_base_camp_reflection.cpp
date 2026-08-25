@@ -7,7 +7,6 @@
 #include <Unreal/Core/Containers/ScriptArray.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
-#include <Unreal/UObjectGlobals.hpp>
 #include <common/game_reflection.hpp>
 #include <game/pal_base_camp_reflection.hpp>
 
@@ -20,35 +19,11 @@ namespace {
     return guid.A != 0 || guid.B != 0 || guid.C != 0 || guid.D != 0;
 }
 
-[[nodiscard]] auto find_pal_utility() -> UObject* {
-    return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr,
-                                                      STR("/Script/Pal.Default__PalUtility"));
-}
-
-/** @brief 调用目标对象上返回 FGuid 的无参 getter；返回值全零视为失败。 */
-[[nodiscard]] auto call_guid_getter(UObject* target, const RC::CharType* functionName,
-                                    FGuid& output) -> bool {
-    auto* const function =
-        pal_game::is_valid(target) ? target->GetFunctionByNameInChain(functionName) : nullptr;
-    auto* const returnProperty =
-        function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_return_parameter(returnProperty) ||
-        !pal_game::matches_struct_identity(returnProperty, STR("Guid"), sizeof(FGuid))) {
-        return false;
-    }
-    pal_game::FunctionParams params{function};
-    target->ProcessEvent(function, params.data());
-    returnProperty->CopyCompleteValue(&output,
-                                      returnProperty->ContainerPtrToValuePtr<void>(params.data()));
-    return guid_is_nonzero(output);
-}
-
 /** @brief 调用 PalUtility:GetGuildByPlayerUId。 */
 [[nodiscard]] auto try_get_player_guild(UObject* worldContext, const FGuid& playerId,
                                         UObject*& guild) -> bool {
     guild = nullptr;
-    auto* utility = find_pal_utility();
+    auto* utility = pal_game::find_pal_utility();
     auto* function = pal_game::is_valid(utility)
                          ? utility->GetFunctionByNameInChain(STR("GetGuildByPlayerUId"))
                          : nullptr;
@@ -177,42 +152,34 @@ auto find_concrete_model(UObject* manager, const FGuid& instanceId, UObject*& co
     return concreteModel != nullptr;
 }
 
-auto resolve_local_guild_id(UObject* worldContext, FGuid& guildId) -> bool {
-    guildId = FGuid{};
-    auto* utility = find_pal_utility();
-    auto* const controllerFunction =
-        pal_game::is_valid(utility)
-            ? utility->GetFunctionByNameInChain(STR("GetLocalPalPlayerController"))
-            : nullptr;
-    auto* const controllerContext =
-        controllerFunction == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(
-                  controllerFunction->FindProperty(FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const controllerReturn =
-        controllerFunction == nullptr
-            ? nullptr
-            : CastField<FObjectPropertyBase>(controllerFunction->GetReturnProperty());
-    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !pal_game::has_exact_parameter_count(controllerFunction, 2) ||
-        !pal_game::is_input_parameter(controllerContext) ||
-        !pal_game::is_return_parameter(controllerReturn)) {
+auto read_model_guid(UObject* target, const wchar_t* getterName, FGuid& output) -> bool {
+    auto* const function =
+        pal_game::is_valid(target) ? target->GetFunctionByNameInChain(getterName) : nullptr;
+    auto* const returnProperty =
+        function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
+    if (!pal_game::has_exact_parameter_count(function, 1) ||
+        !pal_game::is_return_parameter(returnProperty) ||
+        !pal_game::matches_struct_identity(returnProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
     }
-    pal_game::FunctionParams controllerParams{controllerFunction};
-    controllerContext->SetObjectPropertyValue(
-        controllerContext->ContainerPtrToValuePtr<void>(controllerParams.data()), worldContext);
-    utility->ProcessEvent(controllerFunction, controllerParams.data());
-    auto* const controller = controllerReturn->GetObjectPropertyValue(
-        controllerReturn->ContainerPtrToValuePtr<void>(controllerParams.data()));
-    if (!pal_game::is_valid(controller)) {
+    pal_game::FunctionParams params{function};
+    target->ProcessEvent(function, params.data());
+    returnProperty->CopyCompleteValue(&output,
+                                      returnProperty->ContainerPtrToValuePtr<void>(params.data()));
+    return guid_is_nonzero(output);
+}
+
+auto resolve_local_guild_id(UObject* worldContext, FGuid& guildId) -> bool {
+    guildId = FGuid{};
+    auto* const controller = pal_game::local_player_controller(worldContext);
+    if (controller == nullptr) {
         return false;
     }
     FGuid playerId{};
     UObject* guild{};
     // 玩家 UId 与公会查询都以 controller 为上下文/目标（与资源共享原实现语义一致）。
-    return call_guid_getter(controller, STR("GetPlayerUId"), playerId) &&
+    return read_model_guid(controller, STR("GetPlayerUId"), playerId) &&
            try_get_player_guild(controller, playerId, guild) &&
-           call_guid_getter(guild, STR("GetId"), guildId);
+           read_model_guid(guild, STR("GetId"), guildId);
 }
 }  // namespace pal_base_camp_reflection

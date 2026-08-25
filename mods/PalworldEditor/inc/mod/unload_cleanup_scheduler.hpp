@@ -31,7 +31,10 @@ enum class UnloadCleanupWaitResult : std::uint8_t {
     timedOut,         /**< 期限内未得出结论；必须保留实例，避免回调悬垂。 */
 };
 
-/** @return 两个结果中更严重的一个（succeeded &lt; transientFailure &lt; permanentFailure）。 */
+/**
+ * @brief 取两个清理结果中更严重的一个，用于多域结果的合并。
+ * @return 严重度更高者（succeeded &lt; transientFailure &lt; permanentFailure）。
+ */
 [[nodiscard]] constexpr auto worse_outcome(const CleanupOutcome first,
                                            const CleanupOutcome second) noexcept -> CleanupOutcome {
     return second > first ? second : first;
@@ -121,7 +124,7 @@ public:
         return phase_;
     }
 
-    /** @return 已开始的清理尝试次数。 */
+    /** @return 已开始的清理尝试次数。仅供测试与诊断日志断言重试日程；生产路径不依赖。 */
     [[nodiscard]] auto attempts() const noexcept -> std::uint8_t {
         return attempts_;
     }

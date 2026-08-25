@@ -70,8 +70,7 @@ struct SaveFields {
 }
 
 [[nodiscard]] auto database_for(UObject* worldContext) -> UObject* {
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const utility = pal_game::find_pal_utility();
     auto* const function =
         utility == nullptr
             ? nullptr

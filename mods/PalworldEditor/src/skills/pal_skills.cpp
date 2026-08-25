@@ -64,6 +64,17 @@ template <typename T>
 }
 
 /**
+ * @brief 按全名解析 `EPalWazaID` 的原生 UEnum，供枚举属性做身份比对。
+ * @return 指向 UEnum 的非拥有观察指针；未找到时返回 `nullptr`（调用方 fail-closed）。
+ * @note 仅校验"整数 + 宽度"不足以排除同名异枚的结构漂移；镜像
+ *       capture_override 的 `find_enum_setter` 做指针级枚举身份校验。
+ */
+[[nodiscard]] auto find_waza_enum() -> UEnum* {
+    return UObjectGlobals::StaticFindObject<UEnum*>(nullptr, nullptr,
+                                                    STR("/Script/Pal.EPalWazaID"));
+}
+
+/**
  * @brief 查找提供技能本地化名称的 `PalUIUtility` 默认对象。
  * @return 指向 UI 工具对象的非拥有观察指针。
  * @retval nullptr 默认对象和当前已加载对象中均未找到该工具。
@@ -254,11 +265,13 @@ struct ActiveWriteFunctions {
             ? nullptr
             : CastField<FEnumProperty>(add->FindProperty(FName(STR("WazaId"), FNAME_Find)));
     auto* const underlying = wazaId == nullptr ? nullptr : wazaId->GetUnderlyingProperty();
+    auto* const wazaEnum = find_waza_enum();
     if (!pal_game::has_exact_parameter_count(clear, 0) || clear->GetReturnProperty() != nullptr ||
         !pal_game::has_exact_parameter_count(add, 1) || add->GetReturnProperty() != nullptr ||
         !pal_game::is_input_parameter(wazaId) || underlying == nullptr ||
         !underlying->IsInteger() ||
-        static_cast<std::size_t>(underlying->GetElementSize()) != sizeof(EPalWazaID)) {
+        static_cast<std::size_t>(underlying->GetElementSize()) != sizeof(EPalWazaID) ||
+        wazaEnum == nullptr || wazaId->GetEnum().Get() != wazaEnum) {
         return std::nullopt;
     }
     return ActiveWriteFunctions{
@@ -310,9 +323,11 @@ struct ActiveWriteFunctions {
         elementProperty == nullptr ? nullptr : elementProperty->GetUnderlyingProperty();
     void* const saveParameter =
         saveProperty == nullptr ? nullptr : saveProperty->ContainerPtrToValuePtr<void>(pal);
+    auto* const wazaEnum = find_waza_enum();
     if (saveParameter == nullptr || arrayProperty == nullptr || elementProperty == nullptr ||
         underlyingProperty == nullptr || !underlyingProperty->IsInteger() ||
         static_cast<std::size_t>(underlyingProperty->GetElementSize()) != sizeof(EPalWazaID) ||
+        wazaEnum == nullptr || elementProperty->GetEnum().Get() != wazaEnum ||
         !!(arrayProperty->GetArrayFlags() & EArrayPropertyFlags::UsesMemoryImageAllocator)) {
         return std::nullopt;
     }
@@ -853,8 +868,7 @@ auto PalSkillGateway::load_catalog() -> skill_editor::SkillCatalogSnapshot {
         });
 
     // 读取每个主动技能的 Category（Melee/Shot/Support）。
-    auto* const palUtility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const palUtility = pal_game::find_pal_utility();
     auto* const getWazaDbFunction =
         find_function<UFunction>(STR("/Script/Pal.PalUtility:GetWazaDatabase"));
     auto* const wazaDatabase = get_waza_database(palUtility, getWazaDbFunction, worldContext);

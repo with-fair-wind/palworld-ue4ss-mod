@@ -198,8 +198,7 @@ struct SetActorLocationContract {
 
 /** @brief 解析 LocationManager（PalUtility:GetLocationManager）。 */
 [[nodiscard]] auto location_manager(UObject* worldContext) -> UObject* {
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const utility = pal_game::find_pal_utility();
     auto* const function =
         utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(STR("GetLocationManager"));
     auto* const input = function == nullptr ? nullptr

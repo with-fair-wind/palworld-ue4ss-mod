@@ -37,15 +37,10 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return FGuid{key.words[0], key.words[1], key.words[2], key.words[3]};
 }
 
-[[nodiscard]] auto pal_utility() -> UObject* {
-    return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr,
-                                                      STR("/Script/Pal.Default__PalUtility"));
-}
-
 [[nodiscard]] auto call_utility_bool(UObject* worldContext, const CharType* functionName,
                                      bool& value) -> bool {
     value = false;
-    auto* utility = pal_utility();
+    auto* utility = pal_game::find_pal_utility();
     auto* function = utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(functionName);
     auto* const context = function == nullptr
                               ? nullptr
@@ -69,7 +64,7 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
 [[nodiscard]] auto call_utility_object(UObject* worldContext, const CharType* functionName,
                                        UObject*& value) -> bool {
     value = nullptr;
-    auto* utility = pal_utility();
+    auto* utility = pal_game::find_pal_utility();
     auto* function = utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(functionName);
     auto* const context = function == nullptr
                               ? nullptr
@@ -91,25 +86,6 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return pal_game::is_valid(value);
 }
 
-[[nodiscard]] auto try_get_guid(UObject* target, const CharType* functionName, FGuid& output)
-    -> bool {
-    if (!pal_game::is_valid(target)) {
-        return false;
-    }
-    auto* function = target->GetFunctionByNameInChain(functionName);
-    auto* const result =
-        function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_return_parameter(result) ||
-        !pal_game::matches_struct_identity(result, STR("Guid"), sizeof(FGuid))) {
-        return false;
-    }
-    FunctionParams params{function};
-    target->ProcessEvent(function, params.data());
-    result->CopyCompleteValue(&output, result->ContainerPtrToValuePtr<void>(params.data()));
-    return to_key(output).valid();
-}
-
 /**
  * @brief 读取已加载物品容器的持久 ID 属性。
  * @details `UPalContainerBase::ID` 的类型是 `FPalContainerId`，其唯一字段 `ID` 是 `FGuid`。
@@ -121,9 +97,8 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     }
     auto* const containerIdProperty =
         CastField<FStructProperty>(container->GetPropertyByNameInChain(STR("ID")));
-    if (containerIdProperty == nullptr || containerIdProperty->GetStruct().Get() == nullptr ||
-        containerIdProperty->GetStruct()->GetName() != STR("PalContainerId") ||
-        static_cast<std::size_t>(containerIdProperty->GetElementSize()) != sizeof(FGuid)) {
+    if (!pal_game::matches_struct_identity(containerIdProperty, STR("PalContainerId"),
+                                           sizeof(FGuid))) {
         return false;
     }
     auto* const idProperty = CastField<FStructProperty>(
@@ -259,7 +234,7 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     for (int32 index{}; index < count; ++index) {
         auto* container = objectProperty->GetObjectPropertyValue(containers.GetRawPtr(index));
         FGuid id{};
-        if (!try_get_guid(container, STR("GetId"), id)) {
+        if (!pal_base_camp_reflection::read_model_guid(container, STR("GetId"), id)) {
             return false;
         }
         output.push_back(to_key(id));
@@ -465,7 +440,8 @@ auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
 auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
     using Names = CurrentBaseReflectionNames<CharType>;
     FGuid value{};
-    if (!try_get_guid(baseModel, Names::baseIdFunction.data(), value)) {
+    if (!pal_base_camp_reflection::read_model_guid(baseModel, Names::baseIdFunction.data(),
+                                                   value)) {
         return std::nullopt;
     }
     const auto key = to_key(value);
@@ -553,7 +529,8 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
         UObject* baseModel{};
         FGuid ownerGuild{};
         if (!pal_base_camp_reflection::try_get_base_model(baseCampManager, baseId, baseModel) ||
-            !try_get_guid(baseModel, STR("GetGroupIdBelongTo"), ownerGuild)) {
+            !pal_base_camp_reflection::read_model_guid(baseModel, STR("GetGroupIdBelongTo"),
+                                                       ownerGuild)) {
             continue;
         }
         const bool sameGuild = to_key(ownerGuild) == result.guildId;

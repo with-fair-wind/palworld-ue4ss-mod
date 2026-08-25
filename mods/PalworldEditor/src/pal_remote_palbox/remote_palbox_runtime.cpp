@@ -137,8 +137,7 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
  *  @details 与 pal_game::local_player_controller 同模式：PalUtility 是蓝图函数库，静态蓝图
  *           UFunction 在 CDO 上 ProcessEvent 调用；返回值持有 BaseCampAreaRange。 */
 [[nodiscard]] auto get_game_setting(UObject* worldContext) -> UObject* {
-    auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* utility = pal_game::find_pal_utility();
     auto* function =
         utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(STR("GetGameSetting"));
     auto* input = function == nullptr ? nullptr

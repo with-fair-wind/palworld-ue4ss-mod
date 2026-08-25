@@ -251,6 +251,16 @@ template <typename T>
 }
 
 /**
+ * @brief 解析 `PalUtility` 蓝图函数库的默认对象（CDO）。
+ * @return 指向 CDO 的非拥有观察指针；未加载时为空。
+ * @note 静态蓝图函数在 CDO 上 ProcessEvent 调用；此前各模块私有多份同路径查找，现统一于此。
+ */
+[[nodiscard]] inline auto find_pal_utility() -> RC::Unreal::UObject* {
+    return RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+}
+
+/**
  * @brief 解析本地玩家控制器（`PalUtility:GetLocalPalPlayerController`）。
  * @param[in] worldContext 任意世界内对象（通常为主背包数据对象）。
  * @return 签名精确匹配时的本地控制器；世界未就绪或签名漂移时为空。
@@ -258,8 +268,7 @@ template <typename T>
 [[nodiscard]] inline auto local_player_controller(RC::Unreal::UObject* worldContext)
     -> RC::Unreal::UObject* {
     using namespace RC::Unreal;
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const utility = find_pal_utility();
     auto* const function =
         utility == nullptr ? nullptr
                            : utility->GetFunctionByNameInChain(STR("GetLocalPalPlayerController"));
@@ -327,6 +336,7 @@ template <typename T>
     }
     return property->GetPropertyValueInContainer(pawn);
 }
+
 /**
  * @brief 读取 Actor 位置（`K2_GetActorLocation` 优先，`GetActorLocation` 兜底）。
  * @param[out] output 经 CopyCompleteValue 拷出的 FVector；不依赖引擎数值宽度。

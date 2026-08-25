@@ -38,8 +38,7 @@ struct ReviveTimerAccess {
  * @retval incompatible 函数/字段签名漂移（SDK 不兼容）。
  */
 [[nodiscard]] auto resolve_access() -> ReviveTimerAccess {
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const utility = pal_game::find_pal_utility();
     auto* const function = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalUtility:GetGameSetting"));
     if (utility == nullptr || function == nullptr) {
