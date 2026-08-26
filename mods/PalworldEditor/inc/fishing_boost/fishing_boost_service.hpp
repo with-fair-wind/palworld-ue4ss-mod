@@ -34,6 +34,8 @@ inline constexpr std::array<FieldSpec, kFieldCount> kFieldCatalog{{
 enum class Phase : std::uint8_t {
     off,
     active,
+    /** @brief 目标子系统持续不可用且重试耗尽：等待用户重新切换开关再次授权。 */
+    waiting,
     safetyDisabled,
 };
 

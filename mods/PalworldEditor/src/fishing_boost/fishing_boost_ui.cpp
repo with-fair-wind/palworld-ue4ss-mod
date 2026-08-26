@@ -13,6 +13,10 @@ void PalworldEditorMod::render_fishing_boost(PalworldEditorMod* self) {
         ImGui::TextColored(ImVec4(1.0F, 0.35F, 0.2F, 1.0F), "字段布局或恢复失败；已安全停用。");
         return;
     }
+    if (phase == fishing_boost::Phase::waiting) {
+        ImGui::TextColored(ImVec4(1.0F, 0.8F, 0.3F, 1.0F), "钓鱼系统持续不可用，已停止重试。");
+        ImGui::TextDisabled("重新切换下方开关可再次尝试。");
+    }
     if (ImGui::Checkbox("即时钓鱼（无小游戏）", &enabled)) {
         self->requestedFishingBoost_.store(enabled, std::memory_order_release);
         self->fishingBoostDirty_.store(true, std::memory_order_release);

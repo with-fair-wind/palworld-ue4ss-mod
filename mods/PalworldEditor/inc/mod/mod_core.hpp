@@ -460,6 +460,10 @@ private:
     fishing_boost::Ledger fishingBoostLedger_;
     /** @brief 游戏线程发布、GUI 只读的钓鱼圣手运行阶段。 */
     std::atomic<fishing_boost::Phase> fishingBoostPhase_{fishing_boost::Phase::off};
+    /** @brief 目标子系统不可用时的下一次允许尝试时刻；max() 表示重试耗尽（等待开关重授权）。 */
+    std::chrono::steady_clock::time_point nextFishingSystemAttempt_{};
+    /** @brief 目标子系统连续不可用次数；达到上限进入 waiting，开关变化时清零。 */
+    std::uint32_t fishingSystemUnavailableCount_{};
 
     /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
     pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;

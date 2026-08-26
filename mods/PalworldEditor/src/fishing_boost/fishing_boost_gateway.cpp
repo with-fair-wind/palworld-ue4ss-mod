@@ -54,35 +54,52 @@ auto apply(Ledger& ledger) -> GatewayStatus {
         return GatewayStatus::targetUnavailable;
     }
 
-    // 写入失败的统一处置：尽力回滚本事务已写入的字段并安全停用域。不能只返回
-    // 失败留给重试——账本无记录时重试会重新快照，把残留的覆盖值误存为"原值"
-    // （AGENTS.md：回滚无法验证时保留恢复责任并安全停用对应功能域）。
-    const auto abortWith = [&ledger, system](const std::size_t writtenCount,
-                                             const std::array<float, kFieldCount>& originals,
-                                             const GatewayStatus status) -> GatewayStatus {
+    // 阶段一（预检）：解析并快照全部字段，任一缺失或类型漂移即整笔拒绝——结构
+    // 不兼容的运行时不得被触碰（AGENTS.md：缺少读取能力时禁止开始写入）。
+    std::array<FieldAccess, kFieldCount> accesses{};
+    std::array<float, kFieldCount> originals{};
+    for (std::size_t i{}; i < kFieldCount; ++i) {
+        accesses[i] = find_field(system, kFieldCatalog[i].fieldName);
+        if (accesses[i].property == nullptr) {
+            ledger.disable_for_world();
+            return GatewayStatus::preflightFailed;
+        }
+        originals[i] = accesses[i].property->GetPropertyValueInContainer(accesses[i].container);
+    }
+
+    // 阶段二（写入）：失败时尽力回滚并逐字段重读验证。全部回滚通过则无残留，
+    // 仅停用域；任一回滚验证失败则把完整快照记入账本——恢复采用条件写回
+    // （仅当前值仍等于本功能的覆盖值才恢复），全量记录不会误伤未污染字段。
+    const auto abortWith = [&](const std::size_t writtenCount,
+                               const GatewayStatus status) -> GatewayStatus {
+        bool rollbackVerified = true;
         for (std::size_t j{}; j < writtenCount; ++j) {
             const auto rollback = find_field(system, kFieldCatalog[j].fieldName);
-            if (rollback.property != nullptr) {
-                rollback.property->SetPropertyValueInContainer(rollback.container, originals[j]);
+            if (rollback.property == nullptr) {
+                rollbackVerified = false;
+                continue;
             }
+            rollback.property->SetPropertyValueInContainer(rollback.container, originals[j]);
+            if (rollback.property->GetPropertyValueInContainer(rollback.container) !=
+                originals[j]) {
+                rollbackVerified = false;
+            }
+        }
+        if (!rollbackVerified) {
+            // 回滚无法验证：保留恢复责任（shutdown/LoadMap 的条件恢复会接手），
+            // 同时安全停用域（AGENTS.md：回滚无法验证时保留恢复责任并停用）。
+            ledger.record_originals(originals);
         }
         ledger.disable_for_world();
         return status;
     };
 
-    std::array<float, kFieldCount> originals{};
     for (std::size_t i{}; i < kFieldCount; ++i) {
-        const auto access = find_field(system, kFieldCatalog[i].fieldName);
-        if (access.property == nullptr) {
-            // 此前 j < i 的字段已写入并通过验证：一并回滚，不留无账本的覆盖值。
-            return abortWith(i, originals, GatewayStatus::preflightFailed);
-        }
-        originals[i] = access.property->GetPropertyValueInContainer(access.container);
-        access.property->SetPropertyValueInContainer(access.container,
-                                                     kFieldCatalog[i].overrideValue);
-        if (access.property->GetPropertyValueInContainer(access.container) !=
+        accesses[i].property->SetPropertyValueInContainer(accesses[i].container,
+                                                          kFieldCatalog[i].overrideValue);
+        if (accesses[i].property->GetPropertyValueInContainer(accesses[i].container) !=
             kFieldCatalog[i].overrideValue) {
-            return abortWith(i + 1, originals, GatewayStatus::verificationFailed);
+            return abortWith(i + 1, GatewayStatus::verificationFailed);
         }
     }
     ledger.record_originals(originals);
@@ -106,6 +123,13 @@ auto restore(Ledger& ledger) -> GatewayStatus {
         if (access.property == nullptr) {
             ledger.disable_for_world();
             return GatewayStatus::preflightFailed;
+        }
+        // 条件恢复：仅当当前值仍等于本功能写入的覆盖值才写回原值。激活期间被
+        // 游戏或其他 mod 改过的字段（当前值 != 覆盖值）视为本功能的恢复责任
+        // 已消失，不得用陈旧快照覆盖更新后的值。
+        const float current = access.property->GetPropertyValueInContainer(access.container);
+        if (current != kFieldCatalog[i].overrideValue) {
+            continue;
         }
         access.property->SetPropertyValueInContainer(access.container, (*originals)[i]);
         if (access.property->GetPropertyValueInContainer(access.container) != (*originals)[i]) {

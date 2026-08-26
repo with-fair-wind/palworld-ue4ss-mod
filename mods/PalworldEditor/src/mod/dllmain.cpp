@@ -1088,11 +1088,19 @@ auto PalworldEditorMod::process_revive_timer_work(const bool worldContextReady) 
 }
 
 auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady) -> void {
+    // 目标子系统不可用时的有界重试：开关变化立即尝试一次，此后每 2 秒一次、
+    // 连续 15 次仍不可用则进入 waiting 停止尝试（等待用户重新切换开关）——
+    // 不得对 UObject 注册表做每帧 FindFirstOf 轮询。
+    constexpr auto kRetryInterval = std::chrono::seconds{2};
+    constexpr std::uint32_t kMaximumUnavailableAttempts = 15;
+
     if (!worldContextReady) {
         return;
     }
     if (fishingBoostDirty_.exchange(false, std::memory_order_acq_rel)) {
         fishingBoostLedger_.set_desired(requestedFishingBoost_.load(std::memory_order_acquire));
+        fishingSystemUnavailableCount_ = 0;
+        nextFishingSystemAttempt_ = std::chrono::steady_clock::now();
     }
     if (fishingBoostLedger_.safety_disabled()) {
         fishingBoostPhase_.store(fishing_boost::Phase::safetyDisabled, std::memory_order_release);
@@ -1101,7 +1109,21 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
     const bool wantsOn = fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
     const bool wantsOff = !fishingBoostLedger_.desired() && fishingBoostLedger_.has_records();
     if (wantsOn) {
-        static_cast<void>(fishing_boost::apply(fishingBoostLedger_));
+        if (std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
+            return;  // 节流窗口内：常量时间返回，不做任何对象查找。
+        }
+        if (fishing_boost::apply(fishingBoostLedger_) ==
+            fishing_boost::GatewayStatus::targetUnavailable) {
+            ++fishingSystemUnavailableCount_;
+            if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
+                nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
+                fishingBoostPhase_.store(fishing_boost::Phase::waiting, std::memory_order_release);
+            } else {
+                nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
+            }
+            return;
+        }
+        fishingSystemUnavailableCount_ = 0;  // 成功或结构失败：重试链终止，计数复位。
     } else if (wantsOff) {
         static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
     }
@@ -1279,6 +1301,8 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     fishingBoostDirty_.store(false, std::memory_order_release);
     fishingBoostLedger_.begin_world();
     fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+    fishingSystemUnavailableCount_ = 0;
+    nextFishingSystemAttempt_ = {};
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
     grappleReadinessScheduler_.begin_world(nextWorldGeneration);
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
