@@ -9,12 +9,7 @@
 #include <optional>
 #include <span>
 
-#include <common/hotkey_edge_trigger.hpp>
-
 namespace pal_remote_palbox {
-
-/** @brief 按键上升沿状态机已提取为公共原语；别名保持本模块既有引用不变。 */
-using HotkeyEdgeTrigger = pal_game::HotkeyEdgeTrigger;
 
 /** @brief 基地选择候选：运行时解析后交给纯值选择器。 */
 struct BaseCampCandidate {

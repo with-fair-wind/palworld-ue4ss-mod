@@ -36,10 +36,6 @@ auto log_shutdown_error_noexcept(const TCHAR* message) noexcept -> void {
     }
 }
 
-[[nodiscard]] auto object_name(UObject* object) -> std::wstring {
-    return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
-}
-
 [[nodiscard]] auto registration_key(const PersistentUnionEdge& edge)
     -> ConcreteModelRegistrationKey {
     return {.moduleFullName = edge.targetModuleFullName, .ownerMapObjectId = edge.ownerMapObjectId};
@@ -215,19 +211,22 @@ public:
         publish_snapshot();
     }
 
-    auto shutdown_hooks() -> void {
+    auto shutdown_hooks() -> bool {
         // Restoration and hook removal are independent cleanup responsibilities. In particular,
         // an allocation or reflection failure while restoring must never leave callbacks pointing
         // into a DLL that UE4SS is about to unload.
+        bool allRestored = true;
         try {
             restore_all_synchronously("卸载 mod");
         } catch (...) {
+            allRestored = false;
             log_shutdown_error_noexcept(
                 STR("PalworldEditor: persistent storage restore threw during shutdown.\n"));
         }
         try {
             unregister_resource_hooks();
         } catch (...) {
+            allRestored = false;
             log_shutdown_error_noexcept(
                 STR("PalworldEditor: resource hook removal threw during shutdown.\n"));
         }
@@ -246,9 +245,11 @@ public:
             // EngineTick 异常停用后对象仍可能继续存活；保留精确边账本及其解析上下文，
             // 让随后的游戏线程卸载清理仍能重试，而不是把未完成恢复伪装成成功。
             safetyDisabled_ = true;
+            allRestored = false;
         }
         snapshotDirty_.mark();
         publish_snapshot();
+        return allRestored;
     }
 
     [[nodiscard]] auto snapshot() const -> BaseResourceSharingSnapshot {
@@ -258,9 +259,7 @@ public:
 
 private:
     auto remember_world_context(UObject* context) -> void {
-        if (context != nullptr) {
-            worldContextFullName_ = object_name(context);
-        }
+        worldContextFullName_ = pal_game::object_full_name(context);
     }
 
     [[nodiscard]] auto resolve_world_context(UObject* hint) -> UObject* {
@@ -584,8 +583,7 @@ private:
                 ? nullptr
                 : CastField<FStructProperty>(
                       concreteModel->GetPropertyByNameInChain(STR("InstanceId")));
-        if (instanceIdProperty == nullptr ||
-            instanceIdProperty->GetElementSize() != sizeof(FGuid)) {
+        if (!pal_game::matches_struct_identity(instanceIdProperty, STR("Guid"), sizeof(FGuid))) {
             return ConcreteModelRegistrationMembership::unknown;
         }
 
@@ -598,7 +596,8 @@ private:
         }
 
         return registrationIndex_.membership(
-            {.moduleFullName = object_name(context.Context), .ownerMapObjectId = ownerId});
+            {.moduleFullName = pal_game::object_full_name(context.Context),
+             .ownerMapObjectId = ownerId});
     }
 
     auto handle_structure_changed(const StructureChangeSource source,
@@ -854,8 +853,8 @@ auto PalBaseResourceBridge::ensure_hooks_registered() -> void {
     impl_->ensure_hooks_registered();
 }
 
-auto PalBaseResourceBridge::shutdown_hooks() -> void {
-    impl_->shutdown_hooks();
+auto PalBaseResourceBridge::shutdown_hooks() -> bool {
+    return impl_->shutdown_hooks();
 }
 
 auto PalBaseResourceBridge::snapshot() const -> BaseResourceSharingSnapshot {

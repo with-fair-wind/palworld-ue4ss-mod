@@ -30,6 +30,7 @@
 #include <imgui.h>
 #include <items/item_catalog.hpp>
 #include <items/stack_limit_gateway.hpp>
+#include <mod/unload_cleanup_scheduler.hpp>
 #include <pal_identity/pal_identity.hpp>
 #include <pal_identity/pal_identity_editor.hpp>
 #include <pal_remote_palbox/remote_palbox_runtime.hpp>
@@ -62,6 +63,30 @@ public:
     auto on_update() -> void override;
 
     /**
+     * @brief 请求游戏线程执行卸载清理（设置标志；若已在游戏线程则同步执行）。
+     * @details 由 uninstall_mod() 在 UE4SS UpdateThread 上调用。
+     */
+    auto request_unload_cleanup() -> void;
+
+    /**
+     * @brief 等待游戏线程得出卸载清理结论，最长 timeout。
+     * @retval cleanupSucceeded 清理成功或无需清理；可以销毁实例。
+     * @retval cleanupFailed 已判定失败（不可恢复损失或瞬态恢复重试耗尽）；必须放弃销毁实例。
+     * @retval timedOut 期限内未得出结论；必须放弃销毁实例，避免回调悬垂。
+     * @note 判定失败与超时对实例的处置相同（保留到进程退出），但日志与诊断应区分两者。
+     */
+    [[nodiscard]] auto wait_for_unload_cleanup(std::chrono::milliseconds timeout)
+        -> mod_lifecycle::UnloadCleanupWaitResult;
+
+    /**
+     * @brief 卸载判定失败的具体成因；仅用于 uninstall_mod() 区分日志。
+     * @retval true  存在不可恢复的恢复损失（permanentFailure 已锁存）。
+     * @retval false 尝试次数耗尽，仍有瞬态账本未恢复。
+     * @note 只在 wait_for_unload_cleanup 返回 cleanupFailed 后调用；两成因处置相同。
+     */
+    [[nodiscard]] auto unload_failure_is_permanent() -> bool;
+
+    /**
      * @brief 在 EngineTick 游戏线程消费全部 GUI 请求、执行反射操作并发布最新快照。
      * @warning 这是本类调用 Palworld 反射适配接口的唯一周期入口。
      */
@@ -72,14 +97,27 @@ private:
     static constexpr std::size_t kPassiveMetadataBatchSize = 8;
     /** @brief 每个 EngineTick 被动技能分类反射的软时间预算。 */
     static constexpr auto kPassiveMetadataBudget = std::chrono::microseconds{500};
-    /** @brief Unregisters one owned UE4SS callback if registration succeeded. */
-    static auto unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void;
+    /**
+     * @brief 注销一个已注册的全局回调并把 id 复位；在 unloadMutex_ 下执行，
+     *        与 wait_for_unload_cleanup 的读侧同步（消除回调 id 的数据竞争）。
+     */
+    auto unregister_callback(Hook::GlobalCallbackId& callbackId) noexcept -> void;
 
-    /** @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。 */
-    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept -> void;
+    /**
+     * @brief 在游戏线程恢复可逆覆盖并注销全部业务 UFunction Hook。
+     * @return 各域结果中最严重的一个（succeeded &lt; transientFailure &lt; permanentFailure）。
+     * @note permanentFailure 意味着恢复责任已不可挽回地丢失（如捕获事务被丢弃），
+     *       卸载路径不得放行实例销毁；transientFailure 的账本仍保留恢复责任，可重试。
+     */
+    auto shutdown_runtime_on_game_thread(std::string_view reason) noexcept
+        -> mod_lifecycle::CleanupOutcome;
 
-    /** @brief 通知等待卸载的 UE4SS UpdateThread，游戏线程清理已经结束。 */
-    auto signal_unload_cleanup_finished() noexcept -> void;
+    /**
+     * @brief 在游戏线程按低频、有界调度尝试卸载清理，并发布成功或失败状态。
+     * @param[in] delta_seconds 自上次 EngineTick 起经过的秒数；同步首次调用传 0。
+     * @warning 只允许在游戏线程调用。
+     */
+    auto attempt_unload_cleanup_on_game_thread(float delta_seconds) noexcept -> void;
 
     /** @brief 推进爪钩、资源共享、远程终端及一次性诊断请求。 */
     auto process_runtime_services(float deltaSeconds) -> void;
@@ -188,12 +226,6 @@ private:
         pal_stats::PalStatSnapshot palStat;   /**< 最近一次从游戏重读的实际属性值。 */
         pal_identity::PalIdentitySnapshot palIdentity; /**< 最近一次形态字段重读快照。 */
     };
-
-    /**
-     * @brief 把整数限制到闭区间 `[lo, hi]`。
-     * @return 限制后的整数。
-     */
-    static auto clamp(int v, int lo, int hi) -> int;
 
     /**
      * @brief 在技能目录中查找 Raw ID 对应的本地化标签。
@@ -609,6 +641,6 @@ private:
     std::mutex unloadMutex_;
     /** @brief UpdateThread 等待游戏线程完成 Hook 注销和可逆恢复。 */
     std::condition_variable unloadCondition_;
-    /** @brief 仅在 unloadMutex_ 下访问的游戏线程清理完成标志。 */
-    bool unloadCleanupFinished_{};
+    /** @brief 仅在 unloadMutex_ 下访问；限制卸载清理频率并在耗尽次数后停止。 */
+    mod_lifecycle::UnloadCleanupScheduler unload_cleanup_scheduler_;
 };

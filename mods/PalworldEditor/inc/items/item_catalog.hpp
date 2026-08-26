@@ -219,10 +219,6 @@ public:
         return true;
     }
 
-    [[nodiscard]] auto authoritative_catalog_ready() const noexcept -> bool {
-        return authoritativeCatalogReady_;
-    }
-
 private:
     std::uint64_t worldGeneration_{};
     std::uint8_t attempts_{};

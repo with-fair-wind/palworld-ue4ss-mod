@@ -624,6 +624,7 @@ struct CaptureOverrideRuntime::Impl {
     std::array<PendingHookCall, kMaximumNestedHookCalls> calls{};
     std::size_t callDepth{};
     std::size_t ignoredDepth{};
+    bool shutdown_restore_failed_{};
 };
 
 CaptureOverrideRuntime::CaptureOverrideRuntime() : impl_{std::make_unique<Impl>()} {}
@@ -650,9 +651,15 @@ auto CaptureOverrideRuntime::tick() -> void {
     reconcile_hooks();
 }
 
-auto CaptureOverrideRuntime::shutdown() -> void {
+auto CaptureOverrideRuntime::shutdown() -> bool {
+    // 先显式恢复在途事务以拿回成败结果；锁存后失败不可逆转，重试只会重复失败。
+    const bool all_restored = restore_pending_transactions();
+    impl_->shutdown_restore_failed_ = impl_->shutdown_restore_failed_ || !all_restored;
+    // 复用 unregister_hooks 的"恢复在途事务 + 注销全部 Hook"序列；上面的恢复已把
+    // callDepth 清零，这里的二次恢复是幂等空操作，只为避免两处维护同一注销序列。
     unregister_hooks();
     state_.end_world();
+    return !impl_->shutdown_restore_failed_;
 }
 
 auto CaptureOverrideRuntime::phase() const noexcept -> CaptureRuntimePhase {
@@ -765,20 +772,33 @@ auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
     state_.hooks_registered();
 }
 
-auto CaptureOverrideRuntime::unregister_hooks() -> void {
+auto CaptureOverrideRuntime::restore_pending_transactions() -> bool {
+    bool all_restored = true;
     for (std::size_t index = impl_->callDepth; index > 0; --index) {
         auto& pending = impl_->calls[index - 1];
+        bool restored = true;
         try {
-            if (pending.transaction.has_value() && !restore_transaction(*pending.transaction)) {
-                state_.disable_for_world();
-            }
+            restored =
+                !pending.transaction.has_value() || restore_transaction(*pending.transaction);
         } catch (...) {
+            restored = false;
+        }
+        if (!restored) {
             state_.disable_for_world();
+            all_restored = false;
         }
         pending = {};
     }
     impl_->callDepth = 0;
     impl_->ignoredDepth = 0;
+    return all_restored;
+}
+
+auto CaptureOverrideRuntime::unregister_hooks() -> void {
+    // 运行期（关闭开关/LoadMap/安全停用）路径丢弃恢复结果：restore 内部已对每个失败
+    // 调用 disable_for_world 完成域级安全停用，符合"恢复失败→安全停用域"的运行契约；
+    // 只有销毁门控（shutdown）需要消费结果并锁存失败以阻止实例销毁。
+    static_cast<void>(restore_pending_transactions());
     impl_->hookRegistry.unregister_all();
     state_.hooks_removed();
 }

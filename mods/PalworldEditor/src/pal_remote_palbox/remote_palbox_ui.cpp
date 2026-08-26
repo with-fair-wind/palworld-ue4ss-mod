@@ -29,6 +29,7 @@ void PalworldEditorMod::render_remote_palbox(PalworldEditorMod* self) {
     ImGui::Separator();
     bool dirty = false;
     auto config = snapshot.config;
+    ImGui::PushID("remote_palbox_gates");
 
     if (ImGui::Checkbox("骑乘时禁用", &config.disableWhileMounted)) {
         dirty = true;
@@ -44,6 +45,7 @@ void PalworldEditorMod::render_remote_palbox(PalworldEditorMod* self) {
     if (ImGui::Checkbox("仅基地圈内可用", &config.onlyInsideBaseCircle)) {
         dirty = true;
     }
+    ImGui::PopID();
 
     if (dirty) {
         runtime.set_config(config);

@@ -18,6 +18,7 @@
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
+#include <common/parameter_direction.hpp>
 
 namespace pal_game {
 /** @brief 主玩家背包数据对象的 Unreal 类名。 */
@@ -86,30 +87,64 @@ private:
 
 /**
  * @brief 判断属性是否是输入参数。
- * @details Unreal 可能为 `const T&` 同时设置 `CPF_ConstParm`、`CPF_ReferenceParm` 和
- *          `CPF_OutParm`。这类参数语义上仍是只读输入，不能因带有 OutParm 位而拒绝。
+ * @details 委托 @ref parameter_direction.hpp 的纯标志判定；`const T&` 同时带
+ *          CPF_ConstParm/CPF_ReferenceParm/CPF_OutParm 时仍判为只读输入。
  */
 [[nodiscard]] inline auto is_input_parameter(RC::Unreal::FProperty* property) -> bool {
     using namespace RC::Unreal;
-    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
-           !property->HasAnyPropertyFlags(CPF_ReturnParm) &&
-           (!property->HasAnyPropertyFlags(CPF_OutParm) ||
-            property->HasAnyPropertyFlags(CPF_ConstParm));
+    return property != nullptr && is_input_direction(property->HasAnyPropertyFlags(CPF_Parm),
+                                                     property->HasAnyPropertyFlags(CPF_OutParm),
+                                                     property->HasAnyPropertyFlags(CPF_ConstParm),
+                                                     property->HasAnyPropertyFlags(CPF_ReturnParm));
 }
 
-/** @brief 判断属性是否是非返回值输出参数。 */
+/**
+ * @brief 判断属性是否是非 const 非返回值输出参数。
+ * @details `const T&`（同时带 CPF_ConstParm 与 CPF_OutParm）是只读输入，不得当作可写输出。
+ */
 [[nodiscard]] inline auto is_output_parameter(RC::Unreal::FProperty* property) -> bool {
     using namespace RC::Unreal;
-    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
-           property->HasAnyPropertyFlags(CPF_OutParm) &&
-           !property->HasAnyPropertyFlags(CPF_ReturnParm);
+    return property != nullptr &&
+           is_output_direction(property->HasAnyPropertyFlags(CPF_Parm),
+                               property->HasAnyPropertyFlags(CPF_OutParm),
+                               property->HasAnyPropertyFlags(CPF_ConstParm),
+                               property->HasAnyPropertyFlags(CPF_ReturnParm));
 }
 
 /** @brief 判断属性是否是函数返回值。 */
 [[nodiscard]] inline auto is_return_parameter(RC::Unreal::FProperty* property) -> bool {
     using namespace RC::Unreal;
-    return property != nullptr && property->HasAnyPropertyFlags(CPF_Parm) &&
-           property->HasAnyPropertyFlags(CPF_ReturnParm);
+    return property != nullptr &&
+           is_return_direction(property->HasAnyPropertyFlags(CPF_Parm),
+                               property->HasAnyPropertyFlags(CPF_OutParm),
+                               property->HasAnyPropertyFlags(CPF_ConstParm),
+                               property->HasAnyPropertyFlags(CPF_ReturnParm));
+}
+
+/**
+ * @brief 校验结构体属性的身份与大小。
+ * @details 签名验证要求"结构体验证身份与大小"：只比 `GetElementSize()` 无法排除同尺寸的
+ *          其他结构（如 FGuid 与 FQuat 均为 16 字节）。引擎原生结构名（"Guid"、"Vector"、
+ *          "HitResult"）在版本漂移中保持稳定。
+ * @param[in] property     待校验的 FStructProperty。
+ * @param[in] structName   期望的 UScriptStruct 名称（如 STR("Guid")）。
+ * @param[in] expectedSize 期望的元素大小。
+ * @retval true 结构身份与大小均匹配。
+ */
+[[nodiscard]] inline auto matches_struct_identity(RC::Unreal::FStructProperty* property,
+                                                  const wchar_t* structName,
+                                                  const std::size_t expectedSize) -> bool {
+    if (property == nullptr) {
+        return false;
+    }
+    const auto* const structObject = property->GetStruct().Get();
+    return structObject != nullptr && structObject->GetName() == structName &&
+           static_cast<std::size_t>(property->GetElementSize()) == expectedSize;
+}
+
+/** @brief 返回对象的完整名称；对象无效时返回空串。 */
+[[nodiscard]] inline auto object_full_name(RC::Unreal::UObject* object) -> std::wstring {
+    return is_valid(object) ? std::wstring{object->GetFullName()} : std::wstring{};
 }
 
 namespace detail {
@@ -216,6 +251,16 @@ template <typename T>
 }
 
 /**
+ * @brief 解析 `PalUtility` 蓝图函数库的默认对象（CDO）。
+ * @return 指向 CDO 的非拥有观察指针；未加载时为空。
+ * @note 静态蓝图函数在 CDO 上 ProcessEvent 调用；此前各模块私有多份同路径查找，现统一于此。
+ */
+[[nodiscard]] inline auto find_pal_utility() -> RC::Unreal::UObject* {
+    return RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+}
+
+/**
  * @brief 解析本地玩家控制器（`PalUtility:GetLocalPalPlayerController`）。
  * @param[in] worldContext 任意世界内对象（通常为主背包数据对象）。
  * @return 签名精确匹配时的本地控制器；世界未就绪或签名漂移时为空。
@@ -223,8 +268,7 @@ template <typename T>
 [[nodiscard]] inline auto local_player_controller(RC::Unreal::UObject* worldContext)
     -> RC::Unreal::UObject* {
     using namespace RC::Unreal;
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const utility = find_pal_utility();
     auto* const function =
         utility == nullptr ? nullptr
                            : utility->GetFunctionByNameInChain(STR("GetLocalPalPlayerController"));
@@ -276,17 +320,21 @@ template <typename T>
 /**
  * @brief 本地玩家是否处于战斗模式（`APalCharacter::bIsBattleMode` 属性）。
  * @details Palworld 1.0 没有 IsInCombat/IsInBattle UFunction；战斗模式由玩家 Pawn 上的
- *          属性维护。Pawn 不可解析或属性缺失时按"未在战斗"处理。
+ *          属性维护。Pawn 不可解析或属性缺失时返回空（调用方按安全门配置决定拦截）。
  */
-[[nodiscard]] inline auto player_in_battle_mode(RC::Unreal::UObject* controller) -> bool {
+[[nodiscard]] inline auto player_in_battle_mode(RC::Unreal::UObject* controller)
+    -> std::optional<bool> {
     using namespace RC::Unreal;
     auto* const pawn = player_pawn(controller);
     if (!is_valid(pawn)) {
-        return false;
+        return std::nullopt;
     }
     auto* const property =
         CastField<FBoolProperty>(pawn->GetPropertyByNameInChain(STR("bIsBattleMode")));
-    return property != nullptr && property->GetPropertyValueInContainer(pawn);
+    if (property == nullptr) {
+        return std::nullopt;
+    }
+    return property->GetPropertyValueInContainer(pawn);
 }
 
 /**
@@ -305,7 +353,7 @@ template <typename T>
             function == nullptr ? nullptr
                                 : CastField<FStructProperty>(function->GetReturnProperty());
         if (!has_exact_parameter_count(function, 1) || !is_return_parameter(returnProperty) ||
-            returnProperty->GetElementSize() != sizeof(FVector)) {
+            !matches_struct_identity(returnProperty, STR("Vector"), sizeof(FVector))) {
             continue;
         }
         FunctionParams params{function};

@@ -11,7 +11,6 @@
 #include <Unreal/NameTypes.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
-#include <common/text_encoding.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 
@@ -36,24 +35,7 @@ struct CooldownWritePlan {
 
 /** @brief 从武器的 `ownItemID.StaticId` 严格读取 Raw ID；结构不匹配时返回空。 */
 [[nodiscard]] auto weapon_item_id(UObject* weapon) -> std::string {
-    if (!pal_game::is_valid(weapon)) {
-        return {};
-    }
-    auto* const itemIdProperty =
-        CastField<FStructProperty>(weapon->GetPropertyByNameInChain(STR("ownItemID")));
-    if (itemIdProperty == nullptr) {
-        return {};
-    }
-    auto* const itemIdStruct = itemIdProperty->GetStruct().Get();
-    if (itemIdStruct == nullptr) {
-        return {};
-    }
-    void* const itemId = itemIdProperty->ContainerPtrToValuePtr<void>(weapon);
-    auto* const staticIdProperty = itemIdStruct->FindProperty(FName(STR("StaticId"), FNAME_Find));
-    auto* const staticId = staticIdProperty == nullptr
-                               ? nullptr
-                               : staticIdProperty->ContainerPtrToValuePtr<FName>(itemId);
-    return staticId == nullptr ? std::string{} : text_encoding::to_utf8(staticId->ToString());
+    return pal_game::read_item_static_id(weapon, STR("ownItemID"));
 }
 
 /** @brief 判断两个冷却浮点值是否可视为相等。 */

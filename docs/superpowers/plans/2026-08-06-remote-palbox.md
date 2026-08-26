@@ -4,7 +4,7 @@
 
 **Goal:** 在 PalworldEditor mod 中实现任意地点按自定义快捷键打开原生 Palbox UI，配置持久化到 ini，支持 4 个门控开关。
 
-**Architecture:** 遵循仓库"纯值层 + 游戏线程网关 + UI"模式。纯值层（配置解析、按键上升沿状态机、基地选择策略）可单测；游戏线程运行时在 EngineTick 每帧只做 2 次 WinAPI 调用，按键上升沿一次性执行"门控 → 基地解析 → `PalHUDService::Push` 打开原生 UI"；UI 通过互斥锁快照与请求队列与游戏线程通信。
+**Architecture:** 遵循仓库"纯值层 + 游戏线程网关 + UI"模式。纯值层（配置解析、按键上升沿状态机、基地选择策略）可单测；游戏线程运行时在 EngineTick 每帧只做常量时间 WinAPI 检查（按键状态 + 前台窗口归属，各为固定少量调用），按键上升沿一次性执行"门控 → 基地解析 → `PalHUDService::Push` 打开原生 UI"；UI 通过互斥锁快照与请求队列与游戏线程通信。
 
 **Tech Stack:** UE4SS C++23（反射 + ProcessEvent + `ForEachUObject`/`StaticFindObject`）、ImGui（UE4SS GUI）、WinAPI（`GetAsyncKeyState`/`GetForegroundWindow`/`GetModuleFileNameW`）、自定义 CHECK 测试框架（无 gtest）。
 
@@ -16,7 +16,7 @@
 
 - 全部反射调用：游戏线程单一入口、非拥有指针、`pal_game::is_valid` 校验、`CastField` 类型校验；跨帧不得持有 UObject 指针或 Unreal 数组地址。
 - 结构故障（HUD 服务、`Push`、DispatchParameter 工厂、基地管理器任一不可用）→ 本世界代次内停用该域，LoadMap 后重新探测。
-- 每帧开销固定为 2 次 WinAPI 调用；全部游戏逻辑仅在按键上升沿一次性执行；不使用 `FindAllOf`（Widget 类定位的 `ForEachUObject` 扫描仅首次触发执行一次，结果缓存为路径字符串）。
+- 每帧开销固定为常量时间 WinAPI 检查（按键状态 + 前台窗口归属各为固定少量调用）；全部游戏逻辑仅在按键上升沿一次性执行；不使用 `FindAllOf`（Widget 类定位的 `ForEachUObject` 扫描仅首次触发执行一次，结果缓存为路径字符串）。
 - 上升沿 300ms 防连点 + 进行中保护；触发执行超 2ms 打日志，连续 5 次超时 → 域停用。
 - ini 解析：未知键忽略、损坏/缺失回退默认（HotkeyVk=74, DisableWhileMounted=true, DisableInDungeon=true, OnlyInsideBaseCircle=false, DisableDuringCombat=false）；键位只接受 1–255。
 - 默认门控：地牢禁（`IsInStage`）、骑乘禁（`IsRiding`）；基地外/战斗默认可开。
@@ -599,6 +599,8 @@ if (config_.disableDuringCombat && player_state_bool("IsInCombat")) { note("战�
 `player_state_bool`/`player_controller_bool`：`UObjectGlobals::FindFirstOf(STR("PalPlayerState"))` / `STR("PalPlayerController")`（与现有代码同款，见 `pal_base_resource_runtime.cpp:145` 的 `GetLocalPalPlayerController` 模式），`GetFunctionByNameInChain` + `ProcessEvent`，返回 `FBoolProperty` 的 `ReturnValue`。
 
 **战斗检测为验证点（fail-open）**：dump 中 `PalPlayerState`/`PalPlayerController` 均未发现 `IsInCombat`/`IsInBattle`。实现时在 `PalPlayerState` 与 `PalPlayerController` 上依次探测 `IsInCombat`、`IsInBattle`、`IsInDungeonBattle` 候选函数名；全部不可用 → 该门控视为 false（fail-open，战斗不拦截）。默认开关为关，风险低；验证结果回填设计文档。
+> **已过时（superseded）**：战斗门控最终实现为 fail-closed——启用时状态不可读即拦截
+> （`remote_palbox_runtime.cpp` 的 `pal_game::player_in_battle_mode` 返回空 → `blocked`）。
 
 3. **基地解析**（镜像 `pal_base_resource_runtime.cpp:157-216` 的 `read_base_ids`/`try_get_base_model`）：
 
@@ -610,6 +612,12 @@ if (config_.disableDuringCombat && player_state_bool("IsInCombat")) { note("战�
   - 读 `PalBaseCampModel` 属性：`ID`（FGuid，经 `FStructProperty` + `CopyCompleteValue` 到本地 FGuid）、`OwnerMapObjectInstanceId`（同）、`AreaRange`（FIntProperty？dump 为 `float AreaRange` → `FFloatProperty`）；
   - `playerInside`：仅当 `config_.onlyInsideBaseCircle` 开启时才计算（默认关可跳过距离计算）：玩家 Pawn 位置（controller `GetPawn` → `K2_GetActorLocation`）与基地中心（PalBox concrete model 位置，经 `PalMapObjectManager:FindConcreteModel(OwnerMapObjectInstanceId)`，见资源分享 `find_concrete_model`）的 `Size2D()` 平方 ≤ `AreaRange²`；
   - `distanceSquared`：同源计算，供兜底排序。
+
+> **已过时（superseded）**：圈内判定不再使用据点模型 `AreaRange`（随据点等级膨胀，
+> 大于视觉建造圈）。现行实现以世界设置 `BaseCampAreaRange`（`PalUtility:GetGameSetting`）
+> 为唯一半径来源，且基地中心改读基地模型 `Transform.Translation`（物理 Palbox actor
+> 未流加载也可用）；世界设置不可读时按拦截处理（fail-closed），不回退模型半径。
+> 候选同时按本地公会（`GetGroupIdBelongTo`）过滤，归属不可读同样拦截。
 
 4. **归属选择**：`select_remote_base_camp(candidates)`；无结果 → `noBase` + note("没有可用的已拥有基地")。
 
@@ -650,6 +658,12 @@ auto resolve_widget_path() -> bool {
 // 3) PalHUDService::Push(WidgetClass, param) → FGuid 返回值；
 // 4) 返回值为非零 FGuid（任一字段非 0）→ opened；否则 failed。
 ```
+
+> **已过时（superseded）**：Push 可异步完成——界面已入栈时返回值仍可能全零，直接判
+> failed 会把成功误报为失败并可能错误停用域。现行实现：非零 → 立即确认成功；全零 →
+> 记入 600ms 有界确认窗口（每 150ms 复查 HUD StackableUIWidgets/光标状态），窗口内
+> 界面出现即确认成功，超时才记失败且不停用域（见 `remote_palbox_runtime.cpp` 的
+> `pendingConfirm_`）。
 
 参数缓冲区一律用 `std::vector<std::byte>(GetParmsSize())` + `InitializeStruct` + RAII `DestroyStruct`（镜像 `pal_skills.cpp` 的 `ParamsGuard` 模式）。`FGuid` 取自 `Unreal/UnrealCoreStructs.hpp`（`pal_game.hpp:240` 已使用，确认其布局为 4×int32 后直接值比较）。
 

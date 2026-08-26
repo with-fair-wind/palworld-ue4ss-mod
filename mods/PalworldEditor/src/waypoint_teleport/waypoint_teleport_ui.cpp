@@ -23,6 +23,7 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
         return;  // 下一帧快照已更新
     }
     auto config = snapshot.config;
+    ImGui::PushID("waypoint_teleport_gates");
     if (ImGui::Checkbox("骑乘时禁用", &config.disableWhileMounted)) {
         self->waypointTeleportRuntime_.set_config(config);
     }
@@ -32,6 +33,7 @@ void PalworldEditorMod::render_waypoint_teleport(PalworldEditorMod* self) {
     if (ImGui::Checkbox("战斗中禁用", &config.disableDuringCombat)) {
         self->waypointTeleportRuntime_.set_config(config);
     }
+    ImGui::PopID();
     float arrivalOffset = config.arrivalHeightOffset;
     if (ImGui::InputFloat("到达高度偏移(cm)", &arrivalOffset)) {
         config.arrivalHeightOffset = waypoint_teleport::valid_arrival_offset(arrivalOffset)

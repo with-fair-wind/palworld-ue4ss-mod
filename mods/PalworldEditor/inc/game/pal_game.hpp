@@ -279,7 +279,7 @@ struct SelectedPalTarget {
             : CastField<FStructProperty>(
                   palIdResult->GetStruct()->FindProperty(FName(STR("InstanceId"), FNAME_Find)));
     if (!has_exact_parameter_count(getPalIdFunction, 1) || !is_return_parameter(palIdResult) ||
-        instanceIdProperty == nullptr || instanceIdProperty->GetElementSize() != sizeof(FGuid)) {
+        !matches_struct_identity(instanceIdProperty, STR("Guid"), sizeof(FGuid))) {
         return failure(getPalIdFunctionUnavailable);
     }
     FunctionParams palIdParams{getPalIdFunction};
@@ -447,6 +447,34 @@ inline auto read_slot_stack_count(UObject* slot) -> int32_t {
 }
 
 /**
+ * @brief 从对象上的 `FPalItemId` 结构属性读取首字段 `StaticId` 的 UTF-8 Raw ID。
+ * @param[in] object 非拥有容器对象（背包槽位、武器等）。
+ * @param[in] propertyName 结构属性名（背包槽位为 `ItemId`，武器为 `ownItemID`）。
+ * @return Raw ID 字符串；任一层缺失或字段类型不符时为空（fail-closed）。
+ * @note ItemId 是结构（首成员 StaticId FName）而非 FName 属性，必须经字段类型化读取，
+ *       禁止把容器指针直接当 FName 解引用。不做 matches_struct_identity 名称校验：
+ *       UStruct 名（PalItemId）未经 UHT dump 证实，猜错会导致物品目录全空；字段级
+ *       类型校验已保证 fail-closed。
+ */
+[[nodiscard]] inline auto read_item_static_id(UObject* object, const wchar_t* propertyName)
+    -> std::string {
+    auto* const itemIdProp =
+        is_valid(object)
+            ? CastField<FStructProperty>(object->GetPropertyByNameInChain(propertyName))
+            : nullptr;
+    auto* const itemIdStruct = itemIdProp == nullptr ? nullptr : itemIdProp->GetStruct().Get();
+    auto* const staticIdProp = itemIdStruct == nullptr
+                                   ? nullptr
+                                   : CastField<FNameProperty>(itemIdStruct->FindProperty(
+                                         FName(STR("StaticId"), FNAME_Find)));
+    const FName* const staticId = staticIdProp == nullptr
+                                      ? nullptr
+                                      : staticIdProp->ContainerPtrToValuePtr<FName>(
+                                            itemIdProp->ContainerPtrToValuePtr<void>(object));
+    return staticId == nullptr ? std::string{} : text_encoding::to_utf8(staticId->ToString());
+}
+
+/**
  * @brief 扫描主背包并生成全部非空物品槽快照。
  * @return 按容器槽位顺序排列的非空物品列表。
  * @note 只保留 `StackCount > 0` 且 `ItemId` 能转换为非空 UTF-8 Raw ID 的槽位。
@@ -473,13 +501,7 @@ inline auto read_inventory() -> std::vector<InvEntry> {
             continue;
         }
         const int32_t count = read_slot_stack_count(slot);
-        std::string name;
-        if (FProperty* itemIdProp = slot->GetPropertyByNameInChain(STR("ItemId"))) {
-            if (FName* sid = itemIdProp->ContainerPtrToValuePtr<FName>(slot)) {
-                const std::wstring w = sid->ToString();
-                name = text_encoding::to_utf8(w);
-            }
-        }
+        const std::string name = read_item_static_id(slot, STR("ItemId"));
         if (count > 0 && !name.empty()) {
             items.push_back({name, static_cast<int>(count), i});
             ++nonEmpty;
@@ -653,8 +675,7 @@ inline auto localized_item_name(UObject* utility, UFunction* function, UObject* 
     if (worldContext == nullptr) {
         return nullptr;
     }
-    auto* utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* utility = find_pal_utility();
     auto* function = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalUtility:GetItemIDManager"));
     if (utility == nullptr || function == nullptr) {
@@ -802,10 +823,22 @@ inline auto scan_all_items() -> ItemCatalogScanResult {
         }
         ++passedFilter;
         FProperty* idProperty = obj->GetPropertyByNameInChain(STR("ID"));
-        if (idProperty == nullptr) {
-            return LoopAction::Continue;
+        // Raw ID 可能是 FName 属性或 FPalItemId 结构（首成员 StaticId FName）：
+        // 两种布局都经属性类型化读取，类型不匹配时跳过（fail-closed）。
+        // 不做结构名称校验：UStruct 名未经 dump 证实，字段级校验已保证 fail-closed。
+        const FName* id = nullptr;
+        if (FNameProperty* idName = CastField<FNameProperty>(idProperty)) {
+            id = idName->ContainerPtrToValuePtr<FName>(obj);
+        } else if (FStructProperty* idStruct = CastField<FStructProperty>(idProperty)) {
+            if (UStruct* idStructType = idStruct->GetStruct().Get()) {
+                if (FNameProperty* staticIdName = CastField<FNameProperty>(
+                        idStructType->FindProperty(FName(STR("StaticId"), FNAME_Find)))) {
+                    id = staticIdName->ContainerPtrToValuePtr<FName>(
+                        idStruct->ContainerPtrToValuePtr<void>(obj));
+                }
+            }
         }
-        if (FName* id = idProperty->ContainerPtrToValuePtr<FName>(obj)) {
+        if (id != nullptr) {
             const std::wstring rawId = id->ToString();
             if (!rawId.empty()) {
                 ++withId;

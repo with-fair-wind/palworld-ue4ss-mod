@@ -107,8 +107,7 @@ struct RuntimeLimits {
 
 /** @brief 从当前世界的 PalGameSetting 读取版本相关上限，不把数值硬编码进 Mod。 */
 [[nodiscard]] auto runtime_limits(UObject* worldContext) -> std::optional<RuntimeLimits> {
-    auto* const utility = UObjectGlobals::StaticFindObject<UObject*>(
-        nullptr, nullptr, STR("/Script/Pal.Default__PalUtility"));
+    auto* const utility = pal_game::find_pal_utility();
     auto* const function = UObjectGlobals::StaticFindObject<UFunction*>(
         nullptr, nullptr, STR("/Script/Pal.PalUtility:GetGameSetting"));
     if (utility == nullptr || function == nullptr) {

@@ -43,16 +43,12 @@ namespace {
 }
 }  // namespace
 
-auto PalworldEditorMod::clamp(int v, int lo, int hi) -> int {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
-
 void PalworldEditorMod::render_give_items(PalworldEditorMod* self) {
     editor_ui::section_header("给予物品");
     ImGui::SetNextItemWidth(200.0F);
     ImGui::InputText("物品 ID", self->item_buf_, sizeof(self->item_buf_));
     ImGui::InputInt("数量", &self->count_input_);
-    self->count_input_ = clamp(self->count_input_, 1, 9999);
+    self->count_input_ = std::clamp(self->count_input_, 1, 9999);
     {
         editor_ui::scoped_accent_button accent;
         if (ImGui::Button("给予")) {
@@ -133,7 +129,7 @@ void PalworldEditorMod::render_inventory(PalworldEditorMod* self) {
                         static_cast<int>(e.slot_index), e.count);
             ImGui::BeginDisabled(writesDisabled);
             ImGui::InputInt("新数量", &self->set_count_input_);
-            self->set_count_input_ = clamp(self->set_count_input_, 0, 9999);
+            self->set_count_input_ = std::clamp(self->set_count_input_, 0, 9999);
             {
                 editor_ui::scoped_accent_button accent;
                 if (ImGui::Button("设置数量")) {

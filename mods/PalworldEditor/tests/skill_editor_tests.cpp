@@ -621,7 +621,6 @@ void test_item_catalog_scan_scheduler_is_bounded_and_world_scoped() {
     CHECK(!scheduler.advance(1.0F, 7, true));
     CHECK(scheduler.advance(1.0F, 7, true));
     CHECK(scheduler.complete(7, true));
-    CHECK(scheduler.authoritative_catalog_ready());
     CHECK(!scheduler.advance(10.0F, 7, true));
 
     scheduler.begin_world(8);
@@ -771,6 +770,10 @@ void test_stack_limit_restore_rejects_inconsistent_gateway_result() {
         .originalLimit = item_stack_limit::kNativeStackableLimit,
     };
     CHECK(!ledger.complete_restore(false, {unknown}));
+    CHECK(ledger.records().size() == 1);
+    CHECK(ledger.records().front().itemId == "Wood");
+
+    CHECK(!ledger.complete_restore(true, {ledger.records().front()}));
     CHECK(ledger.records().size() == 1);
     CHECK(ledger.records().front().itemId == "Wood");
 }

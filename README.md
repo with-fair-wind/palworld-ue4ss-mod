@@ -61,8 +61,8 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
   RE-UE4SS 提供 `UE4SS` 静态库 target（头文件、编译宏、C++23）；每个 mod 是链接它的 `SHARED` 库；
 - **UE4SS triplet**：preset 显式设 `CMAKE_BUILD_TYPE=Game__Shipping__Win64` 以驱动
   `UE_GAME` 等宏；产物落在 `build/Game__Shipping__Win64/bin/`；
-- **三层分层**：纯值领域层（`inc/`，只依赖标准库，可单测）→ 游戏线程适配层（`src/pal_*`，反射
-  读写只在 EngineTick 或 UFunction 回调内）→ ImGui UI 层（`src/*_ui.cpp`，只传标准库快照/原子
+- **三层分层**：纯值领域层（`inc/`，只依赖标准库，可单测）→ 游戏线程适配层（`src/<feature>/`，反射
+  读写只在 EngineTick 或 UFunction 回调内）→ ImGui UI 层（`src/<feature>/*_ui.cpp`，只传标准库快照/原子
   请求/互斥锁参数）；
 - **入口点契约**：`PalworldEditorMod : RC::CppUserModBase` 导出 `start_mod()` / `uninstall_mod()`；
   日志走 `RC::Output::send`。部署契约：`ue4ss/Mods/<ModName>/dlls/main.dll` + 空 `enabled.txt`。
@@ -73,8 +73,9 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
 - **业务模块**：`game/`（背包/队伍帕鲁反射）、`items/`（物品目录）、`skills/`（技能目录、分类、
   编辑、预设、目标锁定；主动技能数值来自 UHT dump 生成的表）、`pal_stats/`（属性编辑 +
   `SaveParameter` 适配）、`pal_identity/`（Alpha/Lucky/觉醒）、`grappling_hook/`（冷却覆盖）、
-  `capture_override/`（临时捕获覆盖）、`pal_remote_palbox/`（远程终端）、
-  `base_resource_sharing/`（跨据点资源共享）；
+  `capture_override/`（临时捕获覆盖）、`pal_remote_palbox/`（远程终端）、`pal_revive/`（队伍复活）、
+  `revive_timer/`（终端复活计时移除）、`waypoint_teleport/`（标记传送）、
+  `base_resource_sharing/`（跨据点资源共享）、`common/`（跨模块反射原语）、`mod/`（生命周期与 UI 编排）；
 - **安全契约**：跨帧不持有 UObject 指针；修改前重查 GUID 与目标/世界代次；LoadMap 清空请求并撤销
   写权限；形态修改只允许收回状态；每项编辑带写后重读验证与失败回滚/安全停用域；
 - **资源共享**：只接受同公会、已加载、`Chest` 类型普通仓储；通过原生
@@ -87,7 +88,8 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
 - 技能编辑与制作/建造材料共享仅支持单人/本地房主；制作/建造共享可用，修理材料共享仍不可用（尚未验证安全的修理入口）；
 - 爪钩、捕获覆盖与资源共享开关每次启动默认关闭，不跨进程持久化；
 - 为覆盖 UE4SS 延迟回收回调闭包的热卸载窗口，Mod DLL 会固定到进程退出；UE4SS 热重载可重建实例与
-  Hook，但替换 DLL 二进制后必须重启游戏；
+  Hook，但替换 DLL 二进制后必须重启游戏；若日志报告卸载清理判定失败（不可恢复损失或恢复重试耗尽）
+  或超时，旧实例会保留到进程退出，此时也必须重启游戏，不应继续热重载；
 - 不要与 IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的 mod 同时启用；
 - 依赖 Palworld 1.0 的 UFunction 参数布局与 UHT dump；游戏更新后需重新生成技能定义表。
 

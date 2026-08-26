@@ -10,6 +10,8 @@
 #include <string_view>
 #include <vector>
 
+#include <common/hotkey_edge_trigger.hpp>
+#include <common/ini_config.hpp>
 #include <pal_remote_palbox/remote_palbox.hpp>
 #include <pal_remote_palbox/remote_palbox_config.hpp>
 
@@ -70,9 +72,35 @@ void test_serialize_contains_all_keys() {
     CHECK(text.find("DisableDuringCombat=false") != std::string::npos);
 }
 
+void test_parse_crlf_and_whitespace() {
+    // Windows 编辑器产生的 CRLF 行尾与键值两侧空白都必须被接受。
+    const auto config = pal_remote_palbox::parse_remote_palbox_config(
+        "HotkeyVk = 75\r\n"
+        "DisableWhileMounted = false \r\n"
+        "DisableInDungeon=false\r\n"
+        "OnlyInsideBaseCircle = true\r\n"
+        "DisableDuringCombat = true\r\n");
+    CHECK(config.hotkeyVk == 75);
+    CHECK(!config.disableWhileMounted);
+    CHECK(!config.disableInDungeon);
+    CHECK(config.onlyInsideBaseCircle);
+    CHECK(config.disableDuringCombat);
+}
+
+void test_parse_ini_numeric_blank_and_whitespace_rejected() {
+    // 空串与全空白裁剪后为空视图；解析必须短路返回空，而不是对空 data() 做指针算术。
+    CHECK(!pal_game::parse_ini_int("").has_value());
+    CHECK(!pal_game::parse_ini_int(" \t\r\n").has_value());
+    CHECK(!pal_game::parse_ini_float("").has_value());
+    CHECK(!pal_game::parse_ini_float("   ").has_value());
+    // 正常带空白数值仍应成功，确认短路没有误伤裁剪路径。
+    CHECK(pal_game::parse_ini_int(" 75\r\n").value_or(0) == 75);
+    CHECK(pal_game::parse_ini_float(" 1.5 ").value_or(0.0F) == 1.5F);
+}
+
 void test_edge_trigger_basic() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(!trigger.update(t0, false));                            // 未按不触发
     CHECK(!trigger.update(t0 + std::chrono::seconds(1), false));  // 仍未按
@@ -85,7 +113,7 @@ void test_edge_trigger_basic() {
 
 void test_edge_trigger_debounce_and_repeat() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(trigger.update(t0, true));
     trigger.end_trigger();
@@ -100,7 +128,7 @@ void test_edge_trigger_debounce_and_repeat() {
 
 void test_edge_trigger_held_key_does_not_repeat() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(trigger.update(t0, true));
     trigger.end_trigger();
@@ -115,7 +143,7 @@ void test_edge_trigger_held_key_does_not_repeat() {
 
 void test_edge_trigger_reset() {
     using clock = std::chrono::steady_clock;
-    pal_remote_palbox::HotkeyEdgeTrigger trigger;
+    pal_game::HotkeyEdgeTrigger trigger;
     const auto t0 = clock::time_point{};
     CHECK(trigger.update(t0, true));
     trigger.reset();
@@ -172,6 +200,8 @@ int main() {
     test_parse_full_and_roundtrip();
     test_parse_invalid_values_fall_back();
     test_serialize_contains_all_keys();
+    test_parse_crlf_and_whitespace();
+    test_parse_ini_numeric_blank_and_whitespace_rejected();
     test_edge_trigger_basic();
     test_edge_trigger_debounce_and_repeat();
     test_edge_trigger_held_key_does_not_repeat();

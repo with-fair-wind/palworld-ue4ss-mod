@@ -51,80 +51,34 @@ target_link_libraries(${TARGET} PRIVATE UE4SS)
 set_target_properties(${TARGET} PROPERTIES OUTPUT_NAME ${TARGET})
 
 if(BUILD_TESTING)
-    add_executable(PalworldEditorTests
-        tests/skill_editor_tests.cpp
-    )
-    target_include_directories(PalworldEditorTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
-    target_compile_features(PalworldEditorTests PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(PalworldEditorTests PRIVATE /utf-8 /W4 /permissive-)
-    endif()
-    add_test(NAME PalworldEditor.SkillEditor COMMAND PalworldEditorTests)
+    # 统一纯 C++ 测试 target 的包含路径、语言标准、编译选项与 CTest 注册。
+    # 用法：palworld_add_unit_test(<target> <ctest-name> <source...>)
+    function(palworld_add_unit_test target test_name)
+        add_executable(${target} ${ARGN})
+        target_include_directories(${target} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
+        target_compile_features(${target} PRIVATE cxx_std_23)
+        if(MSVC)
+            target_compile_options(${target} PRIVATE /utf-8 /W4 /permissive-)
+        endif()
+        add_test(NAME ${test_name} COMMAND ${target})
+    endfunction()
 
-    add_executable(PalworldEditorBaseResourceSharingTests
-        tests/base_resource_sharing_tests.cpp
-    )
-    target_include_directories(PalworldEditorBaseResourceSharingTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
-    target_compile_features(PalworldEditorBaseResourceSharingTests PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(PalworldEditorBaseResourceSharingTests
-            PRIVATE /utf-8 /W4 /permissive-)
-    endif()
-    add_test(NAME PalworldEditor.BaseResourceSharing
-        COMMAND PalworldEditorBaseResourceSharingTests)
-
-    add_executable(PalworldEditorRemotePalboxTests
-        tests/remote_palbox_tests.cpp
-    )
-    target_include_directories(PalworldEditorRemotePalboxTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
-    target_compile_features(PalworldEditorRemotePalboxTests PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(PalworldEditorRemotePalboxTests
-            PRIVATE /utf-8 /W4 /permissive-)
-    endif()
-    add_test(NAME PalworldEditor.RemotePalbox
-        COMMAND PalworldEditorRemotePalboxTests)
-
-    add_executable(PalworldEditorCaptureOverrideTests
-        tests/capture_override_tests.cpp
-    )
-    target_include_directories(PalworldEditorCaptureOverrideTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
-    target_compile_features(PalworldEditorCaptureOverrideTests PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(PalworldEditorCaptureOverrideTests
-            PRIVATE /utf-8 /W4 /permissive-)
-    endif()
-    add_test(NAME PalworldEditor.CaptureOverride
-        COMMAND PalworldEditorCaptureOverrideTests)
-
-    add_executable(PalworldEditorReviveTimerTests
-        tests/revive_timer_tests.cpp
-    )
-    target_include_directories(PalworldEditorReviveTimerTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
-    target_compile_features(PalworldEditorReviveTimerTests PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(PalworldEditorReviveTimerTests
-            PRIVATE /utf-8 /W4 /permissive-)
-    endif()
-    add_test(NAME PalworldEditor.ReviveTimer
-        COMMAND PalworldEditorReviveTimerTests)
-
-    add_executable(PalworldEditorWaypointTeleportTests
-        tests/waypoint_teleport_tests.cpp
-    )
-    target_include_directories(PalworldEditorWaypointTeleportTests
-        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/inc)
-    target_compile_features(PalworldEditorWaypointTeleportTests PRIVATE cxx_std_23)
-    if(MSVC)
-        target_compile_options(PalworldEditorWaypointTeleportTests
-            PRIVATE /utf-8 /W4 /permissive-)
-    endif()
-    add_test(NAME PalworldEditor.WaypointTeleport
-        COMMAND PalworldEditorWaypointTeleportTests)
+    palworld_add_unit_test(PalworldEditorTests PalworldEditor.SkillEditor
+        tests/skill_editor_tests.cpp)
+    palworld_add_unit_test(PalworldEditorCommonTests PalworldEditor.Common
+        tests/parameter_direction_tests.cpp)
+    palworld_add_unit_test(PalworldEditorModLifecycleTests PalworldEditor.ModLifecycle
+        tests/unload_cleanup_scheduler_tests.cpp)
+    palworld_add_unit_test(PalworldEditorBaseResourceSharingTests PalworldEditor.BaseResourceSharing
+        tests/base_resource_sharing_tests.cpp)
+    palworld_add_unit_test(PalworldEditorRemotePalboxTests PalworldEditor.RemotePalbox
+        tests/remote_palbox_tests.cpp)
+    palworld_add_unit_test(PalworldEditorCaptureOverrideTests PalworldEditor.CaptureOverride
+        tests/capture_override_tests.cpp)
+    palworld_add_unit_test(PalworldEditorReviveTimerTests PalworldEditor.ReviveTimer
+        tests/revive_timer_tests.cpp)
+    palworld_add_unit_test(PalworldEditorWaypointTeleportTests PalworldEditor.WaypointTeleport
+        tests/waypoint_teleport_tests.cpp)
 endif()
 
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).

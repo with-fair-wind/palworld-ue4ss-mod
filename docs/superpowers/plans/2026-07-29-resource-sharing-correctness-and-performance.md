@@ -1,5 +1,8 @@
 # Resource Sharing Correctness and Performance Implementation Plan
 
+
+> **历史方案（superseded）**：本文提到的 `resource_session` 会话机制已删除，由世界代次内
+> 持续存在、可逆的公会仓储登记图取代；相关描述仅作历史记录。
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make same-guild cross-base resources available on the first original build/craft eligibility calculation, make displayed craft/build availability equal the amount Palworld can actually consume, and remove the overlapping unions and repeated work responsible for duplicate counts and frame hitches.

@@ -9,6 +9,7 @@
 #include <Unreal/Core/Containers/ScriptArray.hpp>
 #include <Unreal/CoreUObject/UObject/Class.hpp>
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
+#include <Unreal/Property/FEnumProperty.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <Unreal/UnrealCoreStructs.hpp>
@@ -36,19 +37,10 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return FGuid{key.words[0], key.words[1], key.words[2], key.words[3]};
 }
 
-[[nodiscard]] auto object_name(UObject* object) -> std::wstring {
-    return object == nullptr ? std::wstring{} : std::wstring{object->GetFullName()};
-}
-
-[[nodiscard]] auto pal_utility() -> UObject* {
-    return UObjectGlobals::StaticFindObject<UObject*>(nullptr, nullptr,
-                                                      STR("/Script/Pal.Default__PalUtility"));
-}
-
 [[nodiscard]] auto call_utility_bool(UObject* worldContext, const CharType* functionName,
                                      bool& value) -> bool {
     value = false;
-    auto* utility = pal_utility();
+    auto* utility = pal_game::find_pal_utility();
     auto* function = utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(functionName);
     auto* const context = function == nullptr
                               ? nullptr
@@ -72,7 +64,7 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
 [[nodiscard]] auto call_utility_object(UObject* worldContext, const CharType* functionName,
                                        UObject*& value) -> bool {
     value = nullptr;
-    auto* utility = pal_utility();
+    auto* utility = pal_game::find_pal_utility();
     auto* function = utility == nullptr ? nullptr : utility->GetFunctionByNameInChain(functionName);
     auto* const context = function == nullptr
                               ? nullptr
@@ -94,21 +86,29 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return pal_game::is_valid(value);
 }
 
-[[nodiscard]] auto try_get_guid(UObject* target, const CharType* functionName, FGuid& output)
-    -> bool {
-    if (!pal_game::is_valid(target)) {
+/**
+ * @brief 读取已加载物品容器的持久 ID 属性。
+ * @details `UPalContainerBase::ID` 的类型是 `FPalContainerId`，其唯一字段 `ID` 是 `FGuid`。
+ *          直接按属性链读取，避免把包装结构的函数返回值误当作 Guid。
+ */
+[[nodiscard]] auto try_get_container_id(UObject* container, FGuid& output) -> bool {
+    if (!pal_game::is_valid(container)) {
         return false;
     }
-    auto* function = target->GetFunctionByNameInChain(functionName);
-    auto* const result =
-        function == nullptr ? nullptr : CastField<FStructProperty>(function->GetReturnProperty());
-    if (!pal_game::has_exact_parameter_count(function, 1) ||
-        !pal_game::is_return_parameter(result) || result->GetElementSize() != sizeof(FGuid)) {
+    auto* const containerIdProperty =
+        CastField<FStructProperty>(container->GetPropertyByNameInChain(STR("ID")));
+    if (!pal_game::matches_struct_identity(containerIdProperty, STR("PalContainerId"),
+                                           sizeof(FGuid))) {
         return false;
     }
-    FunctionParams params{function};
-    target->ProcessEvent(function, params.data());
-    result->CopyCompleteValue(&output, result->ContainerPtrToValuePtr<void>(params.data()));
+    auto* const idProperty = CastField<FStructProperty>(
+        containerIdProperty->GetStruct()->GetPropertyByNameInChain(STR("ID")));
+    if (!pal_game::matches_struct_identity(idProperty, STR("Guid"), sizeof(FGuid))) {
+        return false;
+    }
+    idProperty->CopyCompleteValue(
+        &output, idProperty->ContainerPtrToValuePtr<void>(
+                     containerIdProperty->ContainerPtrToValuePtr<void>(container)));
     return to_key(output).valid();
 }
 
@@ -127,51 +127,6 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     return property == nullptr
                ? nullptr
                : property->GetObjectPropertyValue(property->ContainerPtrToValuePtr<void>(object));
-}
-
-[[nodiscard]] auto try_get_player_guild(UObject* worldContext, const FGuid& playerId,
-                                        UObject*& guild) -> bool {
-    guild = nullptr;
-    auto* utility = pal_utility();
-    auto* function = utility == nullptr
-                         ? nullptr
-                         : utility->GetFunctionByNameInChain(STR("GetGuildByPlayerUId"));
-    auto* const context = function == nullptr
-                              ? nullptr
-                              : CastField<FObjectPropertyBase>(function->FindProperty(
-                                    FName(STR("WorldContextObject"), FNAME_Find)));
-    auto* const player = function == nullptr ? nullptr
-                                             : CastField<FStructProperty>(function->FindProperty(
-                                                   FName(STR("PlayerUId"), FNAME_Find)));
-    auto* const result = function == nullptr
-                             ? nullptr
-                             : CastField<FObjectPropertyBase>(function->GetReturnProperty());
-    if (!pal_game::is_valid(utility) || !pal_game::is_valid(worldContext) ||
-        !pal_game::has_exact_parameter_count(function, 3) ||
-        !pal_game::is_input_parameter(context) || !pal_game::is_input_parameter(player) ||
-        player->GetElementSize() != sizeof(FGuid) || !pal_game::is_return_parameter(result)) {
-        return false;
-    }
-    FunctionParams params{function};
-    context->SetObjectPropertyValue(context->ContainerPtrToValuePtr<void>(params.data()),
-                                    worldContext);
-    player->CopyCompleteValue(player->ContainerPtrToValuePtr<void>(params.data()), &playerId);
-    utility->ProcessEvent(function, params.data());
-    guild = result->GetObjectPropertyValue(result->ContainerPtrToValuePtr<void>(params.data()));
-    return pal_game::is_valid(guild);
-}
-
-[[nodiscard]] auto try_resolve_local_guild(UObject* worldContext, FGuid& guildId) -> bool {
-    UObject* controller{};
-    if (!call_utility_object(worldContext, STR("GetLocalPalPlayerController"), controller)) {
-        return false;
-    }
-
-    FGuid playerId{};
-    UObject* guild{};
-    return try_get_guid(controller, STR("GetPlayerUId"), playerId) &&
-           try_get_player_guild(controller, playerId, guild) &&
-           try_get_guid(guild, STR("GetId"), guildId);
 }
 
 [[nodiscard]] auto find_concrete_model(UObject* manager, const GuidKey& ownerMapObjectId)
@@ -206,11 +161,25 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
         containerIdStruct == nullptr
             ? nullptr
             : CastField<FStructProperty>(containerIdStruct->GetPropertyByNameInChain(STR("ID")));
-    auto* typeProperty =
+    auto* const typeProperty =
         infoStruct == nullptr ? nullptr : infoStruct->GetPropertyByNameInChain(STR("Type"));
-    if (containerInfo == nullptr || ownerProperty == nullptr || containerIdProperty == nullptr ||
-        idProperty == nullptr || (containerType != nullptr && typeProperty == nullptr)) {
+    if (containerInfo == nullptr || containerIdProperty == nullptr ||
+        !pal_game::matches_struct_identity(ownerProperty, STR("Guid"), sizeof(FGuid)) ||
+        !pal_game::matches_struct_identity(idProperty, STR("Guid"), sizeof(FGuid))) {
         return false;
+    }
+    // Type 是容器类型枚举：底层必须是无符号 1 字节 FByteProperty（宽度与有无符号
+    // 精确匹配），避免接受 FInt8Property 等有符号类型或按漂移后的元素大小向固定
+    // uint8 目标越界写入。
+    if (containerType != nullptr) {
+        auto* const enumType = CastField<FEnumProperty>(typeProperty);
+        const bool typeIsOneByte =
+            CastField<FByteProperty>(typeProperty) != nullptr ||
+            (enumType != nullptr &&
+             CastField<FByteProperty>(enumType->GetUnderlyingProperty()) != nullptr);
+        if (!typeIsOneByte) {
+            return false;
+        }
     }
 
     ownerProperty->CopyCompleteValue(&ownerMapObjectId,
@@ -265,7 +234,7 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     for (int32 index{}; index < count; ++index) {
         auto* container = objectProperty->GetObjectPropertyValue(containers.GetRawPtr(index));
         FGuid id{};
-        if (!try_get_guid(container, STR("GetId"), id)) {
+        if (!pal_base_camp_reflection::read_model_guid(container, STR("GetId"), id)) {
             return false;
         }
         output.push_back(to_key(id));
@@ -278,6 +247,9 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     if (property == nullptr || target == nullptr || source == nullptr) {
         return false;
     }
+    // 写路径不能走 FScriptArrayHelper::AddValues：其 freezable 数组分支引用
+    // FMemoryImageAllocatorBase::ResizeAllocation，本 UE4SS 构建未导出该符号，无法链接。
+    // 按 property 的元素大小/对齐直接调用 FScriptArray::Add + InitializeValue。
     auto* inner = property->GetInner();
     auto* array = property->ContainerPtrToValuePtr<FScriptArray>(target);
     if (inner == nullptr || array == nullptr) {
@@ -298,6 +270,7 @@ constexpr int32 kMaximumContainersPerModule = 10'000;
     if (property == nullptr || target == nullptr) {
         return false;
     }
+    // 同 append_array_copy：FScriptArrayHelper::RemoveValues 在本 UE4SS 构建无法链接。
     auto* inner = property->GetInner();
     auto* array = property->ContainerPtrToValuePtr<FScriptArray>(target);
     if (inner == nullptr || array == nullptr) {
@@ -335,8 +308,7 @@ auto notify_array_changed(UObject* object, const CharType* functionName) -> void
     FGuid resolvedId{};
     if (!try_get_object(concrete, STR("GetItemContainerModule"), itemContainerModule) ||
         !try_get_object(itemContainerModule, STR("GetContainer"), container) ||
-        !try_get_guid(container, STR("GetId"), resolvedId) ||
-        to_key(resolvedId) != entry.containerId) {
+        !try_get_container_id(container, resolvedId) || to_key(resolvedId) != entry.containerId) {
         return nullptr;
     }
     return container;
@@ -364,6 +336,14 @@ auto notify_array_changed(UObject* object, const CharType* functionName) -> void
                                : CastField<FArrayProperty>(
                                      sourceObject->GetPropertyByNameInChain(STR("ContainerInfos")));
     if (targetModule == nullptr || targetProperty == nullptr || sourceProperty == nullptr) {
+        return false;
+    }
+    // 跨对象结构元素拷贝：source/target 数组的 inner 必须是同一结构身份，防止把
+    // 漂移后的异构元素复制到目标容器。
+    auto* const targetInner = CastField<FStructProperty>(targetProperty->GetInner());
+    auto* const sourceInner = CastField<FStructProperty>(sourceProperty->GetInner());
+    if (targetInner == nullptr || sourceInner == nullptr ||
+        targetInner->GetStruct().Get() != sourceInner->GetStruct().Get()) {
         return false;
     }
     FScriptArrayHelper_InContainer infos(sourceProperty, sourceObject);
@@ -460,7 +440,8 @@ auto local_authority_ready(UObject* worldContext, std::string& error) -> bool {
 auto read_base_id(UObject* baseModel) -> std::optional<GuidKey> {
     using Names = CurrentBaseReflectionNames<CharType>;
     FGuid value{};
-    if (!try_get_guid(baseModel, Names::baseIdFunction.data(), value)) {
+    if (!pal_base_camp_reflection::read_model_guid(baseModel, Names::baseIdFunction.data(),
+                                                   value)) {
         return std::nullopt;
     }
     const auto key = to_key(value);
@@ -524,7 +505,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
     FGuid guildId{};
     UObject* baseCampManager{};
     UObject* mapObjectManager{};
-    if (!try_resolve_local_guild(worldContext, guildId) ||
+    if (!pal_base_camp_reflection::resolve_local_guild_id(worldContext, guildId) ||
         !call_utility_object(worldContext, STR("GetBaseCampManager"), baseCampManager) ||
         !call_utility_object(worldContext, STR("GetMapObjectManager"), mapObjectManager)) {
         result.error = "无法解析本地公会、据点管理器或地图物体管理器。";
@@ -548,7 +529,8 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
         UObject* baseModel{};
         FGuid ownerGuild{};
         if (!pal_base_camp_reflection::try_get_base_model(baseCampManager, baseId, baseModel) ||
-            !try_get_guid(baseModel, STR("GetGroupIdBelongTo"), ownerGuild)) {
+            !pal_base_camp_reflection::read_model_guid(baseModel, STR("GetGroupIdBelongTo"),
+                                                       ownerGuild)) {
             continue;
         }
         const bool sameGuild = to_key(ownerGuild) == result.guildId;
@@ -587,7 +569,7 @@ auto discover_catalog(UObject* worldContext, const std::uint64_t generation,
             continue;
         }
 
-        const auto storageModuleName = object_name(storageModule);
+        const auto storageModuleName = pal_game::object_full_name(storageModule);
         if (!sameGuild) {
             result.ignoredModuleNames.push_back(storageModuleName);
             continue;
@@ -777,7 +759,7 @@ auto apply_union(UObject* worldContext, const ResourceCatalogSnapshot& catalog,
                                   ? nullptr
                                   : CastField<FObjectPropertyBase>(containersProperty->GetInner());
     UnionLedgerEntry helperLedger{
-        .objectFullName = object_name(helper),
+        .objectFullName = pal_game::object_full_name(helper),
         .helperArray = true,
     };
     if (containerProperty == nullptr ||

@@ -6,7 +6,8 @@
 ## 项目概览
 
 这是一个面向 **Palworld 1.0** 的 **UE4SS C++23 mod** 工程（CMake / Ninja super-build）。当前 mod
-名为 `PalworldEditor`（版本 1.7.0），构建产物为 `PalworldEditor.dll`。Palworld 的 F10 游戏控制台
+名为 `PalworldEditor`（版本 1.7.0），构建产物为 `PalworldEditor.dll`。兼容基线为 Palworld 1.0；
+正文中出现的 1.0.1 等补丁号说明仅作历史行为记录，不表示声明支持多个补丁版本。Palworld 的 F10 游戏控制台
 不可用，所有用户交互都通过 UE4SS GUI 的 ImGui 浮动窗口完成。
 
 提供功能一览：
@@ -57,13 +58,15 @@ cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
 提交前至少运行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-- 六个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖物品目录、技能目录与编辑、配置、资源
-  共享、远程终端、捕获覆盖、复活计时和标记传送等纯值逻辑；反射调用、ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
+- 八个测试 target 均为**不链接 UE4SS 的纯 C++ 测试**，覆盖参数方向判定、卸载清理调度（有界重试、
+  永久失败销毁阻断）、物品目录、
+  技能目录与编辑、配置、资源共享、远程终端、捕获覆盖、复活计时和标记传送等纯值逻辑；反射调用、
+  ImGui 与 Palworld 存档效果仍需游戏内端到端验证；
 - 游戏内应看到 `PalworldEditor loaded (v1.7.0)`；除物品、技能与世界切换回归外，逐项验证清单见
   `AGENTS.md` 的"验证一次改动"。
 
@@ -114,9 +117,12 @@ git diff --check
   `CPF_OutParm`，语义仍是只读输入；不得把任意 `OutParm` 直接认作可写输出。输入、输出与返回值统一
   通过 `is_input_parameter` / `is_output_parameter` / `is_return_parameter` 和预期属性类型共同判断；
 - **通过属性 API 读写**：输入使用 `SetPropertyValueInContainer` 或 `CopyCompleteValue`，输出和返回值
-  使用对应 Property getter；动态数组使用 `FScriptArrayHelper_InContainer`，不得把参数缓冲区强转为
-  `TArray<T>`。读取数组前验证 `Num()` 非负且不超过领域上限，完成范围校验后才能 `reserve`、遍历或做
-  窄化转换；
+  使用对应 Property getter；动态数组读取使用 `FScriptArrayHelper_InContainer`，不得把参数缓冲区强转为
+  `TArray<T>`。数组写路径（Add/Remove）因本 UE4SS 构建未导出
+  `FMemoryImageAllocatorBase::ResizeAllocation`（helper 的 freezable 分支无法链接）而按 property 的
+  元素大小/对齐直接调用 `FScriptArray::Add/Remove` 并配 `InitializeValue`/`DestroyValue`（与 helper
+  堆数组路径语义一致）。读取数组前验证 `Num()` 非负且不超过领域上限，完成范围校验后才能 `reserve`、
+  遍历或做窄化转换；
 - **反射对象都是短期非拥有句柄**：`UObject*`、`UFunction*`、`FProperty*` 与 Unreal 容器地址只在
   当前游戏线程调用链内有效；跨帧只保存 GUID、对象全名和标准库纯值。每次 `ProcessEvent` 后若还要
   继续修改，必须重新解析或至少重新验证目标；对象返回值在使用前再次执行 `pal_game::is_valid`；
@@ -171,7 +177,9 @@ git diff --check
   的单次操作；公共层不得通过大量开关、回调或模板参数同时承载互斥业务；
 - **防止公共目录变成杂项箱**：`common/` 只接收无业务归属、契约稳定、被多个模块实际使用的原语；
   单模块 helper 留在该模块的匿名 namespace 或私有实现文件。禁止新增 `utils.hpp`、`helpers.hpp`、
-  `manager`、`service locator` 等边界模糊的万能入口；公共 API 保持最小，自包含头文件不泄露实现细节；
+  `manager`、`service locator` 等边界模糊的万能入口；公共 API 保持最小，自包含头文件不泄露实现细节。
+  唯一例外是"可测子段 + Unreal 包装"的成对切片（如 `parameter_direction.hpp` 之于
+  `game_reflection.hpp`）：两者视为一个组件，纯值子段不得独立膨胀；
 - **生命周期接入必须成对**：新 Hook、缓存、事务账本和运行时开关必须明确初始化、LoadMap 前清理、
   LoadMap 后恢复条件、关闭和卸载路径；注册与注销、应用与恢复必须由同一模块负责。不得把清理责任留给
   调用者猜测，也不得因新增功能改变其他模块的安全停用域；
@@ -202,7 +210,7 @@ triplet 时这些宏才生效。Ninja 是单配置生成器，preset 必须**显
 `CMAKE_BUILD_TYPE` 强制为 `Debug`，若不显式指定，关键宏不会定义，编译失败。这就是输出 DLL 落在
 `build/Game__Shipping__Win64/bin/` 的原因。
 
-### 入口点契约（`src/dllmain.cpp`）
+### 入口点契约（`src/mod/dllmain.cpp`）
 
 - `PalworldEditorMod` 继承 `RC::CppUserModBase`：设置元数据，`on_update()` 保持为空，
   `on_unreal_init()` 注册 EngineTick 与 LoadMap 前/后回调；DLL 导出 `start_mod()`（构造实例）与
@@ -216,9 +224,12 @@ triplet 时这些宏才生效。Ninja 是单配置生成器，preset 必须**显
 
 1. **纯值领域层**（`inc/` 下 `*_editor.hpp`、`*_service.hpp`、`*_catalog.hpp`、`*_state.hpp` 等）：
    只依赖标准库，承载值、快照、请求、队列、校验、账本、帧预算等全部决策逻辑，可单元测试；
+   （例外：`inc/common/hotkey_capture_ui.hpp` 为被远程终端与标记传送两个 UI 共用的 header-only
+   ImGui 原语，不接触反射，按既有归属保留在 common/；`game_foreground.hpp`/`text_encoding.hpp`
+   为含 Windows.h 的平台工具原语，同属文档化例外。）
 2. **游戏线程适配层**（`src/` 下 `pal_*.cpp`、`*_gateway.cpp`）：在 EngineTick 或对应 UFunction 的
    游戏线程回调内做反射查找与读写，把引擎状态翻译成纯值请求；
-3. **UI 层**（`src/editor_ui.cpp` 与 `src/*_ui.cpp`）：ImGui 回调只做展示与输入，通过原子请求、
+3. **UI 层**（`src/mod/editor_ui.cpp` 与各业务模块 `src/*/*_ui.cpp`）：ImGui 回调只做展示与输入，通过原子请求、
    互斥锁快照与游戏线程交接。
 
 ### 线程模型
@@ -249,20 +260,20 @@ Windows SDK，允许它查询 MSVC 驱动（如
 - `inc/skills/`：主动/被动技能目录、分类规则、编辑服务、四词条预设、显式目标锁定与世界代次状态。
   主动技能数值/Raw ID 来自 `scripts/generate-active-skill-definitions.ps1` 从 UHT dump 生成的表，
   不读取运行时 `UEnum` 布局；更新 Palworld/UHT dump 后必须重新运行生成脚本；
-- `inc/pal_stats/` + `src/pal_stats.cpp`：帕鲁属性编辑领域与 `SaveParameter` 反射适配；
-- `inc/pal_identity/` + `src/pal_identity.cpp`：Alpha/Lucky/觉醒三维形态编辑；
-- `inc/pal_revive/` + `src/pal_revive.cpp`：队伍帕鲁复活；
-- `inc/grappling_hook/` + `src/grapple_cooldown_gateway.cpp`：爪钩对象的一次性冷却覆盖与原值恢复；
+- `inc/pal_stats/` + `src/pal_stats/pal_stats.cpp`：帕鲁属性编辑领域与 `SaveParameter` 反射适配；
+- `inc/pal_identity/` + `src/pal_identity/pal_identity.cpp`：Alpha/Lucky/觉醒三维形态编辑；
+- `inc/pal_revive/` + `src/pal_revive/pal_revive.cpp`：队伍帕鲁复活；
+- `inc/grappling_hook/` + `src/grappling_hook/grapple_cooldown_gateway.cpp`：爪钩对象的一次性冷却覆盖与原值恢复；
 - `inc/capture_override/` + `src/capture_override/`：捕获限制瞬时事务与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除与单字段恢复账本；
 - `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（配置解析、最近选择、无扫掠放置）；
 - `inc/pal_remote_palbox/` + `src/pal_remote_palbox/`：远程终端——按键上升沿状态机（300ms 防连点）
   与基地选择策略（纯值层 `remote_palbox.hpp`）+ 游戏线程运行时 `remote_palbox_runtime.cpp`；
-- `inc/base_resource_sharing/` + `src/pal_base_resources.*`、`src/pal_base_resource_runtime.*`：
-  同公会跨据点制作/建造材料共享；
+- `inc/base_resource_sharing/` + `src/base_resource_sharing/pal_base_resources.*`、
+  `src/base_resource_sharing/pal_base_resource_runtime.*`：同公会跨据点制作/建造材料共享；
 - `inc/common/` + `src/common/`：反射参数、签名判断与 UFunction Hook 登记等公共原语；
-- `src/dllmain.cpp`：mod 生命周期、ImGui、EngineTick/LoadMap 与线程间请求交接；
-- `src/*_ui.cpp`：各业务模块的 ImGui 界面。
+- `src/mod/dllmain.cpp`：mod 生命周期、ImGui、EngineTick/LoadMap 与线程间请求交接；
+- `src/*/*_ui.cpp`：各业务模块的 ImGui 界面。
 
 ### 反射与目标锁定契约
 
@@ -281,8 +292,11 @@ Windows SDK，允许它查询 MSVC 驱动（如
   觉醒写入 `bIsAwakening`，三者可任意组合且不消耗材料。只允许在帕鲁已收回时执行——出战判断以本地
   Holder `TryGetSpawnedOtomoHandle` 为准，不使用可能残留的 Actor 对象；写后重读失败时整笔回滚；
 - 远程终端：圈内判定以世界设置 `BaseCampAreaRange`（视觉建造圈）为准，不使用随据点等级膨胀的据点
-  模型 `AreaRange` 属性；战斗中禁用读取 `APalCharacter::bIsBattleMode` 属性（`IsInCombat` /
-  `IsInBattle` 函数名在 Palworld 1.0 不存在）。
+  模型 `AreaRange` 属性，世界设置不可读时按拦截处理而不是回退；战斗中禁用读取
+  `APalCharacter::bIsBattleMode` 属性（`IsInCombat` / `IsInBattle` 函数名在 Palworld 1.0 不存在）。
+  地牢/骑乘/战斗门控启用时，对应状态不可读取按拦截处理（fail-closed），不视为安全放行。基地候选
+  按本地公会（`GetGroupIdBelongTo`）过滤，归属不可读拦截；`PalHUDService:Push` 返回全零 GUID 时
+  进入 600ms 有界确认窗口复查界面是否实际入栈，超时才记失败且不停用域。
 
 ### 资源共享契约
 

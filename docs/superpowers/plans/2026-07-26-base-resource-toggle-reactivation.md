@@ -2,6 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> **历史方案（superseded）**：本文提到的 `resource_session` 会话机制已删除，由世界代次内
+> 持续存在、可逆的公会仓储登记图取代；相关描述仅作历史记录。
+
 **Goal:** Restore base-resource discovery and sharing when the user turns the feature off and back on without leaving the current world.
 
 **Architecture:** A pure C++ transition function decides whether a toggle is unchanged, disables the runtime, or starts the currently accessible world. The Unreal bridge uses that decision to reinitialize the existing lease and reconcile scheduler with the current generation; catalog discovery remains deferred to the existing game-thread tick.
