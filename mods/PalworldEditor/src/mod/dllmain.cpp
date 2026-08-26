@@ -353,6 +353,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         const auto worldContextReady = process_inventory_requests(deltaSeconds);
         process_stack_limit_work(worldContextReady);
         process_revive_timer_work(worldContextReady);
+        process_fishing_boost_work(worldContextReady);
         process_pal_edit_requests();
         process_initialization_tasks();
         process_utility_requests();
@@ -442,6 +443,18 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
                                                           : CleanupOutcome::transientFailure;
         },
         STR("PalworldEditor: revive timer values could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this] {
+            fishingBoostLedger_.set_desired(false);
+            // 目标不可解析（世界已退出、对象已销毁）等于无需恢复：新世界实例使用
+            // 原生值；其余失败按瞬态清理重试。
+            const auto status = fishing_boost::restore(fishingBoostLedger_);
+            return status == fishing_boost::GatewayStatus::succeeded ||
+                           status == fishing_boost::GatewayStatus::targetUnavailable
+                       ? CleanupOutcome::succeeded
+                       : CleanupOutcome::transientFailure;
+        },
+        STR("PalworldEditor: fishing values could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
     return worst;
 }
@@ -1074,6 +1087,27 @@ auto PalworldEditorMod::process_revive_timer_work(const bool worldContextReady) 
     reviveTimerPhase_.store(reviveTimerLedger_.phase(generation), std::memory_order_release);
 }
 
+auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady) -> void {
+    if (!worldContextReady) {
+        return;
+    }
+    if (fishingBoostDirty_.exchange(false, std::memory_order_acq_rel)) {
+        fishingBoostLedger_.set_desired(requestedFishingBoost_.load(std::memory_order_acquire));
+    }
+    if (fishingBoostLedger_.safety_disabled()) {
+        fishingBoostPhase_.store(fishing_boost::Phase::safetyDisabled, std::memory_order_release);
+        return;
+    }
+    const bool wantsOn = fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
+    const bool wantsOff = !fishingBoostLedger_.desired() && fishingBoostLedger_.has_records();
+    if (wantsOn) {
+        static_cast<void>(fishing_boost::apply(fishingBoostLedger_));
+    } else if (wantsOff) {
+        static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
+    }
+    fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+}
+
 auto PalworldEditorMod::restore_revive_timer_overrides(const std::string_view reason) -> bool {
     reviveTimerLedger_.set_desired(false);
     requestedReviveTimerRemove_.store(false, std::memory_order_release);
@@ -1237,6 +1271,14 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     static_cast<void>(reviveTimerLedger_.begin_world(nextWorldGeneration));
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
                             std::memory_order_release);
+    // 钓鱼圣手的目标 UPalWorldSubsystem 随世界销毁：切图前尽力恢复原值，账本随
+    // 新世界重置（新世界实例天然使用原生值）。
+    fishingBoostLedger_.set_desired(false);
+    static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
+    requestedFishingBoost_.store(false, std::memory_order_release);
+    fishingBoostDirty_.store(false, std::memory_order_release);
+    fishingBoostLedger_.begin_world();
+    fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
     grappleReadinessScheduler_.begin_world(nextWorldGeneration);
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),

@@ -36,6 +36,8 @@ add_library(${TARGET} SHARED
     src/pal_revive/pal_revive.cpp
     src/capture_override/capture_override_runtime.cpp
     src/capture_override/capture_override_ui.cpp
+    src/fishing_boost/fishing_boost_gateway.cpp
+    src/fishing_boost/fishing_boost_ui.cpp
     src/revive_timer/revive_timer_gateway.cpp
     src/revive_timer/revive_timer_ui.cpp
     src/waypoint_teleport/waypoint_teleport_runtime.cpp

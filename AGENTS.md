@@ -122,6 +122,10 @@ IntegratedStorage、UBIM Lite、BlueprintResearch 等修改相同资源路径的
 关闭开关、切图与热卸载后原值恢复且重读一致；设置实例被世界重建时恢复按"无需恢复"处理而不是报错；
 目标暂不可用时等待重试，字段缺失时本世界安全停用。
 
+钓鱼圣手还应验证：默认关闭且关闭时零写入；开启后咬钩等待归零、捕获进度一次即满（无小游戏直接
+钓起）；关闭开关恢复四个字段原值且重读一致；切图后新世界使用原生值（账本不跨世界）；热卸载时
+按瞬态恢复（目标已销毁视为无需恢复）；字段布局漂移时本世界安全停用且开关不可再写入。
+
 标记传送还应验证：地图放置至少两个自定义标记后按 F7 传送至水平距离最近的一个（直接落点、无黑屏
 过渡）；到达点为标记原始坐标加 ArrivalHeightOffset（默认 0 = 标记地面高度；非零偏移须单独实测）；传送不删除、不修改任何标记（曾实现"传送后自动删除标记"，但地图控件图标 TMap 在活跃 Slate 状态下结构移除多次实测崩溃、收起后重开地图又重建，需求已整体移除；到达标记会霸占最近选择，连续传送需在地图中手动删除或远离该标记）；
 地面高度经 LineTraceSingle（通道 0）校正，标记 Z 不可靠、追踪未命中时拒绝传送而不是落图下方；目标区块按世界流送异步加载——远距目标（>100m）首追踪可能命中未加载占位高度，须走"先行到达最佳已知高度 + 1.2s 后静默校正"两段式（近距直接落地；不再空投，常见远距场景第一跳即落地零降落），验证远/近两种距离各一次；贴地校正的目标高度与跳过比较基线都必须携带触发时的 ArrivalHeightOffset（非零偏移经远距传送 + 校正后保持不变；首追踪即正确时不得执行二次放置）；每次放置（近距直落/远距空投/贴地校正）后必须调用 SetNoFallDamageHeightLastJumpedLocation 重置下落起点（游戏按 LastJumpedLocation 与落点差值结算坠落伤害，K2_TeleportTo 的角色路径重置对此无效、实测仍受伤）；传送统一用无扫掠 SetActorLocation；引擎拒绝不可达目标时给出提示；骑乘/地牢/战斗门控按配置拦截，
@@ -329,6 +333,10 @@ imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_
 - `inc/grappling_hook/` + `src/grappling_hook/grapple_cooldown_gateway.cpp`：爪钩冷却覆盖与恢复；
 - `inc/capture_override/` + `src/capture_override/`：投球期间捕获限制的瞬时覆盖、恢复与 Hook 生命周期；
 - `inc/revive_timer/` + `src/revive_timer/`：终端复活计时移除的单字段可逆覆盖与恢复账本；
+- `inc/fishing_boost/` + `src/fishing_boost/`：钓鱼圣手（即时钓鱼无小游戏）——作用于随世界生命周期的
+  `UPalFishingSystem.CatchBattleParameter` 四个 float 字段（咬钩等待归零、捕获进度一次即满），
+  快照→写入→重读验证→失败回滚的完整事务；切图对象销毁后账本自动失效（新世界原生值），
+  关闭开关与卸载时恢复原值，结构漂移本世界安全停用；
 - `inc/waypoint_teleport/` + `src/waypoint_teleport/`：传送至最近自定义地图标记（CustomMarkers 读取
   + 最近标记纯值选择 + K2_SetActorLocation 无扫掠放置）；
 - `inc/pal_remote_palbox/remote_palbox.hpp` + `src/pal_remote_palbox/`：远程终端纯值层（按键上升沿

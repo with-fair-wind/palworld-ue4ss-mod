@@ -25,6 +25,7 @@
 #include <Unreal/Hooks/Hooks.hpp>
 #include <base_resource_sharing/pal_base_resources.hpp>
 #include <capture_override/capture_override_runtime.hpp>
+#include <fishing_boost/fishing_boost_gateway.hpp>
 #include <game/pal_game.hpp>
 #include <grappling_hook/cooldown_gateway.hpp>
 #include <imgui.h>
@@ -173,6 +174,9 @@ private:
 
     /** @brief 在主背包安全门就绪后消费复活计时请求并执行一次性事务。 */
     auto process_revive_timer_work(bool worldContextReady) -> void;
+
+    /** @brief 在世界可访问后按账本差量应用/恢复钓鱼圣手的参数覆盖。 */
+    auto process_fishing_boost_work(bool worldContextReady) -> void;
 
     /**
      * @brief 按纯值账本恢复 PalBoxReviveTime 原值。
@@ -330,6 +334,9 @@ private:
     /** @brief 渲染终端复活计时移除开关与运行状态。 */
     static void render_revive_timer(PalworldEditorMod* self);
 
+    /** @brief 渲染钓鱼圣手开关（即时钓鱼，无小游戏）。 */
+    static void render_fishing_boost(PalworldEditorMod* self);
+
     /** @brief 渲染爪钩枪无冷却开关；切换时向游戏线程提交一次进程内请求。 */
     static void render_grapple_no_cooldown(PalworldEditorMod* self);
 
@@ -444,6 +451,15 @@ private:
     std::mutex reviveTimerStatusMutex_;
     /** @brief 最近一次复活计时应用或恢复结果的面向用户文本。 */
     std::string reviveTimerStatus_;
+
+    /** @brief GUI 提交的钓鱼圣手开关偏好；EngineTick 消费。 */
+    std::atomic<bool> requestedFishingBoost_{false};
+    /** @brief 通知 EngineTick 消费最新的钓鱼圣手偏好。 */
+    std::atomic<bool> fishingBoostDirty_{false};
+    /** @brief 目标为随世界生命周期的 UPalWorldSubsystem；切图对象销毁后账本自动失效。 */
+    fishing_boost::Ledger fishingBoostLedger_;
+    /** @brief 游戏线程发布、GUI 只读的钓鱼圣手运行阶段。 */
+    std::atomic<fishing_boost::Phase> fishingBoostPhase_{fishing_boost::Phase::off};
 
     /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
     pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;

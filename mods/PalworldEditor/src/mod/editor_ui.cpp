@@ -105,6 +105,10 @@ void PalworldEditorMod::render_main_window(PalworldEditorMod* self) {
             render_revive_timer(self);
             ImGui::EndTabItem();
         }
+        if (ImGui::BeginTabItem("参数")) {
+            render_fishing_boost(self);
+            ImGui::EndTabItem();
+        }
         if (ImGui::BeginTabItem("据点")) {
             render_base_resource_sharing(self);
             render_remote_palbox(self);
