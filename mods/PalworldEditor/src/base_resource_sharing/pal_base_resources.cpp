@@ -225,6 +225,13 @@ public:
         }
         try {
             unregister_resource_hooks();
+            // Incomplete unregistration is unfinished cleanup: failed bindings stay in the
+            // registry for retry (their gates are deactivated) and must block destruction.
+            if (!hookRegistry_.empty()) {
+                allRestored = false;
+                log_shutdown_error_noexcept(
+                    STR("PalworldEditor: resource hook removal left registrations behind.\n"));
+            }
         } catch (...) {
             allRestored = false;
             log_shutdown_error_noexcept(

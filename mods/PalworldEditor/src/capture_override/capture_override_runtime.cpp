@@ -624,7 +624,7 @@ struct CaptureOverrideRuntime::Impl {
     std::array<PendingHookCall, kMaximumNestedHookCalls> calls{};
     std::size_t callDepth{};
     std::size_t ignoredDepth{};
-    bool shutdown_restore_failed_{};
+    bool shutdown_cleanup_failed_{}; /**< 恢复失败或注销残留：清理未完成，禁止销毁实例。 */
 };
 
 CaptureOverrideRuntime::CaptureOverrideRuntime() : impl_{std::make_unique<Impl>()} {}
@@ -654,12 +654,16 @@ auto CaptureOverrideRuntime::tick() -> void {
 auto CaptureOverrideRuntime::shutdown() -> bool {
     // 先显式恢复在途事务以拿回成败结果；锁存后失败不可逆转，重试只会重复失败。
     const bool all_restored = restore_pending_transactions();
-    impl_->shutdown_restore_failed_ = impl_->shutdown_restore_failed_ || !all_restored;
+    impl_->shutdown_cleanup_failed_ = impl_->shutdown_cleanup_failed_ || !all_restored;
     // 复用 unregister_hooks 的"恢复在途事务 + 注销全部 Hook"序列；上面的恢复已把
     // callDepth 清零，这里的二次恢复是幂等空操作，只为避免两处维护同一注销序列。
     unregister_hooks();
+    // 注销残留即清理未完成：残留绑定保留在登记器中供重试，实例不得销毁（残留
+    // 注册的回调门已钝化，等待期间只会空转，但实例生命周期仍与闭包绑定）。
+    impl_->shutdown_cleanup_failed_ =
+        impl_->shutdown_cleanup_failed_ || !impl_->hookRegistry.empty();
     state_.end_world();
-    return !impl_->shutdown_restore_failed_;
+    return !impl_->shutdown_cleanup_failed_;
 }
 
 auto CaptureOverrideRuntime::phase() const noexcept -> CaptureRuntimePhase {
@@ -799,7 +803,13 @@ auto CaptureOverrideRuntime::unregister_hooks() -> void {
     // 调用 disable_for_world 完成域级安全停用，符合"恢复失败→安全停用域"的运行契约；
     // 只有销毁门控（shutdown）需要消费结果并锁存失败以阻止实例销毁。
     static_cast<void>(restore_pending_transactions());
-    impl_->hookRegistry.unregister_all();
+    if (impl_->hookRegistry.unregister_all() != 0) {
+        // 注销不彻底：回调门已钝化（残留注册空转），失败绑定留在登记器中由后续
+        // reconcile/shutdown 重试；shutdown 会据此阻止实例销毁。
+        Output::send<LogLevel::Warning>(
+            STR("PalworldEditor: capture hook unregistration left registrations behind "
+                "(gates deactivated)\n"));
+    }
     state_.hooks_removed();
 }
 
