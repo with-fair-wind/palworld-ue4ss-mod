@@ -218,11 +218,19 @@ auto FunctionHookRegistry::empty() const noexcept -> bool {
 }
 
 auto FunctionHookRegistry::ensure_script_dispatcher_registered() -> bool {
-    if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
+    // 上次注销失败滞留的钝化分发器必须先完成注销：残留回调 id 若被直接当作
+    // "已就绪"，新脚本绑定会全部挂在死门上不可用；若被覆盖注册则丢失旧回调的
+    // 注销句柄。滞留注销仍未完成时本次不注册，等待下次重试。
+    if (scriptDispatcherGate_ != nullptr &&
+        !scriptDispatcherGate_->active.load(std::memory_order_acquire)) {
+        if (!unregister_script_dispatcher()) {
+            return false;
+        }
+        // 注销完成后门与 id 均已复位，走下方全新注册。
+    } else if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
         return true;
     }
-    if (scriptDispatcherGate_ == nullptr ||
-        !scriptDispatcherGate_->active.load(std::memory_order_acquire)) {
+    if (scriptDispatcherGate_ == nullptr) {
         try {
             scriptDispatcherGate_ = std::make_shared<CallbackGate>();
         } catch (...) {

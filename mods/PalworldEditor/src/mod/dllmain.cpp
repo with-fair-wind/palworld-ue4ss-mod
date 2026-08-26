@@ -404,11 +404,15 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
     stack_setting_dirty_.store(false, std::memory_order_release);
 
     // 捕获事务恢复失败是永久性的：pending 事务在失败时已被丢弃，锁存后任何重试都
-    // 无法挽回，因此映射为 permanentFailure 让等待线程立即得到失败结论。
+    // 无法挽回，因此映射为 permanentFailure 让等待线程立即得到失败结论。仅剩 Hook
+    // 注销残留时为瞬态：失败绑定保留在登记器中，按卸载重试日程再次尝试。
     run_cleanup(
         [this] {
-            return captureRuntime_.shutdown() ? CleanupOutcome::succeeded
-                                              : CleanupOutcome::permanentFailure;
+            const bool clean = captureRuntime_.shutdown();
+            if (captureRuntime_.shutdown_restore_failed()) {
+                return CleanupOutcome::permanentFailure;
+            }
+            return clean ? CleanupOutcome::succeeded : CleanupOutcome::transientFailure;
         },
         STR("PalworldEditor: capture overrides could not be restored during shutdown.\n"));
     run_cleanup(

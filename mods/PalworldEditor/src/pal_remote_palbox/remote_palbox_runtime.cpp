@@ -457,7 +457,9 @@ auto RemotePalboxRuntime::tick(const float deltaSeconds,
     }
     if (pendingConfirm_.active) {
         // 上一个零 GUID 打开请求仍在确认窗口内：合并本次触发（含 GUI 请求），避免
-        // 界面入栈前的第二次 Push 叠出多余窗口并覆盖首请求的结论。
+        // 界面入栈前的第二次 Push 叠出多余窗口并覆盖首请求的结论。被合并的上升沿
+        // 仍须释放进行中保护，否则热键状态机会卡死到下次配置变更或切图。
+        trigger_.end_trigger();
         note("上一次打开请求正在确认中，请稍候", true);
         return;
     }

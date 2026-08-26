@@ -658,12 +658,15 @@ auto CaptureOverrideRuntime::shutdown() -> bool {
     // 复用 unregister_hooks 的"恢复在途事务 + 注销全部 Hook"序列；上面的恢复已把
     // callDepth 清零，这里的二次恢复是幂等空操作，只为避免两处维护同一注销序列。
     unregister_hooks();
-    // 注销残留即清理未完成：残留绑定保留在登记器中供重试，实例不得销毁（残留
-    // 注册的回调门已钝化，等待期间只会空转，但实例生命周期仍与闭包绑定）。
-    impl_->shutdown_cleanup_failed_ =
-        impl_->shutdown_cleanup_failed_ || !impl_->hookRegistry.empty();
     state_.end_world();
-    return !impl_->shutdown_cleanup_failed_;
+    // 注销残留是瞬态清理未完成：不锁存——残留绑定保留在登记器中供重试，后续某次
+    // shutdown 清空注册表即可恢复销毁资格；只有事务恢复失败才永久锁存（见
+    // shutdown_restore_failed）。回调门已钝化，等待重试期间残留注册只会空转。
+    return !impl_->shutdown_cleanup_failed_ && impl_->hookRegistry.empty();
+}
+
+auto CaptureOverrideRuntime::shutdown_restore_failed() const -> bool {
+    return impl_->shutdown_cleanup_failed_;
 }
 
 auto CaptureOverrideRuntime::phase() const noexcept -> CaptureRuntimePhase {
