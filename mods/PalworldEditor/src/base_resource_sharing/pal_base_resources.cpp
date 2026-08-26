@@ -190,6 +190,13 @@ public:
                 return;
             }
         }
+        if (safetyDisabled_) {
+            // 停用锁存期间只清残留、不注册新 Hook：本函数每 EngineTick 被 dllmain
+            // 无条件调用（不受 safetyDisabled_ 门控），滞留清空或 restoring 入口
+            // 若继续落入注册循环，会给本应安全停用的世界注册活跃 Hook、制造新的
+            // 清理义务；重启用等待 LoadMap 重置 safetyDisabled_。
+            return;
+        }
 
         const auto now = std::chrono::steady_clock::now();
         if (now < nextHookAttempt_) {
