@@ -93,7 +93,7 @@ public:
 
     auto on_world_begin(const std::uint64_t generation) -> void {
         restore_all_synchronously("切换世界");
-        unregister_resource_hooks();
+        static_cast<void>(unregister_resource_hooks());
         worldDisabledErrors_ = {};
         safetyDisabled_ = false;
         unionLedger_.clear();
@@ -159,7 +159,7 @@ public:
             unionLifecycle_.phase(runtime_.generation()) == PersistentUnionPhase::restoring;
         if (!resource_hooks_required(runtime_.enabled(), runtime_.accessible()) && !restoring) {
             if (!hooks_.empty()) {
-                unregister_resource_hooks();
+                static_cast<void>(unregister_resource_hooks());
                 publish_snapshot();
             }
             return;
@@ -224,10 +224,10 @@ public:
                 STR("PalworldEditor: persistent storage restore threw during shutdown.\n"));
         }
         try {
-            unregister_resource_hooks();
-            // Incomplete unregistration is unfinished cleanup: failed bindings stay in the
-            // registry for retry (their gates are deactivated) and must block destruction.
-            if (!hookRegistry_.empty()) {
+            // Residue comes from unregister_all's return value: it covers both retained
+            // bindings and a stranded script dispatcher, which empty() cannot see.
+            const std::size_t residue = unregister_resource_hooks();
+            if (residue != 0) {
                 allRestored = false;
                 log_shutdown_error_noexcept(
                     STR("PalworldEditor: resource hook removal left registrations behind.\n"));
@@ -684,14 +684,16 @@ private:
         dispatch_hook(function, HookPhase::post, spec, context);
     }
 
-    auto unregister_resource_hooks() -> void {
-        hookRegistry_.unregister_all();
+    /** @return 注销失败后仍保留的绑定/分发器残留数（含脚本分发器滞留）。 */
+    auto unregister_resource_hooks() -> std::size_t {
+        const std::size_t residue = hookRegistry_.unregister_all();
         hooks_.clear();
         resolutions_ = all_hook_resolutions(false);
         capabilitiesGeneration_ = 0;
         nextHookAttempt_ = {};
         publish_capabilities();
         snapshotDirty_.mark();
+        return residue;
     }
 
     auto rebuild_resolutions() -> void {

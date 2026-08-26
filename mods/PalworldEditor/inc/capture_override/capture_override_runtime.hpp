@@ -4,6 +4,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <memory>
 
 #include <capture_override/capture_override_state.hpp>
@@ -61,11 +62,16 @@ private:
     /**
      * @retval true 全部在途事务均已恢复。
      * @retval false 至少一个事务恢复失败；失败状态上报调用方，Unreal 句柄不会跨帧保留。
-     * @note unregister_hooks 的运行期路径（关闭开关/LoadMap/安全停用）会丢弃该结果——
+     * @note unregister_hooks 的运行期路径（关闭开关/LoadMap/安全停用）会丢弃恢复结果——
      *       域级安全停用已在 restore 内生效；仅 shutdown 需要消费结果锁存失败。
      */
     [[nodiscard]] auto restore_pending_transactions() -> bool;
-    auto unregister_hooks() -> void;
+
+    /**
+     * @brief 恢复在途事务并注销全部 Hook。
+     * @return 注销失败后仍保留的绑定/分发器残留数（含脚本分发器滞留；回调门已钝化）。
+     */
+    auto unregister_hooks() -> std::size_t;
 
     CaptureOverrideState state_;
     std::unique_ptr<Impl> impl_;

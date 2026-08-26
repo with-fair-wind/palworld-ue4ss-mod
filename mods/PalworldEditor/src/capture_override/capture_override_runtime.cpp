@@ -637,13 +637,13 @@ auto CaptureOverrideRuntime::set_config(const CaptureOverrideConfig& config) -> 
 }
 
 auto CaptureOverrideRuntime::on_world_begin() -> void {
-    unregister_hooks();
+    static_cast<void>(unregister_hooks());
     state_.begin_world();
     reconcile_hooks();
 }
 
 auto CaptureOverrideRuntime::on_world_end() -> void {
-    unregister_hooks();
+    static_cast<void>(unregister_hooks());
     state_.end_world();
 }
 
@@ -657,12 +657,13 @@ auto CaptureOverrideRuntime::shutdown() -> bool {
     impl_->shutdown_cleanup_failed_ = impl_->shutdown_cleanup_failed_ || !all_restored;
     // 复用 unregister_hooks 的"恢复在途事务 + 注销全部 Hook"序列；上面的恢复已把
     // callDepth 清零，这里的二次恢复是幂等空操作，只为避免两处维护同一注销序列。
-    unregister_hooks();
+    const std::size_t residue = unregister_hooks();
     state_.end_world();
     // 注销残留是瞬态清理未完成：不锁存——残留绑定保留在登记器中供重试，后续某次
     // shutdown 清空注册表即可恢复销毁资格；只有事务恢复失败才永久锁存（见
     // shutdown_restore_failed）。回调门已钝化，等待重试期间残留注册只会空转。
-    return !impl_->shutdown_cleanup_failed_ && impl_->hookRegistry.empty();
+    // 残留以 unregister_all 的返回值为准（含脚本分发器滞留），empty() 看不见后者。
+    return !impl_->shutdown_cleanup_failed_ && residue == 0;
 }
 
 auto CaptureOverrideRuntime::shutdown_restore_failed() const -> bool {
@@ -676,20 +677,33 @@ auto CaptureOverrideRuntime::phase() const noexcept -> CaptureRuntimePhase {
 auto CaptureOverrideRuntime::reconcile_hooks() -> void {
     if (state_.phase() == CaptureRuntimePhase::safetyDisabled) {
         if (impl_->callDepth == 0 && impl_->ignoredDepth == 0 && !impl_->hookRegistry.empty()) {
-            unregister_hooks();
+            static_cast<void>(unregister_hooks());
         }
         return;
     }
     if (state_.should_remove_hooks()) {
-        unregister_hooks();
+        static_cast<void>(unregister_hooks());
     } else if (state_.should_register_hooks()) {
         ensure_hooks_registered();
     }
 }
 
 auto CaptureOverrideRuntime::ensure_hooks_registered() -> void {
-    if (!state_.should_register_hooks() || !impl_->hookRegistry.empty()) {
+    if (!state_.should_register_hooks()) {
         return;
+    }
+    if (!impl_->hookRegistry.empty()) {
+        // 上次注销失败滞留的钝化绑定必须先清除：残留使注册表非空，若被当作
+        // "已注册"直接返回，捕获覆盖会在功能开启状态下静默失效到下次拆卸。
+        // 仍清不空则按运行期契约安全停用域——safetyDisabled 分支会持续重试
+        // 注销直至清空，LoadMap/重进世界后恢复正常注册路径。
+        if (impl_->hookRegistry.unregister_all() != 0) {
+            state_.disable_for_world();
+            Output::send<LogLevel::Warning>(
+                STR("PalworldEditor: capture retained hook removal still failing; "
+                    "domain disabled for this world\n"));
+            return;
+        }
     }
 
     std::array<UFunction*, kCaptureHookManifest.size()> functions{};
@@ -801,19 +815,24 @@ auto CaptureOverrideRuntime::restore_pending_transactions() -> bool {
     return all_restored;
 }
 
-auto CaptureOverrideRuntime::unregister_hooks() -> void {
+auto CaptureOverrideRuntime::unregister_hooks() -> std::size_t {
     // 运行期（关闭开关/LoadMap/安全停用）路径丢弃恢复结果：restore 内部已对每个失败
     // 调用 disable_for_world 完成域级安全停用，符合"恢复失败→安全停用域"的运行契约；
     // 只有销毁门控（shutdown）需要消费结果并锁存失败以阻止实例销毁。
     static_cast<void>(restore_pending_transactions());
-    if (impl_->hookRegistry.unregister_all() != 0) {
+    const std::size_t residue = impl_->hookRegistry.unregister_all();
+    if (residue != 0) {
         // 注销不彻底：回调门已钝化（残留注册空转），失败绑定留在登记器中由后续
-        // reconcile/shutdown 重试；shutdown 会据此阻止实例销毁。
+        // reconcile/shutdown 重试；shutdown 会据此阻止实例销毁。残留数以
+        // unregister_all 的返回值为准——它同时涵盖绑定与脚本分发器滞留，empty()
+        // 只查绑定数组，看不见"注册失败回滚 + 注销再失败"留下的分发器残留。
         Output::send<LogLevel::Warning>(
-            STR("PalworldEditor: capture hook unregistration left registrations behind "
-                "(gates deactivated)\n"));
+            STR("PalworldEditor: capture hook unregistration left {} registration(s) behind "
+                "(gates deactivated)\n"),
+            residue);
     }
     state_.hooks_removed();
+    return residue;
 }
 
 }  // namespace capture_override
