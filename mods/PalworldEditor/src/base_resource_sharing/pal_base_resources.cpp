@@ -170,19 +170,22 @@ public:
             }
             return;
         }
+        if (required_hooks_ready()) {
+            // 健康在册：注册表非空是常态，不做任何注销。本函数每 EngineTick 都会被
+            // 调用，滞留清理必须放在该判定之后——"未就绪而注册表非空"才等于
+            // 上次移除失败的滞留；放在之前会把刚注册的健康 Hook 逐 tick 全部注销。
+            return;
+        }
         if (!hookRegistry_.empty()) {
-            // 上次注销失败滞留的绑定/分发器残留先清除（empty() 已统一覆盖两者）：
-            // 仍清不空则标记域不可用且本节流窗口不注册替换 Hook，避免在未清理的
-            // 注册表上叠新回调。safetyDisabled_ 本世界锁死（账本型停用同样语义），
-            // 残留清空后也不再自动恢复，等待 LoadMap 重置。
+            // 未就绪而注册表仍有内容 = 移除失败滞留（hooks_ 已清空而 registry 保有
+            // 失败残留/分发器滞留）：先清除，清不空标记域不可用且本节流窗口不注册
+            // 替换 Hook。safetyDisabled_ 本世界锁死（账本型停用同样语义），残留清空
+            // 后也不再自动恢复，等待 LoadMap 重置。
             if (hookRegistry_.unregister_all() != 0) {
                 safetyDisabled_ = true;
                 publish_capabilities();
                 return;
             }
-        }
-        if (required_hooks_ready()) {
-            return;
         }
 
         const auto now = std::chrono::steady_clock::now();
