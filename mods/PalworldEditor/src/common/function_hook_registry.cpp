@@ -142,7 +142,7 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
         }
     } catch (...) {
         gate->active.store(false, std::memory_order_release);
-        rollback_native_hooks(function, preId, postId);
+        retain_failed_registration(function, preId, postId);
         return false;
     }
 
@@ -150,7 +150,7 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
     const bool postReady = !postCallback || postId >= 0;
     if (!preReady || !postReady) {
         gate->active.store(false, std::memory_order_release);
-        rollback_native_hooks(function, preId, postId);
+        retain_failed_registration(function, preId, postId);
         return false;
     }
 
@@ -164,10 +164,33 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
                              .postId = postId});
     } catch (...) {
         gate->active.store(false, std::memory_order_release);
-        rollback_native_hooks(function, preId, postId);
+        retain_failed_registration(function, preId, postId);
         return false;
     }
     return true;
+}
+
+void FunctionHookRegistry::retain_failed_registration(UFunction* function, CallbackId& preId,
+                                                      CallbackId& postId) noexcept {
+    // 先尝试回滚；仍注册的回调 id 以最小绑定入册（无回调、无门——闭包的 gate 已
+    // 在各失败路径先行钝化），让 unregister_all 把它纳入残留计数与重试，而不是
+    // 只留在局部变量里丢失。
+    rollback_native_hooks(function, preId, postId);
+    if (preId < 0 && postId < 0) {
+        return;  // 回滚彻底：无滞留。
+    }
+    try {
+        bindings_.push_back({.function = function,
+                             .backend = FunctionHookBackend::nativeFunction,
+                             .gate = nullptr,
+                             .preCallback = nullptr,
+                             .postCallback = nullptr,
+                             .preId = preId,
+                             .postId = postId});
+    } catch (...) {
+        log_hook_error(STR("PalworldEditor: failed to retain rollback residue bookkeeping\n"));
+        // 账面丢失：残留回调不可再重试，但其门已钝化且 DLL 已 pin，只空转不悬垂。
+    }
 }
 
 auto FunctionHookRegistry::unregister_all() noexcept -> std::size_t {
@@ -214,7 +237,10 @@ auto FunctionHookRegistry::unregister_all() noexcept -> std::size_t {
 }
 
 auto FunctionHookRegistry::empty() const noexcept -> bool {
-    return bindings_.empty();
+    // 分发器残留（注销失败滞留的回调 id / 钝化门）与绑定一样是待清理信号：
+    // 只查 bindings_ 会让 empty() 的消费者跳过对这些残留的重试。
+    return bindings_.empty() && scriptPreCallbackId_ == Hook::ERROR_ID &&
+           scriptPostCallbackId_ == Hook::ERROR_ID && scriptDispatcherGate_ == nullptr;
 }
 
 auto FunctionHookRegistry::ensure_script_dispatcher_registered() -> bool {

@@ -93,9 +93,11 @@ public:
 
     auto on_world_begin(const std::uint64_t generation) -> void {
         restore_all_synchronously("切换世界");
-        static_cast<void>(unregister_resource_hooks());
+        // 残留（含分发器滞留）时保持域不可用：新世界不得在未清理前注册替换 Hook；
+        // 后续 ensure_hooks_registered 的滞留重试与 shutdown 会继续收敛。
+        const std::size_t residue = unregister_resource_hooks();
         worldDisabledErrors_ = {};
-        safetyDisabled_ = false;
+        safetyDisabled_ = residue != 0;
         unionLedger_.clear();
         desiredPlan_ = {};
         unionLifecycle_.begin_world(generation);
@@ -158,11 +160,26 @@ public:
         const bool restoring =
             unionLifecycle_.phase(runtime_.generation()) == PersistentUnionPhase::restoring;
         if (!resource_hooks_required(runtime_.enabled(), runtime_.accessible()) && !restoring) {
-            if (!hooks_.empty()) {
-                static_cast<void>(unregister_resource_hooks());
+            if (!hooks_.empty() || !hookRegistry_.empty()) {
+                // 移除分支同样消费残留：清不空标记域不可用（能力快照反映），
+                // 残留由后续本函数的滞留重试与 shutdown 继续收敛。
+                if (unregister_resource_hooks() != 0) {
+                    safetyDisabled_ = true;
+                }
                 publish_snapshot();
             }
             return;
+        }
+        if (!hookRegistry_.empty()) {
+            // 上次注销失败滞留的绑定/分发器残留先清除（empty() 已统一覆盖两者）：
+            // 仍清不空则标记域不可用且本节流窗口不注册替换 Hook，避免在未清理的
+            // 注册表上叠新回调。safetyDisabled_ 本世界锁死（账本型停用同样语义），
+            // 残留清空后也不再自动恢复，等待 LoadMap 重置。
+            if (hookRegistry_.unregister_all() != 0) {
+                safetyDisabled_ = true;
+                publish_capabilities();
+                return;
+            }
         }
         if (required_hooks_ready()) {
             return;

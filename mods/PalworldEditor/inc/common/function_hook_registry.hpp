@@ -44,7 +44,9 @@ public:
      * @param[in] preCallback 可为空的 pre-hook。
      * @param[in] postCallback 可为空的 post-hook。
      * @retval true 已完整登记。
-     * @retval false 后端不受支持或登记失败；不会遗留本次部分登记。
+     * @retval false 后端不受支持或登记失败。已注册部分会尽力回滚；回滚失败的部分
+     *               以最小绑定滞留在登记器中，由 unregister_all() 重试并计入残留
+     *               （闭包门已钝化，滞留期间只空转）。
      */
     [[nodiscard]] auto register_hook(RC::Unreal::UFunction* function, Callback preCallback,
                                      Callback postCallback) -> bool;
@@ -79,6 +81,13 @@ private:
     [[nodiscard]] auto ensure_script_dispatcher_registered() -> bool;
     /** @retval false 任一脚本分发回调注销失败（失败项的 id 与门保留供重试）。 */
     auto unregister_script_dispatcher() noexcept -> bool;
+
+    /**
+     * @brief 登记失败回滚后仍注册的回调 id（最小绑定，无回调与门）。
+     * @note 供 unregister_all() 重试并计入残留；闭包门已在失败路径先行钝化。
+     */
+    auto retain_failed_registration(RC::Unreal::UFunction* function, RC::Unreal::CallbackId& preId,
+                                    RC::Unreal::CallbackId& postId) noexcept -> void;
     auto dispatch_script(bool pre, RC::Unreal::UObject* context, RC::Unreal::FFrame& stack,
                          void* result) -> void;
     static auto invoke_safely(const Callback& callback,

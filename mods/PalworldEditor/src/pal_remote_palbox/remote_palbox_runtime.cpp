@@ -323,28 +323,31 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
     return std::nullopt;
 }
 
+/** @brief 解析本地控制器的 HUD（GetHUD 优先，MyHUD 属性兜底）。 */
+[[nodiscard]] auto resolve_hud(UObject* controller) -> UObject* {
+    if (auto* const value = pal_game::invoke<UObject*>(controller, STR("GetHUD")).value_or(nullptr);
+        value != nullptr) {
+        return value;
+    }
+    auto* const property = pal_game::is_valid(controller)
+                               ? controller->GetPropertyByNameInChain(STR("MyHUD"))
+                               : nullptr;
+    auto* const objectProperty = CastField<FObjectPropertyBase>(property);
+    if (objectProperty == nullptr) {
+        return nullptr;
+    }
+    auto* const value = objectProperty->GetObjectPropertyValue(
+        objectProperty->ContainerPtrToValuePtr<void>(controller));
+    return pal_game::is_valid(value) ? value : nullptr;
+}
+
 /** @brief 本地控制器对应的 HUD 上是否已有打开的菜单（防叠菜单）。
  *  @details 镜像 AnywherePalbox：检查 APalHUDInGame::StackableUIWidgets（Palworld 1.0
  *           dump 中唯一存在的栈式 UI 数组，强指针）逐元素检查 IsInViewport 且
  *           GetVisibility 非 Collapsed/Hidden；IsInViewport 不可用的元素跳过，
  *           全部元素都无法检查时 fail-closed 拦截；空数组不拦截。 */
 [[nodiscard]] auto palbox_menu_is_open(UObject* controller) -> bool {
-    auto* hud = [&]() -> UObject* {
-        if (auto* const value =
-                pal_game::invoke<UObject*>(controller, STR("GetHUD")).value_or(nullptr)) {
-            return value;
-        }
-        auto* const property = pal_game::is_valid(controller)
-                                   ? controller->GetPropertyByNameInChain(STR("MyHUD"))
-                                   : nullptr;
-        auto* const objectProperty = CastField<FObjectPropertyBase>(property);
-        if (objectProperty == nullptr) {
-            return nullptr;
-        }
-        auto* const value = objectProperty->GetObjectPropertyValue(
-            objectProperty->ContainerPtrToValuePtr<void>(controller));
-        return pal_game::is_valid(value) ? value : nullptr;
-    }();
+    auto* const hud = resolve_hud(controller);
     if (hud == nullptr) {
         return false;
     }
@@ -391,6 +394,54 @@ inline constexpr const wchar_t* kPalStorageWidgetClassPath =
                                      : nullptr;
     auto* const cursorBool = CastField<FBoolProperty>(cursorProperty);
     return cursorBool != nullptr && cursorBool->GetPropertyValueInContainer(controller);
+}
+
+/** @brief 缓存路径对应的界面类是否已在 HUD 栈内实际入栈并可见。
+ *  @details Push 零 GUID 的确认必须匹配到 PalBox 自身：任意 StackableUIWidgets
+ *           元素可见只说明"有菜单打开"（玩家自行打开的地图等同样命中），会把
+ *           真失败误确认为成功并虚增打开计数。路径为空直接判否（fail-closed）。 */
+[[nodiscard]] auto palbox_widget_is_open(UObject* controller, const std::string& widgetPathUtf8)
+    -> bool {
+    if (widgetPathUtf8.empty()) {
+        return false;
+    }
+    auto* const hud = resolve_hud(controller);
+    if (hud == nullptr) {
+        return false;
+    }
+    auto* const arrayProperty =
+        CastField<FArrayProperty>(hud->GetPropertyByNameInChain(STR("StackableUIWidgets")));
+    auto* const innerProperty = arrayProperty == nullptr
+                                    ? nullptr
+                                    : CastField<FObjectPropertyBase>(arrayProperty->GetInner());
+    if (innerProperty == nullptr) {
+        return false;  // 非对象数组：无法按类匹配。
+    }
+    const auto expectedPath = text_encoding::widen_ascii(widgetPathUtf8);
+    FScriptArrayHelper_InContainer helper{arrayProperty, hud};
+    const auto count = helper.Num();
+    if (count <= 0 || count > kMaximumStackableWidgets) {
+        return false;
+    }
+    for (int32 index{}; index < count; ++index) {
+        auto* const widget = innerProperty->GetObjectPropertyValue(helper.GetRawPtr(index));
+        if (!pal_game::is_valid(widget)) {
+            continue;
+        }
+        const auto inViewport = widget_is_in_viewport(widget);
+        if (!inViewport.has_value() || !*inViewport) {
+            continue;
+        }
+        const auto visibility = read_slate_visibility(widget);
+        const bool hidden = visibility.has_value() && (*visibility == 1 || *visibility == 2);
+        if (hidden) {
+            continue;
+        }
+        if (std::wstring{widget->GetClassPrivate()->GetPathName()} == expectedPath) {
+            return true;  // PalBox 自身已入栈且可见。
+        }
+    }
+    return false;
 }
 
 }  // namespace
@@ -460,7 +511,7 @@ auto RemotePalboxRuntime::tick(const float deltaSeconds,
         // 界面入栈前的第二次 Push 叠出多余窗口并覆盖首请求的结论。被合并的上升沿
         // 仍须释放进行中保护，否则热键状态机会卡死到下次配置变更或切图。
         trigger_.end_trigger();
-        note("上一次打开请求正在确认中，请稍候", true);
+        note("上一次打开请求正在确认中，请稍候", false);  // 合并非失败：不计入失败次数。
         return;
     }
     if (!session.can_access_unreal()) {
@@ -814,7 +865,7 @@ auto RemotePalboxRuntime::run_pending_push_confirm() -> void {
         }
         return;
     }
-    if (palbox_menu_is_open(controller)) {
+    if (palbox_widget_is_open(controller, widgetPath_)) {
         pendingConfirm_.active = false;
         {
             const std::lock_guard lock(snapshotMutex_);
