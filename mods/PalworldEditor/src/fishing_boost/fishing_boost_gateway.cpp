@@ -54,26 +54,35 @@ auto apply(Ledger& ledger) -> GatewayStatus {
         return GatewayStatus::targetUnavailable;
     }
 
+    // 写入失败的统一处置：尽力回滚本事务已写入的字段并安全停用域。不能只返回
+    // 失败留给重试——账本无记录时重试会重新快照，把残留的覆盖值误存为"原值"
+    // （AGENTS.md：回滚无法验证时保留恢复责任并安全停用对应功能域）。
+    const auto abortWith = [&ledger, system](const std::size_t writtenCount,
+                                             const std::array<float, kFieldCount>& originals,
+                                             const GatewayStatus status) -> GatewayStatus {
+        for (std::size_t j{}; j < writtenCount; ++j) {
+            const auto rollback = find_field(system, kFieldCatalog[j].fieldName);
+            if (rollback.property != nullptr) {
+                rollback.property->SetPropertyValueInContainer(rollback.container, originals[j]);
+            }
+        }
+        ledger.disable_for_world();
+        return status;
+    };
+
     std::array<float, kFieldCount> originals{};
     for (std::size_t i{}; i < kFieldCount; ++i) {
         const auto access = find_field(system, kFieldCatalog[i].fieldName);
         if (access.property == nullptr) {
-            return GatewayStatus::preflightFailed;
+            // 此前 j < i 的字段已写入并通过验证：一并回滚，不留无账本的覆盖值。
+            return abortWith(i, originals, GatewayStatus::preflightFailed);
         }
         originals[i] = access.property->GetPropertyValueInContainer(access.container);
         access.property->SetPropertyValueInContainer(access.container,
                                                      kFieldCatalog[i].overrideValue);
         if (access.property->GetPropertyValueInContainer(access.container) !=
             kFieldCatalog[i].overrideValue) {
-            // 回滚已写入的部分
-            for (std::size_t j{}; j <= i; ++j) {
-                const auto rollback = find_field(system, kFieldCatalog[j].fieldName);
-                if (rollback.property != nullptr) {
-                    rollback.property->SetPropertyValueInContainer(rollback.container,
-                                                                   originals[j]);
-                }
-            }
-            return GatewayStatus::verificationFailed;
+            return abortWith(i + 1, originals, GatewayStatus::verificationFailed);
         }
     }
     ledger.record_originals(originals);
