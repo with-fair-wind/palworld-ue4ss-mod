@@ -93,9 +93,11 @@ public:
 
     auto on_world_begin(const std::uint64_t generation) -> void {
         restore_all_synchronously("切换世界");
-        unregister_resource_hooks();
+        // 残留（含分发器滞留）时保持域不可用：新世界不得在未清理前注册替换 Hook；
+        // 后续 ensure_hooks_registered 的滞留重试与 shutdown 会继续收敛。
+        const std::size_t residue = unregister_resource_hooks();
         worldDisabledErrors_ = {};
-        safetyDisabled_ = false;
+        safetyDisabled_ = residue != 0;
         unionLedger_.clear();
         desiredPlan_ = {};
         unionLifecycle_.begin_world(generation);
@@ -158,13 +160,41 @@ public:
         const bool restoring =
             unionLifecycle_.phase(runtime_.generation()) == PersistentUnionPhase::restoring;
         if (!resource_hooks_required(runtime_.enabled(), runtime_.accessible()) && !restoring) {
-            if (!hooks_.empty()) {
-                unregister_resource_hooks();
+            if (!hooks_.empty() || !hookRegistry_.empty()) {
+                // 移除分支同样消费残留：清不空标记域不可用（能力快照反映），
+                // 残留由后续本函数的滞留重试与 shutdown 继续收敛。
+                if (unregister_resource_hooks() != 0) {
+                    safetyDisabled_ = true;
+                }
                 publish_snapshot();
             }
             return;
         }
         if (required_hooks_ready()) {
+            // 健康在册：注册表非空是常态，不做任何注销。本函数每 EngineTick 都会被
+            // 调用，滞留清理必须放在该判定之后，且信号必须是 hooks_ 与注册表的
+            // 不一致——放在之前或只看注册表非空，会把刚注册的健康 Hook（含部分
+            // 注册态）逐 tick 注销掉。
+            return;
+        }
+        if (hooks_.empty() && !hookRegistry_.empty()) {
+            // hooks_ 已清空而注册表仍有内容 = 移除失败滞留（unregister_resource_hooks
+            // 无条件先清 hooks_，只有移除失败才会出现该不一致；含分发器滞留）：
+            // 先清除，清不空标记域不可用且本节流窗口不注册替换 Hook。hooks_ 非空而
+            // 未就绪是健康的部分注册态——保留已注册部分，由注册循环增量补齐，
+            // 不得在此注销。safetyDisabled_ 本世界锁死（账本型停用同样语义），
+            // 残留清空后也不再自动恢复，等待 LoadMap 重置。
+            if (hookRegistry_.unregister_all() != 0) {
+                safetyDisabled_ = true;
+                publish_capabilities();
+                return;
+            }
+        }
+        if (safetyDisabled_) {
+            // 停用锁存期间只清残留、不注册新 Hook：本函数每 EngineTick 被 dllmain
+            // 无条件调用（不受 safetyDisabled_ 门控），滞留清空或 restoring 入口
+            // 若继续落入注册循环，会给本应安全停用的世界注册活跃 Hook、制造新的
+            // 清理义务；重启用等待 LoadMap 重置 safetyDisabled_。
             return;
         }
 
@@ -224,7 +254,14 @@ public:
                 STR("PalworldEditor: persistent storage restore threw during shutdown.\n"));
         }
         try {
-            unregister_resource_hooks();
+            // Residue comes from unregister_all's return value: it covers both retained
+            // bindings and a stranded script dispatcher, which empty() cannot see.
+            const std::size_t residue = unregister_resource_hooks();
+            if (residue != 0) {
+                allRestored = false;
+                log_shutdown_error_noexcept(
+                    STR("PalworldEditor: resource hook removal left registrations behind.\n"));
+            }
         } catch (...) {
             allRestored = false;
             log_shutdown_error_noexcept(
@@ -677,14 +714,16 @@ private:
         dispatch_hook(function, HookPhase::post, spec, context);
     }
 
-    auto unregister_resource_hooks() -> void {
-        hookRegistry_.unregister_all();
+    /** @return 注销失败后仍保留的绑定/分发器残留数（含脚本分发器滞留）。 */
+    auto unregister_resource_hooks() -> std::size_t {
+        const std::size_t residue = hookRegistry_.unregister_all();
         hooks_.clear();
         resolutions_ = all_hook_resolutions(false);
         capabilitiesGeneration_ = 0;
         nextHookAttempt_ = {};
         publish_capabilities();
         snapshotDirty_.mark();
+        return residue;
     }
 
     auto rebuild_resolutions() -> void {

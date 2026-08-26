@@ -27,14 +27,31 @@ auto log_hook_error(const TCHAR* message) noexcept -> void {
     }
 }
 
-auto unregister_native_hook(UFunction* function, const CallbackId callbackId) noexcept -> void {
+auto unregister_native_hook(UFunction* function, CallbackId& callbackId) noexcept -> bool {
     if (function == nullptr || callbackId < 0) {
-        return;
+        return true;  // 无可注销项视为成功。
     }
     try {
-        static_cast<void>(function->UnregisterHook(callbackId));
+        if (!function->UnregisterHook(callbackId)) {
+            return false;
+        }
     } catch (...) {
         log_hook_error(STR("PalworldEditor: native UFunction hook unregistration threw.\n"));
+        return false;
+    }
+    callbackId = Hook::ERROR_ID;  // 仅在确认注销成功后丢弃 id，失败保留供重试。
+    return true;
+}
+
+/** @brief 登记失败时回滚刚注册的原生 Hook；回滚不彻底只记日志（绑定尚未建立）。 */
+auto rollback_native_hooks(UFunction* function, CallbackId& preId, CallbackId& postId) noexcept
+    -> void {
+    const bool preOk = unregister_native_hook(function, preId);
+    const bool postOk = unregister_native_hook(function, postId);
+    if (!preOk || !postOk) {
+        log_hook_error(
+            STR("PalworldEditor: rollback after failed registration left a native hook "
+                "behind (gate deactivated)\n"));
     }
 }
 }  // namespace
@@ -125,8 +142,7 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
         }
     } catch (...) {
         gate->active.store(false, std::memory_order_release);
-        unregister_native_hook(function, preId);
-        unregister_native_hook(function, postId);
+        retain_failed_registration(function, preId, postId);
         return false;
     }
 
@@ -134,8 +150,7 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
     const bool postReady = !postCallback || postId >= 0;
     if (!preReady || !postReady) {
         gate->active.store(false, std::memory_order_release);
-        unregister_native_hook(function, preId);
-        unregister_native_hook(function, postId);
+        retain_failed_registration(function, preId, postId);
         return false;
     }
 
@@ -149,14 +164,37 @@ auto FunctionHookRegistry::register_hook(UFunction* function, Callback preCallba
                              .postId = postId});
     } catch (...) {
         gate->active.store(false, std::memory_order_release);
-        unregister_native_hook(function, preId);
-        unregister_native_hook(function, postId);
+        retain_failed_registration(function, preId, postId);
         return false;
     }
     return true;
 }
 
-auto FunctionHookRegistry::unregister_all() noexcept -> void {
+void FunctionHookRegistry::retain_failed_registration(UFunction* function, CallbackId& preId,
+                                                      CallbackId& postId) noexcept {
+    // 先尝试回滚；仍注册的回调 id 以最小绑定入册（无回调、无门——闭包的 gate 已
+    // 在各失败路径先行钝化），让 unregister_all 把它纳入残留计数与重试，而不是
+    // 只留在局部变量里丢失。
+    rollback_native_hooks(function, preId, postId);
+    if (preId < 0 && postId < 0) {
+        return;  // 回滚彻底：无滞留。
+    }
+    try {
+        bindings_.push_back({.function = function,
+                             .backend = FunctionHookBackend::nativeFunction,
+                             .gate = nullptr,
+                             .preCallback = nullptr,
+                             .postCallback = nullptr,
+                             .preId = preId,
+                             .postId = postId});
+    } catch (...) {
+        log_hook_error(STR("PalworldEditor: failed to retain rollback residue bookkeeping\n"));
+        // 账面丢失：残留回调不可再重试，但其门已钝化且 DLL 已 pin，只空转不悬垂。
+    }
+}
+
+auto FunctionHookRegistry::unregister_all() noexcept -> std::size_t {
+    // 钝化优先：无论注销成败，所有回调门先关闭，残留注册只会空转闭包的 gate 检查。
     for (const auto& binding : bindings_) {
         if (binding.gate != nullptr) {
             binding.gate->active.store(false, std::memory_order_release);
@@ -165,28 +203,60 @@ auto FunctionHookRegistry::unregister_all() noexcept -> void {
     if (scriptDispatcherGate_ != nullptr) {
         scriptDispatcherGate_->active.store(false, std::memory_order_release);
     }
-    for (auto& binding : std::views::reverse(bindings_)) {
+    const bool dispatcherWasRegistered = scriptPreCallbackId_ != Hook::ERROR_ID ||
+                                         scriptPostCallbackId_ != Hook::ERROR_ID ||
+                                         scriptDispatcherGate_ != nullptr;
+    const bool scriptOk = unregister_script_dispatcher();
+    // 逆序尝试注销原生 Hook；部分注销的绑定只保留仍注册的 id，完整失败保留整条绑定。
+    for (std::size_t index = bindings_.size(); index > 0; --index) {
+        auto& binding = bindings_[index - 1];
         if (binding.backend != FunctionHookBackend::nativeFunction || binding.function == nullptr) {
+            continue;  // 脚本后端绑定随全局分发器的注销失效。
+        }
+        static_cast<void>(unregister_native_hook(binding.function, binding.preId));
+        static_cast<void>(unregister_native_hook(binding.function, binding.postId));
+    }
+    // 压缩掉已完整注销的绑定；失败项留在登记器中供下次 unregister_all 重试。
+    std::size_t writeIndex{0};
+    for (std::size_t readIndex = 0; readIndex < bindings_.size(); ++readIndex) {
+        auto& binding = bindings_[readIndex];
+        const bool removable =
+            binding.backend != FunctionHookBackend::nativeFunction
+                ? scriptOk
+                : binding.function == nullptr || (binding.preId < 0 && binding.postId < 0);
+        if (removable) {
             continue;
         }
-        unregister_native_hook(binding.function, binding.preId);
-        unregister_native_hook(binding.function, binding.postId);
+        if (writeIndex != readIndex) {
+            bindings_[writeIndex] = std::move(binding);
+        }
+        ++writeIndex;
     }
-    unregister_script_dispatcher();
-    bindings_.clear();
-    scriptDispatcherGate_.reset();
+    bindings_.resize(writeIndex);
+    return bindings_.size() + ((dispatcherWasRegistered && !scriptOk) ? 1 : 0);
 }
 
 auto FunctionHookRegistry::empty() const noexcept -> bool {
-    return bindings_.empty();
+    // 分发器残留（注销失败滞留的回调 id / 钝化门）与绑定一样是待清理信号：
+    // 只查 bindings_ 会让 empty() 的消费者跳过对这些残留的重试。
+    return bindings_.empty() && scriptPreCallbackId_ == Hook::ERROR_ID &&
+           scriptPostCallbackId_ == Hook::ERROR_ID && scriptDispatcherGate_ == nullptr;
 }
 
 auto FunctionHookRegistry::ensure_script_dispatcher_registered() -> bool {
-    if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
+    // 上次注销失败滞留的钝化分发器必须先完成注销：残留回调 id 若被直接当作
+    // "已就绪"，新脚本绑定会全部挂在死门上不可用；若被覆盖注册则丢失旧回调的
+    // 注销句柄。滞留注销仍未完成时本次不注册，等待下次重试。
+    if (scriptDispatcherGate_ != nullptr &&
+        !scriptDispatcherGate_->active.load(std::memory_order_acquire)) {
+        if (!unregister_script_dispatcher()) {
+            return false;
+        }
+        // 注销完成后门与 id 均已复位，走下方全新注册。
+    } else if (scriptPreCallbackId_ != Hook::ERROR_ID && scriptPostCallbackId_ != Hook::ERROR_ID) {
         return true;
     }
-    if (scriptDispatcherGate_ == nullptr ||
-        !scriptDispatcherGate_->active.load(std::memory_order_acquire)) {
+    if (scriptDispatcherGate_ == nullptr) {
         try {
             scriptDispatcherGate_ = std::make_shared<CallbackGate>();
         } catch (...) {
@@ -237,32 +307,47 @@ auto FunctionHookRegistry::ensure_script_dispatcher_registered() -> bool {
     return false;
 }
 
-auto FunctionHookRegistry::unregister_script_dispatcher() noexcept -> void {
+auto FunctionHookRegistry::unregister_script_dispatcher() noexcept -> bool {
     if (scriptDispatcherGate_ != nullptr) {
         scriptDispatcherGate_->active.store(false, std::memory_order_release);
     }
+    bool allOk{true};
     if (scriptPreCallbackId_ != Hook::ERROR_ID) {
+        bool ok{false};
         try {
-            if (!Hook::UnregisterCallback(scriptPreCallbackId_)) {
+            ok = Hook::UnregisterCallback(scriptPreCallbackId_);
+            if (!ok) {
                 log_hook_error(
                     STR("PalworldEditor: failed to unregister script pre-hook callback\n"));
             }
         } catch (...) {
             log_hook_error(STR("PalworldEditor: script pre-hook unregistration threw.\n"));
         }
-        scriptPreCallbackId_ = Hook::ERROR_ID;
+        if (ok) {
+            scriptPreCallbackId_ = Hook::ERROR_ID;  // 确认成功才丢弃 id，失败保留供重试。
+        }
+        allOk = allOk && ok;
     }
     if (scriptPostCallbackId_ != Hook::ERROR_ID) {
+        bool ok{false};
         try {
-            if (!Hook::UnregisterCallback(scriptPostCallbackId_)) {
+            ok = Hook::UnregisterCallback(scriptPostCallbackId_);
+            if (!ok) {
                 log_hook_error(
                     STR("PalworldEditor: failed to unregister script post-hook callback\n"));
             }
         } catch (...) {
             log_hook_error(STR("PalworldEditor: script post-hook unregistration threw.\n"));
         }
-        scriptPostCallbackId_ = Hook::ERROR_ID;
+        if (ok) {
+            scriptPostCallbackId_ = Hook::ERROR_ID;
+        }
+        allOk = allOk && ok;
     }
+    if (allOk) {
+        scriptDispatcherGate_.reset();  // 失败时保留已钝化的门，重试路径复用。
+    }
+    return allOk;
 }
 
 auto FunctionHookRegistry::dispatch_script(const bool pre, UObject* context, FFrame& stack,
