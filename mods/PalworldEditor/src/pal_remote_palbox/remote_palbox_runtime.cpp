@@ -455,6 +455,12 @@ auto RemotePalboxRuntime::tick(const float deltaSeconds,
     if (!triggered) {
         return;
     }
+    if (pendingConfirm_.active) {
+        // 上一个零 GUID 打开请求仍在确认窗口内：合并本次触发（含 GUI 请求），避免
+        // 界面入栈前的第二次 Push 叠出多余窗口并覆盖首请求的结论。
+        note("上一次打开请求正在确认中，请稍候", true);
+        return;
+    }
     if (!session.can_access_unreal()) {
         note("世界尚未就绪", true);
         return;
@@ -770,8 +776,9 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
             note("已打开 PalBox UI", false);
         } else {
             // Push 可异步完成（界面已入栈时 widget ID 仍可能全零，develop 时期已记录）：
-            // 零 GUID 不判失败也不计结构故障，改为有界确认窗口内复查界面是否实际入栈；
-            // 超时才记失败，且不停用域。
+            // 零 GUID 不判失败也不计结构故障，改为有界确认窗口内复查界面是否实际
+            // 入栈；超时才记失败，且不停用域。openCount_ 推迟到确认成功后再计，
+            // 避免同一次尝试被同时计入成功与失败。
             const auto now = std::chrono::steady_clock::now();
             pendingConfirm_ = {.active = true,
                                .deadline = now + kPushConfirmWindow,
@@ -780,7 +787,7 @@ auto RemotePalboxRuntime::execute_trigger(const RemotePalboxConfig& config)
         }
     }
 
-    {
+    if (!pendingConfirm_.active) {
         const std::lock_guard lock(snapshotMutex_);
         ++openCount_;
     }
@@ -807,6 +814,10 @@ auto RemotePalboxRuntime::run_pending_push_confirm() -> void {
     }
     if (palbox_menu_is_open(controller)) {
         pendingConfirm_.active = false;
+        {
+            const std::lock_guard lock(snapshotMutex_);
+            ++openCount_;  // 确认成功才补记打开计数（见 execute_trigger 零 GUID 分支）。
+        }
         note("已打开 PalBox UI", false);
         return;
     }
