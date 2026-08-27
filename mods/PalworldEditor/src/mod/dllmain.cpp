@@ -1318,8 +1318,8 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
                             std::memory_order_release);
     // 钓鱼圣手的目标 UPalWorldSubsystem 随世界销毁：切图前尽力恢复原值，账本随
-    // 新世界重置（新世界实例天然使用原生值）。worldContext 仍属旧世界，恢复经
-    // GetWorld 比对作用于当前实例；解析失败时新世界原生值接管，无需恢复。
+    // 新世界重置。恢复仅接受唯一同世界实例；锚不可用时也只接受唯一有效实例。
+    // 候选歧义时拒绝写回，旧实例随世界销毁，账本不跨世界代次。
     fishingBoostLedger_.set_desired(false);
     static_cast<void>(
         fishing_boost::restore(fishingBoostLedger_, fishing_boost::resolve_world_anchor()));

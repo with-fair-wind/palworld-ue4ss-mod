@@ -2,6 +2,8 @@
  * @file fishing_boost_gateway.cpp
  * @brief 实现 UPalFishingSystem.CatchBattleParameter 的读写与可逆恢复。
  */
+#include <vector>
+
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectArray.hpp>
@@ -18,36 +20,47 @@ namespace {
 
 /**
  * @brief 解析属于当前世界的 UPalFishingSystem 实例。
- * @details FindFirstOf 不绑定世界：LoadMap 的 GC 窗口期新旧实例并存时可能选中
- *          旧世界对象（改错实例却对新世界报告 active）。按 GetWorld() 与
- *          worldContext 比对过滤候选；无匹配返回空。只在触发沿/有界重试调用，
- *          遍历频率符合性能契约。
+ * @details 有世界锚时只接受唯一的同世界实例；无锚时只接受唯一有效实例。候选
+ *          缺失或存在歧义时 fail-closed，InternalIndex 不能代替世界身份。FindAllOf
+ *          保留 UE4SS 的父类链匹配并排除 CDO/archetype；Palworld 通过
+ *          FishingSystemClass 配置 Blueprint 派生实现，不能用精确类名过滤。
+ *          只在触发沿/有界重试调用。
  */
 [[nodiscard]] auto resolve_system(UObject* worldContext) -> UObject* {
-    if (!pal_game::is_valid(worldContext)) {
-        return nullptr;
-    }
-    auto* const expectedWorld = worldContext->GetWorld();
-    if (expectedWorld == nullptr) {
-        // 世界拆除/重建期间的 detached 锚：无世界可比对。若继续以 null 匹配，
-        // 会命中同样无世界的类默认对象（CDO）——apply 会改写 CDO 并被新世界
-        // 实例继承。按 targetUnavailable 走有界重试。
-        return nullptr;
-    }
+    auto* const expectedWorld =
+        pal_game::is_valid(worldContext) ? worldContext->GetWorld() : nullptr;
     UObject* matched{};
-    UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
-        auto* const cls = obj->GetClassPrivate();
-        if (cls == nullptr || cls->GetName() != STR("PalFishingSystem")) {
-            return LoopAction::Continue;
+    std::optional<SystemCandidateRank> selectedRank;
+    std::size_t candidateCount{};
+    std::size_t matchingExpectedWorldCount{};
+    std::vector<UObject*> candidates;
+    UObjectGlobals::FindAllOf(STR("PalFishingSystem"), candidates);
+    for (auto* const obj : candidates) {
+        if (!pal_game::is_valid(obj)) {
+            continue;
         }
-        if (obj->GetWorld() != expectedWorld) {
-            // 旧世界待 GC 实例、其他世界实例，以及无世界的 CDO/模板对象
-            // （其 GetWorld 为 null，expectedWorld 非空时恒不相等）。
-            return LoopAction::Continue;
+        const auto* const item = UObjectArray::IndexToObject(obj->GetInternalIndex());
+        if (item == nullptr || item->IsPendingKill()) {
+            continue;
         }
-        matched = obj;
-        return LoopAction::Break;
-    });
+        auto* const candidateWorld = obj->GetWorld();
+        const SystemCandidateRank rank{
+            .matchesExpectedWorld = expectedWorld != nullptr && candidateWorld == expectedWorld,
+            .internalIndex = obj->GetInternalIndex(),
+        };
+        ++candidateCount;
+        if (rank.matchesExpectedWorld) {
+            ++matchingExpectedWorldCount;
+        }
+        if (should_select_system_candidate(rank, selectedRank)) {
+            selectedRank = rank;
+            matched = obj;
+        }
+    }
+    if (!is_system_candidate_selection_unambiguous(expectedWorld != nullptr, candidateCount,
+                                                   matchingExpectedWorldCount)) {
+        return nullptr;
+    }
     return pal_game::is_valid(matched) ? matched : nullptr;
 }
 
@@ -86,20 +99,25 @@ struct FieldAccess {
  *  @details 裸 FindFirstOf(inventory) 在 LoadMap 的 GC 窗口期可能返回旧世界实例；
  *           GetLocalPalPlayerController 把传入对象原样作为 WorldContextObject（在
  *           给定世界上解析，不是全局找当前玩家），因此必须先过滤旧实例——旧世界
- *           对象被标记 RF_PendingKill 后即被排除；取遍历序最后一个候选（新世界
- *           对象后注册）。只在触发沿/有界重试调用，符合性能契约。 */
+ *           对象被标记 RF_PendingKill 后即被排除；按内部注册序号显式选择最新候选，
+ *           不依赖 ForEachUObject 的遍历方向。只在触发沿/有界重试调用。 */
 [[nodiscard]] auto resolve_world_anchor() -> UObject* {
     UObject* candidate{};
+    std::optional<SystemCandidateRank> selectedRank;
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
         auto* const cls = obj->GetClassPrivate();
         if (cls == nullptr || cls->GetName() != STR("PalPlayerInventoryData")) {
             return LoopAction::Continue;
         }
-        if (const auto* const item = UObjectArray::IndexToObject(obj->GetInternalIndex());
-            item != nullptr && item->IsPendingKill()) {
+        const auto* const item = UObjectArray::IndexToObject(obj->GetInternalIndex());
+        if (item == nullptr || item->IsPendingKill()) {
             return LoopAction::Continue;  // 旧世界待回收实例。
         }
-        candidate = obj;
+        const SystemCandidateRank rank{.internalIndex = obj->GetInternalIndex()};
+        if (should_select_system_candidate(rank, selectedRank)) {
+            selectedRank = rank;
+            candidate = obj;
+        }
         return LoopAction::Continue;
     });
     return candidate == nullptr ? nullptr : pal_game::local_player_controller(candidate);
@@ -173,11 +191,11 @@ auto restore(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
     // 锚无效 ≠ 目标不存在：无法解析（unknown）与确认不存在（confirmed absent）
     // 必须区分——锚处于 GC 边缘或尚未重建时，被覆盖的子系统可能完好存在，此刻
     // 清账即放弃真实存在的恢复责任。保留账本按瞬态重试，拿到确认才解除责任。
-    if (!pal_game::is_valid(worldContext) || worldContext->GetWorld() == nullptr) {
-        return GatewayStatus::targetUnavailable;
-    }
     auto* const system = resolve_system(worldContext);
     if (system == nullptr) {
+        if (!pal_game::is_valid(worldContext) || worldContext->GetWorld() == nullptr) {
+            return GatewayStatus::targetUnavailable;
+        }
         // 锚有效而当前世界无匹配实例 = 确认不存在：覆盖值随旧世界对象销毁，
         // 新世界天然使用原生值，恢复责任可解除。
         ledger.clear_records();

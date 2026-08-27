@@ -4,6 +4,7 @@
  */
 #include <array>
 #include <iostream>
+#include <optional>
 
 #include <fishing_boost/fishing_boost_service.hpp>
 
@@ -119,6 +120,42 @@ void test_safety_disable_overrides_active_phase() {
     CHECK(ledger.phase() == fishing_boost::Phase::safetyDisabled);  // 停用优先于 active。
 }
 
+void test_system_candidate_rank_prefers_newer_equal_priority_candidate() {
+    std::optional<fishing_boost::SystemCandidateRank> selected;
+    const std::array candidates{
+        fishing_boost::SystemCandidateRank{.internalIndex = 52},
+        fishing_boost::SystemCandidateRank{.internalIndex = 41},
+    };
+
+    for (const auto candidate : candidates) {
+        if (fishing_boost::should_select_system_candidate(candidate, selected)) {
+            selected = candidate;
+        }
+    }
+
+    CHECK(selected.has_value());
+    CHECK(selected->internalIndex == 52);
+}
+
+void test_matching_world_candidate_outranks_newer_fallback() {
+    const fishing_boost::SystemCandidateRank fallback{.internalIndex = 52};
+    const fishing_boost::SystemCandidateRank matching{.matchesExpectedWorld = true,
+                                                      .internalIndex = 41};
+    CHECK(fishing_boost::should_select_system_candidate(matching, fallback));
+    CHECK(!fishing_boost::should_select_system_candidate(fallback, matching));
+}
+
+void test_system_candidate_selection_rejects_ambiguous_fallback() {
+    CHECK(fishing_boost::is_system_candidate_selection_unambiguous(false, 1, 0));
+    CHECK(!fishing_boost::is_system_candidate_selection_unambiguous(false, 2, 0));
+}
+
+void test_system_candidate_selection_requires_unique_world_match() {
+    CHECK(fishing_boost::is_system_candidate_selection_unambiguous(true, 3, 1));
+    CHECK(!fishing_boost::is_system_candidate_selection_unambiguous(true, 3, 0));
+    CHECK(!fishing_boost::is_system_candidate_selection_unambiguous(true, 3, 2));
+}
+
 int main() {
     test_ledger_baseline_desired_and_phase();
     test_record_and_clear_reset_retirement();
@@ -128,6 +165,10 @@ int main() {
     test_active_phase_requires_records();
     test_originals_roundtrip();
     test_safety_disable_overrides_active_phase();
+    test_system_candidate_rank_prefers_newer_equal_priority_candidate();
+    test_matching_world_candidate_outranks_newer_fallback();
+    test_system_candidate_selection_rejects_ambiguous_fallback();
+    test_system_candidate_selection_requires_unique_world_match();
     if (failures > 0) {
         std::cerr << failures << " failure(s)\n";
         return 1;

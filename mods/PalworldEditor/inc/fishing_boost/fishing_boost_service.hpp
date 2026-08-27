@@ -6,6 +6,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string_view>
@@ -29,6 +30,48 @@ inline constexpr std::array<FieldSpec, kFieldCount> kFieldCatalog{{
     {"RequiredCatchAmount", 1.0F, "捕获所需量→1(一次即满)"},
     {"DefaultProgressAmount", 999.0F, "每次输入进度→999"},
 }};
+
+/** @brief 世界子系统候选的纯值优先级。 */
+struct SystemCandidateRank {
+    bool matchesExpectedWorld{};  /**< 是否属于调用方提供的当前世界。 */
+    std::int32_t internalIndex{}; /**< UObject 注册序号；较新的实例通常更大。 */
+};
+
+/**
+ * @brief 判断候选是否应替换当前选择。
+ * @param[in] candidate 已通过 UE4SS 类继承匹配、CDO 排除与 pending-kill 预检的候选。
+ * @param[in] selected 当前选择；为空表示尚未找到候选。
+ * @retval true 候选精确匹配预期世界，或在同等级中注册得更晚。
+ * @retval false 当前选择优先级更高或相同。
+ * @note 此函数只确定遍历中的暂定候选；调用方仍须用
+ *       is_system_candidate_selection_unambiguous() 拒绝缺失或歧义的候选集合。
+ */
+[[nodiscard]] constexpr auto should_select_system_candidate(
+    const SystemCandidateRank candidate, const std::optional<SystemCandidateRank> selected) noexcept
+    -> bool {
+    if (!selected.has_value()) {
+        return true;
+    }
+    if (candidate.matchesExpectedWorld != selected->matchesExpectedWorld) {
+        return candidate.matchesExpectedWorld;
+    }
+    return candidate.internalIndex > selected->internalIndex;
+}
+
+/**
+ * @brief 判断运行时候选集合是否足以唯一确认目标子系统。
+ * @param[in] hasExpectedWorld 调用方是否提供了有效的预期世界。
+ * @param[in] candidateCount 通过对象生命周期预检的候选总数。
+ * @param[in] matchingExpectedWorldCount 属于预期世界的候选数。
+ * @retval true 有预期世界时恰有一个精确匹配；无预期世界时恰有一个有效候选。
+ * @retval false 候选缺失或存在歧义，调用方必须 fail-closed 并保留恢复责任。
+ * @note UObject InternalIndex 只用于让遍历结果确定化，不可作为世界身份依据。
+ */
+[[nodiscard]] constexpr auto is_system_candidate_selection_unambiguous(
+    const bool hasExpectedWorld, const std::size_t candidateCount,
+    const std::size_t matchingExpectedWorldCount) noexcept -> bool {
+    return hasExpectedWorld ? matchingExpectedWorldCount == 1 : candidateCount == 1;
+}
 
 /** @brief 运行阶段。 */
 enum class Phase : std::uint8_t {

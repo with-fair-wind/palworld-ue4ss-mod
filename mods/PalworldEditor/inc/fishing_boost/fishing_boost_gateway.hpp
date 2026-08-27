@@ -23,21 +23,22 @@ enum class GatewayStatus : std::uint8_t {
 };
 
 /**
- * @brief 解析当前世界的锚并派生本地玩家控制器。
+ * @brief 解析当前世界的可选消歧锚并派生本地玩家控制器。
  * @details 过滤 LoadMap GC 窗口期的旧世界 inventory（RF_PendingKill）；裸
  *          FindFirstOf + GetLocalPalPlayerController 会在旧世界上解析出旧控制器。
- * @return 当前世界的本地玩家控制器；无可用候选（含重试窗口期）时为空。
+ * @return 当前世界的本地玩家控制器；无可用候选时为空，子系统解析仅可接受唯一候选。
  */
 [[nodiscard]] auto resolve_world_anchor() -> RC::Unreal::UObject*;
 
 /**
  * @brief 在当前世界的 UPalFishingSystem 上写入覆盖值并记录原值。
- * @param[in] worldContext 带世界归属的锚对象（本地玩家控制器）；目标实例按
- *            GetWorld() 与之比对选择，排除 LoadMap GC 窗口期的旧世界实例。
+ * @param[in] worldContext 可选的世界归属锚（本地玩家控制器）；有值时只接受唯一的
+ *            同世界实例，无值时只接受唯一有效实例。候选发现包含 Blueprint 派生类并
+ *            排除 CDO/archetype；缺失或歧义时 fail-closed。
  */
 [[nodiscard]] auto apply(Ledger& ledger, RC::Unreal::UObject* worldContext) -> GatewayStatus;
 
-/** @brief 按账本恢复仍负责任字段的原值；条件跳过的字段永久退役，锚无效时保留账本瞬态重试。 */
+/** @brief 按账本恢复仍负责任字段的原值；条件跳过的字段永久退役。 */
 [[nodiscard]] auto restore(Ledger& ledger, RC::Unreal::UObject* worldContext) -> GatewayStatus;
 
 }  // namespace fishing_boost
