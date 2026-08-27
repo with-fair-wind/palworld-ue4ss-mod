@@ -1091,9 +1091,9 @@ auto PalworldEditorMod::process_revive_timer_work(const bool worldContextReady) 
 }
 
 auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady) -> void {
-    // 目标子系统不可用时的有界重试：开关变化立即尝试一次，此后每 2 秒一次、
-    // 连续 15 次仍不可用则进入 waiting 停止尝试（等待用户重新切换开关）——
-    // 不得对 UObject 注册表做每帧 FindFirstOf 轮询。
+    // 有界重试调度（apply 与 restore 共用）：开关变化立即尝试一次，此后每 2 秒
+    // 一次、连续 15 次未完成则进入 waiting 停止尝试（等待用户重新切换开关或
+    // LoadMap/卸载兜底）——不得对 UObject 注册表做每帧查找轮询。
     constexpr auto kRetryInterval = std::chrono::seconds{2};
     constexpr std::uint32_t kMaximumUnavailableAttempts = 15;
 
@@ -1105,38 +1105,43 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
         fishingSystemUnavailableCount_ = 0;
         nextFishingSystemAttempt_ = std::chrono::steady_clock::now();
     }
-    if (fishingBoostLedger_.safety_disabled()) {
-        fishingBoostPhase_.store(fishing_boost::Phase::safetyDisabled, std::memory_order_release);
+    // 停用阻止新应用，但不拦停用域自身的遗留记录：回滚验证失败时保留的原值
+    // 快照要经正常 tick 的条件恢复收敛，而不是搁置到切图/卸载才处理。
+    const bool safetyDisabled = fishingBoostLedger_.safety_disabled();
+    const bool wantsOn =
+        !safetyDisabled && fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
+    const bool wantsRecovery =
+        fishingBoostLedger_.has_records() && (!fishingBoostLedger_.desired() || safetyDisabled);
+    if (!(wantsOn || wantsRecovery)) {
         return;
     }
-    const bool wantsOn = fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
-    const bool wantsOff = !fishingBoostLedger_.desired() && fishingBoostLedger_.has_records();
-    if (wantsOn && std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
+    if (std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
         return;  // 节流检查最先：窗口内常量时间返回，不做任何对象查找。
     }
-    if (wantsOn || wantsOff) {
-        // 世界锚经引擎解析的本地玩家控制器派生（GetLocalPalPlayerController 在引擎侧
-        // 处理多世界；裸 FindFirstOf(inventory) 在 GC 窗口期可能选中旧世界对象）。
-        auto* const worldContext = pal_game::local_player_controller(
-            UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName));
-        if (wantsOn) {
-            if (fishing_boost::apply(fishingBoostLedger_, worldContext) ==
-                fishing_boost::GatewayStatus::targetUnavailable) {
-                ++fishingSystemUnavailableCount_;
-                if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
-                    nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
-                    fishingBoostPhase_.store(fishing_boost::Phase::waiting,
-                                             std::memory_order_release);
-                } else {
-                    nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
-                }
-                return;
-            }
-            fishingSystemUnavailableCount_ = 0;  // 成功或结构失败：重试链终止，计数复位。
-        } else {
-            static_cast<void>(fishing_boost::restore(fishingBoostLedger_, worldContext));
+    // 世界锚经引擎解析的本地玩家控制器派生（GetLocalPalPlayerController 在引擎侧
+    // 处理多世界；裸 FindFirstOf(inventory) 在 GC 窗口期可能选中旧世界对象）。
+    auto* const worldAnchor = pal_game::local_player_controller(
+        UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName));
+    const auto status = wantsOn ? fishing_boost::apply(fishingBoostLedger_, worldAnchor)
+                                : fishing_boost::restore(fishingBoostLedger_, worldAnchor);
+    // apply 的 targetUnavailable 与 restore 的任何未完成结果（锚不可用/结构失败/
+    // 回滚失败，账本均保留）统一推进有界调度；其余结果已落定（记录已立或责任
+    // 已解除），计数复位。
+    const bool attemptIncomplete = status == fishing_boost::GatewayStatus::targetUnavailable ||
+                                   (!wantsOn && status != fishing_boost::GatewayStatus::succeeded);
+    if (attemptIncomplete) {
+        ++fishingSystemUnavailableCount_;
+        if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
+            nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
+            // 遗留记录保留给 LoadMap/卸载兜底；waiting 提示用户重新切换开关重启链。
+            fishingBoostPhase_.store(fishing_boost::Phase::waiting, std::memory_order_release);
+            return;
         }
+        nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
+        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+        return;
     }
+    fishingSystemUnavailableCount_ = 0;
     fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
 }
 
