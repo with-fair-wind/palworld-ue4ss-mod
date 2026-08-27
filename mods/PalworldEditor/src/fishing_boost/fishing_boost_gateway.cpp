@@ -27,6 +27,12 @@ namespace {
         return nullptr;
     }
     auto* const expectedWorld = worldContext->GetWorld();
+    if (expectedWorld == nullptr) {
+        // 世界拆除/重建期间的 detached 锚：无世界可比对。若继续以 null 匹配，
+        // 会命中同样无世界的类默认对象（CDO）——apply 会改写 CDO 并被新世界
+        // 实例继承。按 targetUnavailable 走有界重试。
+        return nullptr;
+    }
     UObject* matched{};
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
         auto* const cls = obj->GetClassPrivate();
@@ -34,7 +40,9 @@ namespace {
             return LoopAction::Continue;
         }
         if (obj->GetWorld() != expectedWorld) {
-            return LoopAction::Continue;  // 旧世界待 GC 实例或其他世界的实例。
+            // 旧世界待 GC 实例、其他世界实例，以及无世界的 CDO/模板对象
+            // （其 GetWorld 为 null，expectedWorld 非空时恒不相等）。
+            return LoopAction::Continue;
         }
         matched = obj;
         return LoopAction::Break;

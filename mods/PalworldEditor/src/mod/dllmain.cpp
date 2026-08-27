@@ -1140,7 +1140,12 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
         if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
             nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
             // 遗留记录保留给 LoadMap/卸载兜底；waiting 提示用户重新切换开关重启链。
-            fishingBoostPhase_.store(fishing_boost::Phase::waiting, std::memory_order_release);
+            // 已停用（结构漂移/恢复失败）的域不得被 waiting 覆盖——停用是 fail-closed
+            // 终态，开关不可再编辑，不得呈现为可重试的可用性问题。
+            fishingBoostPhase_.store(fishingBoostLedger_.safety_disabled()
+                                         ? fishing_boost::Phase::safetyDisabled
+                                         : fishing_boost::Phase::waiting,
+                                     std::memory_order_release);
             return;
         }
         nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
