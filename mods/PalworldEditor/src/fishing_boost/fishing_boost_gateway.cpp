@@ -15,10 +15,31 @@ using namespace RC::Unreal;
 
 namespace {
 
-/** @brief 解析 UPalFishingSystem 世界子系统。 */
-[[nodiscard]] auto resolve_system() -> UObject* {
-    auto* const system = UObjectGlobals::FindFirstOf(STR("PalFishingSystem"));
-    return pal_game::is_valid(system) ? system : nullptr;
+/**
+ * @brief 解析属于当前世界的 UPalFishingSystem 实例。
+ * @details FindFirstOf 不绑定世界：LoadMap 的 GC 窗口期新旧实例并存时可能选中
+ *          旧世界对象（改错实例却对新世界报告 active）。按 GetWorld() 与
+ *          worldContext 比对过滤候选；无匹配返回空。只在触发沿/有界重试调用，
+ *          遍历频率符合性能契约。
+ */
+[[nodiscard]] auto resolve_system(UObject* worldContext) -> UObject* {
+    if (!pal_game::is_valid(worldContext)) {
+        return nullptr;
+    }
+    auto* const expectedWorld = worldContext->GetWorld();
+    UObject* matched{};
+    UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
+        auto* const cls = obj->GetClassPrivate();
+        if (cls == nullptr || cls->GetName() != STR("PalFishingSystem")) {
+            return LoopAction::Continue;
+        }
+        if (obj->GetWorld() != expectedWorld) {
+            return LoopAction::Continue;  // 旧世界待 GC 实例或其他世界的实例。
+        }
+        matched = obj;
+        return LoopAction::Break;
+    });
+    return pal_game::is_valid(matched) ? matched : nullptr;
 }
 
 /**
@@ -48,8 +69,8 @@ struct FieldAccess {
 
 }  // namespace
 
-auto apply(Ledger& ledger) -> GatewayStatus {
-    auto* const system = resolve_system();
+auto apply(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
+    auto* const system = resolve_system(worldContext);
     if (system == nullptr) {
         return GatewayStatus::targetUnavailable;
     }
@@ -106,12 +127,12 @@ auto apply(Ledger& ledger) -> GatewayStatus {
     return GatewayStatus::succeeded;
 }
 
-auto restore(Ledger& ledger) -> GatewayStatus {
+auto restore(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
     const auto originals = ledger.originals();
     if (!originals.has_value()) {
         return GatewayStatus::succeeded;
     }
-    auto* const system = resolve_system();
+    auto* const system = resolve_system(worldContext);
     if (system == nullptr) {
         // 对象已随世界销毁；新世界用原生值。
         ledger.clear_records();
@@ -119,6 +140,9 @@ auto restore(Ledger& ledger) -> GatewayStatus {
     }
 
     for (std::size_t i{}; i < kFieldCount; ++i) {
+        if (ledger.is_field_retired(i)) {
+            continue;  // 此前恢复时已确认责任消失的字段：重试永久跳过。
+        }
         const auto access = find_field(system, kFieldCatalog[i].fieldName);
         if (access.property == nullptr) {
             ledger.disable_for_world();
@@ -126,9 +150,11 @@ auto restore(Ledger& ledger) -> GatewayStatus {
         }
         // 条件恢复：仅当当前值仍等于本功能写入的覆盖值才写回原值。激活期间被
         // 游戏或其他 mod 改过的字段（当前值 != 覆盖值）视为本功能的恢复责任
-        // 已消失，不得用陈旧快照覆盖更新后的值。
+        // 已消失——立即退役，不得用陈旧快照覆盖更新后的值，也不得在后续
+        // 重试中因值偶然回到覆盖值而重新捡起责任。
         const float current = access.property->GetPropertyValueInContainer(access.container);
         if (current != kFieldCatalog[i].overrideValue) {
+            ledger.retire_field(i);
             continue;
         }
         access.property->SetPropertyValueInContainer(access.container, (*originals)[i]);

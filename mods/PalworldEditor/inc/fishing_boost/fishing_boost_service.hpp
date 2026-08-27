@@ -55,12 +55,24 @@ public:
     auto record_originals(const std::array<float, kFieldCount>& values) -> void {
         originals_ = values;
         hasRecords_ = true;
+        retiredFields_ = {};
     }
     [[nodiscard]] auto originals() const -> std::optional<std::array<float, kFieldCount>> {
         return hasRecords_ ? std::optional{originals_} : std::nullopt;
     }
+    /** @brief 退役字段：恢复时发现值已被外部改走（不再等于覆盖值）时调用，
+     *         该字段的恢复责任视为已消失，后续重试永久跳过。 */
+    auto retire_field(const std::size_t index) -> void {
+        if (index < kFieldCount) {
+            retiredFields_[index] = true;
+        }
+    }
+    [[nodiscard]] auto is_field_retired(const std::size_t index) const -> bool {
+        return index < kFieldCount && retiredFields_[index];
+    }
     auto clear_records() -> void {
         hasRecords_ = false;
+        retiredFields_ = {};
     }
     [[nodiscard]] auto has_records() const -> bool {
         return hasRecords_;
@@ -86,6 +98,7 @@ public:
 private:
     bool desired_{};
     std::array<float, kFieldCount> originals_{};
+    std::array<bool, kFieldCount> retiredFields_{};
     bool hasRecords_{};
     bool safetyDisabled_{};
 };

@@ -448,7 +448,8 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
             fishingBoostLedger_.set_desired(false);
             // 目标不可解析（世界已退出、对象已销毁）等于无需恢复：新世界实例使用
             // 原生值；其余失败按瞬态清理重试。
-            const auto status = fishing_boost::restore(fishingBoostLedger_);
+            const auto status = fishing_boost::restore(
+                fishingBoostLedger_, UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName));
             return status == fishing_boost::GatewayStatus::succeeded ||
                            status == fishing_boost::GatewayStatus::targetUnavailable
                        ? CleanupOutcome::succeeded
@@ -1108,24 +1109,29 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
     }
     const bool wantsOn = fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
     const bool wantsOff = !fishingBoostLedger_.desired() && fishingBoostLedger_.has_records();
-    if (wantsOn) {
-        if (std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
-            return;  // 节流窗口内：常量时间返回，不做任何对象查找。
-        }
-        if (fishing_boost::apply(fishingBoostLedger_) ==
-            fishing_boost::GatewayStatus::targetUnavailable) {
-            ++fishingSystemUnavailableCount_;
-            if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
-                nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
-                fishingBoostPhase_.store(fishing_boost::Phase::waiting, std::memory_order_release);
-            } else {
-                nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
+    if (wantsOn && std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
+        return;  // 节流检查最先：窗口内常量时间返回，不做任何对象查找。
+    }
+    if (wantsOn || wantsOff) {
+        // 世界上下文只在真正要执行事务的帧解析（与远程终端同款的 inventory 派生）。
+        auto* const worldContext = UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName);
+        if (wantsOn) {
+            if (fishing_boost::apply(fishingBoostLedger_, worldContext) ==
+                fishing_boost::GatewayStatus::targetUnavailable) {
+                ++fishingSystemUnavailableCount_;
+                if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
+                    nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
+                    fishingBoostPhase_.store(fishing_boost::Phase::waiting,
+                                             std::memory_order_release);
+                } else {
+                    nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
+                }
+                return;
             }
-            return;
+            fishingSystemUnavailableCount_ = 0;  // 成功或结构失败：重试链终止，计数复位。
+        } else {
+            static_cast<void>(fishing_boost::restore(fishingBoostLedger_, worldContext));
         }
-        fishingSystemUnavailableCount_ = 0;  // 成功或结构失败：重试链终止，计数复位。
-    } else if (wantsOff) {
-        static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
     }
     fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
 }
@@ -1294,9 +1300,11 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
                             std::memory_order_release);
     // 钓鱼圣手的目标 UPalWorldSubsystem 随世界销毁：切图前尽力恢复原值，账本随
-    // 新世界重置（新世界实例天然使用原生值）。
+    // 新世界重置（新世界实例天然使用原生值）。worldContext 仍属旧世界，恢复经
+    // GetWorld 比对作用于当前实例；解析失败时新世界原生值接管，无需恢复。
     fishingBoostLedger_.set_desired(false);
-    static_cast<void>(fishing_boost::restore(fishingBoostLedger_));
+    static_cast<void>(fishing_boost::restore(
+        fishingBoostLedger_, UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName)));
     requestedFishingBoost_.store(false, std::memory_order_release);
     fishingBoostDirty_.store(false, std::memory_order_release);
     fishingBoostLedger_.begin_world();
