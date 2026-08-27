@@ -464,6 +464,10 @@ private:
     std::chrono::steady_clock::time_point nextFishingSystemAttempt_{};
     /** @brief 目标子系统连续不可用次数；达到上限进入 waiting，开关变化时清零。 */
     std::uint32_t fishingSystemUnavailableCount_{};
+    /** @brief 存在待恢复的遗留记录（restore 未完成时置位、责任解除时清除）；
+     *         区分正常 active（records=当前生效账本）与 waiting 重授权（records=遗留
+     *         责任）——重新授权必须先对账遗留记录再视为已启用。 */
+    bool fishingRestorePending_{false};
 
     /** @brief 游戏线程拥有的远程终端运行时；GUI 只读取其值快照。 */
     pal_remote_palbox::RemotePalboxRuntime remotePalboxRuntime_;

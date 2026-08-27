@@ -1107,11 +1107,14 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
     }
     // 停用阻止新应用，但不拦停用域自身的遗留记录：回滚验证失败时保留的原值
     // 快照要经正常 tick 的条件恢复收敛，而不是搁置到切图/卸载才处理。
+    // fishingRestorePending_ 区分"records=当前生效账本"（active）与"records=遗留
+    // 责任"（waiting 超限后重新授权）——重新授权必须先对账遗留记录再视为已启用。
     const bool safetyDisabled = fishingBoostLedger_.safety_disabled();
     const bool wantsOn =
         !safetyDisabled && fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
     const bool wantsRecovery =
-        fishingBoostLedger_.has_records() && (!fishingBoostLedger_.desired() || safetyDisabled);
+        fishingBoostLedger_.has_records() &&
+        (!fishingBoostLedger_.desired() || safetyDisabled || fishingRestorePending_);
     if (!(wantsOn || wantsRecovery)) {
         return;
     }
@@ -1130,6 +1133,9 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
     const bool attemptIncomplete = status == fishing_boost::GatewayStatus::targetUnavailable ||
                                    (!wantsOn && status != fishing_boost::GatewayStatus::succeeded);
     if (attemptIncomplete) {
+        if (!wantsOn) {
+            fishingRestorePending_ = true;  // 遗留责任未解除：重授权时先对账。
+        }
         ++fishingSystemUnavailableCount_;
         if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
             nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
@@ -1142,6 +1148,7 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
         return;
     }
     fishingSystemUnavailableCount_ = 0;
+    fishingRestorePending_ = false;  // 责任解除（restore 完成）或本轮无恢复责任。
     fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
 }
 
