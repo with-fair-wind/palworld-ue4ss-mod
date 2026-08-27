@@ -112,7 +112,9 @@ auto apply(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
             ledger.record_originals(originals);
         }
         ledger.disable_for_world();
-        return status;
+        // 未验证的回滚不得伪装成已验证结果：结果分类保持"已验证回滚"与
+        // "回滚失败"可区分（AGENTS.md 事务结果分类契约）。
+        return rollbackVerified ? status : GatewayStatus::rollbackFailed;
     };
 
     for (std::size_t i{}; i < kFieldCount; ++i) {
@@ -132,9 +134,16 @@ auto restore(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
     if (!originals.has_value()) {
         return GatewayStatus::succeeded;
     }
+    // 锚无效 ≠ 目标不存在：无法解析（unknown）与确认不存在（confirmed absent）
+    // 必须区分——锚处于 GC 边缘或尚未重建时，被覆盖的子系统可能完好存在，此刻
+    // 清账即放弃真实存在的恢复责任。保留账本按瞬态重试，拿到确认才解除责任。
+    if (!pal_game::is_valid(worldContext) || worldContext->GetWorld() == nullptr) {
+        return GatewayStatus::targetUnavailable;
+    }
     auto* const system = resolve_system(worldContext);
     if (system == nullptr) {
-        // 对象已随世界销毁；新世界用原生值。
+        // 锚有效而当前世界无匹配实例 = 确认不存在：覆盖值随旧世界对象销毁，
+        // 新世界天然使用原生值，恢复责任可解除。
         ledger.clear_records();
         return GatewayStatus::succeeded;
     }
