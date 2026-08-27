@@ -175,6 +175,9 @@ auto restore(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
             ledger.disable_for_world();
             return GatewayStatus::rollbackFailed;
         }
+        // 责任已履行：立即退役，后续字段失败保留账本时该字段不随快照滞留——
+        // 否则重试窗口内值若被外部改回覆盖值，会被误判为残留而用陈旧快照覆盖。
+        ledger.retire_field(i);
     }
     ledger.clear_records();
     return GatewayStatus::succeeded;
