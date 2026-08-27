@@ -54,7 +54,11 @@ struct FieldAccess {
 [[nodiscard]] auto find_field(UObject* system, const char* fieldName) -> FieldAccess {
     auto* const structProp =
         CastField<FStructProperty>(system->GetPropertyByNameInChain(STR("CatchBattleParameter")));
-    if (structProp == nullptr || structProp->GetStruct().Get() == nullptr) {
+    // 外层结构必须精确匹配身份与大小（19×float；Dump/CXXHeaderDump/Pal.hpp 的
+    // FPalFishingCatchBattleParameter）：同名异构的结构（PalSchema 替换等）不接受，
+    // 布局漂移 fail-closed 而不是写入语义未知的字段。
+    if (!pal_game::matches_struct_identity(structProp, STR("PalFishingCatchBattleParameter"),
+                                           0x4C)) {
         return {};
     }
     auto* const structType = structProp->GetStruct().Get();

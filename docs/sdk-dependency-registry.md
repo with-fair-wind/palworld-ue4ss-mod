@@ -268,6 +268,7 @@ FindFirstOf / FindAllOf 短类名：`PalPlayerInventoryData`、`PalOtomoHolderCo
 | `FVector` / `FVector_NetQuantize` | 类型名 `Vector` / `Vector_NetQuantize`、均为 0x18 字节 | 传送输入只接受 `Vector`；追踪命中点允许这两个已确认变体 |
 | `FHitResult` | 类型名 `HitResult`、0xE8 字节 | `LineTraceSingle.OutHit` 与 `K2_SetActorLocation.SweepHitResult` 均精确校验 |
 | `FLinearColor` | 类型名 `LinearColor`、0x10 字节 | `LineTraceSingle.TraceColor` / `TraceHitColor` 精确校验 |
+| `FPalFishingCatchBattleParameter` | 类型名 `PalFishingCatchBattleParameter`、0x4C 字节（19×float，Dump/CXXHeaderDump/Pal.hpp:3175） | 钓鱼圣手四个覆盖字段的宿主结构；精确校验身份与大小，同名异构结构（PalSchema 替换等）fail-closed |
 
 > **注**：未列为 ABI 敏感项的领域结构通常只按字段名、子字段名和具体 `FProperty` 子类校验；上表所列
 > 结构以及 `FGuid`、`FTransform` 等直接复制或解释的结构必须同时匹配运行时类型名与大小。
