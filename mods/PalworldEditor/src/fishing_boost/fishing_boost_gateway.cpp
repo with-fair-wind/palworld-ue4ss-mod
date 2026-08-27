@@ -4,6 +4,7 @@
  */
 #include <Unreal/CoreUObject/UObject/UnrealType.hpp>
 #include <Unreal/UObject.hpp>
+#include <Unreal/UObjectArray.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 #include <common/game_reflection.hpp>
 #include <common/text_encoding.hpp>
@@ -80,6 +81,29 @@ struct FieldAccess {
 }
 
 }  // namespace
+
+/** @brief 解析当前世界的锚（非 pending-kill 的 inventory）并派生本地玩家控制器。
+ *  @details 裸 FindFirstOf(inventory) 在 LoadMap 的 GC 窗口期可能返回旧世界实例；
+ *           GetLocalPalPlayerController 把传入对象原样作为 WorldContextObject（在
+ *           给定世界上解析，不是全局找当前玩家），因此必须先过滤旧实例——旧世界
+ *           对象被标记 RF_PendingKill 后即被排除；取遍历序最后一个候选（新世界
+ *           对象后注册）。只在触发沿/有界重试调用，符合性能契约。 */
+[[nodiscard]] auto resolve_world_anchor() -> UObject* {
+    UObject* candidate{};
+    UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
+        auto* const cls = obj->GetClassPrivate();
+        if (cls == nullptr || cls->GetName() != STR("PalPlayerInventoryData")) {
+            return LoopAction::Continue;
+        }
+        if (const auto* const item = UObjectArray::IndexToObject(obj->GetInternalIndex());
+            item != nullptr && item->IsPendingKill()) {
+            return LoopAction::Continue;  // 旧世界待回收实例。
+        }
+        candidate = obj;
+        return LoopAction::Continue;
+    });
+    return candidate == nullptr ? nullptr : pal_game::local_player_controller(candidate);
+}
 
 auto apply(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
     auto* const system = resolve_system(worldContext);

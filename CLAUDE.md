@@ -58,7 +58,7 @@ cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
 提交前至少运行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorFishingBoostTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```

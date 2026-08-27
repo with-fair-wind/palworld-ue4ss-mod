@@ -450,9 +450,8 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
             // 原生值；其余失败按瞬态清理重试。
             // restore 的 targetUnavailable 是"锚无法解析"（unknown，账本保留）：
             // 按瞬态重试；确认目标不存在时 restore 返回 succeeded（责任已解除）。
-            const auto status = fishing_boost::restore(
-                fishingBoostLedger_, pal_game::local_player_controller(UObjectGlobals::FindFirstOf(
-                                         pal_game::kInventoryClassName)));
+            const auto status =
+                fishing_boost::restore(fishingBoostLedger_, fishing_boost::resolve_world_anchor());
             return status == fishing_boost::GatewayStatus::succeeded
                        ? CleanupOutcome::succeeded
                        : CleanupOutcome::transientFailure;
@@ -1121,10 +1120,8 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
     if (std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
         return;  // 节流检查最先：窗口内常量时间返回，不做任何对象查找。
     }
-    // 世界锚经引擎解析的本地玩家控制器派生（GetLocalPalPlayerController 在引擎侧
-    // 处理多世界；裸 FindFirstOf(inventory) 在 GC 窗口期可能选中旧世界对象）。
-    auto* const worldAnchor = pal_game::local_player_controller(
-        UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName));
+    // 世界锚过滤 GC 窗口期的旧世界 inventory 后派生（见 resolve_world_anchor）。
+    auto* const worldAnchor = fishing_boost::resolve_world_anchor();
     const auto status = wantsOn ? fishing_boost::apply(fishingBoostLedger_, worldAnchor)
                                 : fishing_boost::restore(fishingBoostLedger_, worldAnchor);
     // apply 的 targetUnavailable 与 restore 的任何未完成结果（锚不可用/结构失败/
@@ -1324,9 +1321,8 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     // 新世界重置（新世界实例天然使用原生值）。worldContext 仍属旧世界，恢复经
     // GetWorld 比对作用于当前实例；解析失败时新世界原生值接管，无需恢复。
     fishingBoostLedger_.set_desired(false);
-    static_cast<void>(fishing_boost::restore(
-        fishingBoostLedger_, pal_game::local_player_controller(
-                                 UObjectGlobals::FindFirstOf(pal_game::kInventoryClassName))));
+    static_cast<void>(
+        fishing_boost::restore(fishingBoostLedger_, fishing_boost::resolve_world_anchor()));
     requestedFishingBoost_.store(false, std::memory_order_release);
     fishingBoostDirty_.store(false, std::memory_order_release);
     fishingBoostLedger_.begin_world();

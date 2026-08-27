@@ -79,6 +79,8 @@ if(BUILD_TESTING)
         tests/capture_override_tests.cpp)
     palworld_add_unit_test(PalworldEditorReviveTimerTests PalworldEditor.ReviveTimer
         tests/revive_timer_tests.cpp)
+    palworld_add_unit_test(PalworldEditorFishingBoostTests PalworldEditor.FishingBoost
+        tests/fishing_boost_tests.cpp)
     palworld_add_unit_test(PalworldEditorWaypointTeleportTests PalworldEditor.WaypointTeleport
         tests/waypoint_teleport_tests.cpp)
 endif()

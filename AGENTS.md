@@ -53,7 +53,7 @@ cmake --preset ninja-msvc-x64
 cmake --build --preset ninja-msvc-x64 --target PalworldEditor
 
 # 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorFishingBoostTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
@@ -71,13 +71,13 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 提交前至少执行：
 
 ```powershell
-cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorWaypointTeleportTests
+cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorFishingBoostTests PalworldEditorWaypointTeleportTests
 ctest --test-dir build --output-on-failure
 git diff --check
 ```
 
-八个测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、卸载清理调度、物品目录、技能目录、技能编辑
-服务、配置、资源池、能力判断、恢复账本、远程终端、捕获覆盖、复活计时与标记传送决策和生命周期逻辑。
+九个测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、卸载清理调度、物品目录、技能目录、技能编辑
+服务、配置、资源池、能力判断、恢复账本、远程终端、捕获覆盖、复活计时、钓鱼圣手账本与标记传送决策和生命周期逻辑。
 反射调用、ImGui 和 Palworld 存档效果仍需游戏内端到端验证。
 
 构建并部署后启动 Palworld 1.0。UE4SS 控制台应出现 `PalworldEditor loaded (v1.7.0)`；打开
