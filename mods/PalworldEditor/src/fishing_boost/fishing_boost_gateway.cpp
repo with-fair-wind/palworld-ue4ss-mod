@@ -160,26 +160,38 @@ auto restore(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
         return GatewayStatus::succeeded;
     }
 
+    // 阶段一（预检）：解析并读取全部未退役字段，任一缺失或类型漂移即整笔拒绝
+    // （零写入）——逐字段交织会在后续字段漂移时留下"部分恢复"的中间态，违反
+    // AGENTS.md"预检并读取原值→才开始写入"的契约。
+    std::array<FieldAccess, kFieldCount> accesses{};
+    std::array<float, kFieldCount> currents{};
     for (std::size_t i{}; i < kFieldCount; ++i) {
         if (ledger.is_field_retired(i)) {
             continue;  // 此前恢复时已确认责任消失的字段：重试永久跳过。
         }
-        const auto access = find_field(system, kFieldCatalog[i].fieldName);
-        if (access.property == nullptr) {
+        accesses[i] = find_field(system, kFieldCatalog[i].fieldName);
+        if (accesses[i].property == nullptr) {
             ledger.disable_for_world();
             return GatewayStatus::preflightFailed;
         }
-        // 条件恢复：仅当当前值仍等于本功能写入的覆盖值才写回原值。激活期间被
-        // 游戏或其他 mod 改过的字段（当前值 != 覆盖值）视为本功能的恢复责任
-        // 已消失——立即退役，不得用陈旧快照覆盖更新后的值，也不得在后续
-        // 重试中因值偶然回到覆盖值而重新捡起责任。
-        const float current = access.property->GetPropertyValueInContainer(access.container);
-        if (current != kFieldCatalog[i].overrideValue) {
+        currents[i] = accesses[i].property->GetPropertyValueInContainer(accesses[i].container);
+    }
+
+    // 阶段二（条件恢复）：仅当预检读到的当前值仍等于本功能写入的覆盖值才写回
+    // 原值。被游戏或其他 mod 改过的字段（当前值 != 覆盖值）视为恢复责任已
+    // 消失——立即退役，不得用陈旧快照覆盖更新后的值，也不得在后续重试中因
+    // 值偶然回到覆盖值而重新捡起责任。恢复验证成功的字段同样立即退役。
+    for (std::size_t i{}; i < kFieldCount; ++i) {
+        if (ledger.is_field_retired(i) || accesses[i].property == nullptr) {
+            continue;
+        }
+        if (currents[i] != kFieldCatalog[i].overrideValue) {
             ledger.retire_field(i);
             continue;
         }
-        access.property->SetPropertyValueInContainer(access.container, (*originals)[i]);
-        if (access.property->GetPropertyValueInContainer(access.container) != (*originals)[i]) {
+        accesses[i].property->SetPropertyValueInContainer(accesses[i].container, (*originals)[i]);
+        if (accesses[i].property->GetPropertyValueInContainer(accesses[i].container) !=
+            (*originals)[i]) {
             ledger.disable_for_world();
             return GatewayStatus::rollbackFailed;
         }
