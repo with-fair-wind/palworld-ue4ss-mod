@@ -353,6 +353,7 @@ auto PalworldEditorMod::game_thread_tick(const float deltaSeconds) -> void {
         const auto worldContextReady = process_inventory_requests(deltaSeconds);
         process_stack_limit_work(worldContextReady);
         process_revive_timer_work(worldContextReady);
+        process_fishing_boost_work(worldContextReady);
         process_pal_edit_requests();
         process_initialization_tasks();
         process_utility_requests();
@@ -442,6 +443,20 @@ auto PalworldEditorMod::shutdown_runtime_on_game_thread(const std::string_view r
                                                           : CleanupOutcome::transientFailure;
         },
         STR("PalworldEditor: revive timer values could not be restored during shutdown.\n"));
+    run_cleanup(
+        [this] {
+            fishingBoostLedger_.set_desired(false);
+            // 目标不可解析（世界已退出、对象已销毁）等于无需恢复：新世界实例使用
+            // 原生值；其余失败按瞬态清理重试。
+            // restore 的 targetUnavailable 是"锚无法解析"（unknown，账本保留）：
+            // 按瞬态重试；确认目标不存在时 restore 返回 succeeded（责任已解除）。
+            const auto status =
+                fishing_boost::restore(fishingBoostLedger_, fishing_boost::resolve_world_anchor());
+            return status == fishing_boost::GatewayStatus::succeeded
+                       ? CleanupOutcome::succeeded
+                       : CleanupOutcome::transientFailure;
+        },
+        STR("PalworldEditor: fishing values could not be restored during shutdown.\n"));
     worldInitializationReady_ = false;
     return worst;
 }
@@ -1074,6 +1089,74 @@ auto PalworldEditorMod::process_revive_timer_work(const bool worldContextReady) 
     reviveTimerPhase_.store(reviveTimerLedger_.phase(generation), std::memory_order_release);
 }
 
+auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady) -> void {
+    // 有界重试调度（apply 与 restore 共用）：开关变化立即尝试一次，此后每 2 秒
+    // 一次、连续 15 次未完成则进入 waiting 停止尝试（等待用户重新切换开关或
+    // LoadMap/卸载兜底）——不得对 UObject 注册表做每帧查找轮询。
+    constexpr auto kRetryInterval = std::chrono::seconds{2};
+    constexpr std::uint32_t kMaximumUnavailableAttempts = 15;
+
+    if (!worldContextReady) {
+        return;
+    }
+    if (fishingBoostDirty_.exchange(false, std::memory_order_acq_rel)) {
+        fishingBoostLedger_.set_desired(requestedFishingBoost_.load(std::memory_order_acquire));
+        fishingSystemUnavailableCount_ = 0;
+        nextFishingSystemAttempt_ = std::chrono::steady_clock::now();
+    }
+    // 停用阻止新应用，但不拦停用域自身的遗留记录：回滚验证失败时保留的原值
+    // 快照要经正常 tick 的条件恢复收敛，而不是搁置到切图/卸载才处理。
+    // fishingRestorePending_ 区分"records=当前生效账本"（active）与"records=遗留
+    // 责任"（waiting 超限后重新授权）——重新授权必须先对账遗留记录再视为已启用。
+    const bool safetyDisabled = fishingBoostLedger_.safety_disabled();
+    const bool wantsOn =
+        !safetyDisabled && fishingBoostLedger_.desired() && !fishingBoostLedger_.has_records();
+    const bool wantsRecovery =
+        fishingBoostLedger_.has_records() &&
+        (!fishingBoostLedger_.desired() || safetyDisabled || fishingRestorePending_);
+    if (!(wantsOn || wantsRecovery)) {
+        // 无待办也要发布 phase：waiting 耗尽后用户关开关（desired=false、无记录）
+        // 时借此把 UI 从 waiting 提示切回 off，否则提示永久滞留。
+        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+        return;
+    }
+    if (std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {
+        return;  // 节流检查最先：窗口内常量时间返回，不做任何对象查找。
+    }
+    // 世界锚过滤 GC 窗口期的旧世界 inventory 后派生（见 resolve_world_anchor）。
+    auto* const worldAnchor = fishing_boost::resolve_world_anchor();
+    const auto status = wantsOn ? fishing_boost::apply(fishingBoostLedger_, worldAnchor)
+                                : fishing_boost::restore(fishingBoostLedger_, worldAnchor);
+    // apply 的 targetUnavailable 与 restore 的任何未完成结果（锚不可用/结构失败/
+    // 回滚失败，账本均保留）统一推进有界调度；其余结果已落定（记录已立或责任
+    // 已解除），计数复位。
+    const bool attemptIncomplete = status == fishing_boost::GatewayStatus::targetUnavailable ||
+                                   (!wantsOn && status != fishing_boost::GatewayStatus::succeeded);
+    if (attemptIncomplete) {
+        if (!wantsOn) {
+            fishingRestorePending_ = true;  // 遗留责任未解除：重授权时先对账。
+        }
+        ++fishingSystemUnavailableCount_;
+        if (fishingSystemUnavailableCount_ >= kMaximumUnavailableAttempts) {
+            nextFishingSystemAttempt_ = std::chrono::steady_clock::time_point::max();
+            // 遗留记录保留给 LoadMap/卸载兜底；waiting 提示用户重新切换开关重启链。
+            // 已停用（结构漂移/恢复失败）的域不得被 waiting 覆盖——停用是 fail-closed
+            // 终态，开关不可再编辑，不得呈现为可重试的可用性问题。
+            fishingBoostPhase_.store(fishingBoostLedger_.safety_disabled()
+                                         ? fishing_boost::Phase::safetyDisabled
+                                         : fishing_boost::Phase::waiting,
+                                     std::memory_order_release);
+            return;
+        }
+        nextFishingSystemAttempt_ = std::chrono::steady_clock::now() + kRetryInterval;
+        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+        return;
+    }
+    fishingSystemUnavailableCount_ = 0;
+    fishingRestorePending_ = false;  // 责任解除（restore 完成）或本轮无恢复责任。
+    fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+}
+
 auto PalworldEditorMod::restore_revive_timer_overrides(const std::string_view reason) -> bool {
     reviveTimerLedger_.set_desired(false);
     requestedReviveTimerRemove_.store(false, std::memory_order_release);
@@ -1237,6 +1320,18 @@ auto PalworldEditorMod::begin_world_transition() -> void {
     static_cast<void>(reviveTimerLedger_.begin_world(nextWorldGeneration));
     reviveTimerPhase_.store(reviveTimerLedger_.phase(nextWorldGeneration),
                             std::memory_order_release);
+    // 钓鱼圣手的目标 UPalWorldSubsystem 随世界销毁：切图前尽力恢复原值，账本随
+    // 新世界重置。恢复仅接受唯一同世界实例；锚不可用时也只接受唯一有效实例。
+    // 候选歧义时拒绝写回，旧实例随世界销毁，账本不跨世界代次。
+    fishingBoostLedger_.set_desired(false);
+    static_cast<void>(
+        fishing_boost::restore(fishingBoostLedger_, fishing_boost::resolve_world_anchor()));
+    requestedFishingBoost_.store(false, std::memory_order_release);
+    fishingBoostDirty_.store(false, std::memory_order_release);
+    fishingBoostLedger_.begin_world();
+    fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
+    fishingSystemUnavailableCount_ = 0;
+    nextFishingSystemAttempt_ = {};
     static_cast<void>(grappleLedger_.begin_world(nextWorldGeneration));
     grappleReadinessScheduler_.begin_world(nextWorldGeneration);
     grappleRuntimePhase_.store(grappleLedger_.phase(nextWorldGeneration),
