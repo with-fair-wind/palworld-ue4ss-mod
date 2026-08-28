@@ -18,23 +18,18 @@ using namespace RC::Unreal;
 
 namespace {
 
-/** @brief 目标子系统解析结果的三态：实例 / 确认不存在 / 候选歧义（unknown）。 */
-struct SystemResolution {
-    UObject* system{}; /**< 解析成功时的实例；absent 与 ambiguous 均为空。 */
-    bool ambiguous{};  /**< 候选歧义：对象仍存在（可能带覆盖值），非确认不存在。 */
-};
-
 /**
  * @brief 解析属于当前世界的 UPalFishingSystem 实例。
  * @details 有世界锚时只接受唯一的同世界实例；无锚时只接受唯一有效实例。候选
- *          缺失（absent）与候选歧义（ambiguous）都是 fail-closed，但语义不同：
- *          absent 是确认不存在（恢复责任可解除），ambiguous 是 unknown（对象仍
- *          存在、可能带本功能的覆盖值，责任必须保留待重试）。InternalIndex 不能
- *          代替世界身份。FindAllOf 保留 UE4SS 的父类链匹配并排除 CDO/archetype；
- *          Palworld 通过 FishingSystemClass 配置 Blueprint 派生实现，不能用精确
- *          类名过滤。只在触发沿/有界重试调用。
+ *          缺失或歧义一律返回 null——"目标已销毁"无法从对象注册表直接证明
+ *          （pending-kill 对象仍持值、注册表时序不可证），因此恢复路径不设
+ *          "确认不存在即清账"的分支：非唯一确认一律按瞬态保留恢复责任，
+ *          责任解除只经恢复成功 / 条件跳过全部退役 / LoadMap 世界重置。
+ *          InternalIndex 不能代替世界身份。FindAllOf 保留 UE4SS 的父类链匹配
+ *          并排除 CDO/archetype；Palworld 通过 FishingSystemClass 配置
+ *          Blueprint 派生实现，不能用精确类名过滤。只在触发沿/有界重试调用。
  */
-[[nodiscard]] auto resolve_system(UObject* worldContext) -> SystemResolution {
+[[nodiscard]] auto resolve_system(UObject* worldContext) -> UObject* {
     auto* const expectedWorld =
         pal_game::is_valid(worldContext) ? worldContext->GetWorld() : nullptr;
     UObject* matched{};
@@ -67,11 +62,9 @@ struct SystemResolution {
     }
     if (!is_system_candidate_selection_unambiguous(expectedWorld != nullptr, candidateCount,
                                                    matchingExpectedWorldCount)) {
-        const bool absent =
-            expectedWorld != nullptr ? matchingExpectedWorldCount == 0 : candidateCount == 0;
-        return {.system = nullptr, .ambiguous = !absent};
+        return nullptr;  // 候选缺失或歧义：无法唯一确认，一律瞬态。
     }
-    return {.system = pal_game::is_valid(matched) ? matched : nullptr, .ambiguous = false};
+    return pal_game::is_valid(matched) ? matched : nullptr;
 }
 
 /**
@@ -134,12 +127,10 @@ struct FieldAccess {
 }
 
 auto apply(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
-    // absent 与 ambiguous 都进有界重试（apply 无账本，无需区分两者的清账语义）。
-    const auto resolution = resolve_system(worldContext);
-    if (resolution.system == nullptr) {
-        return GatewayStatus::targetUnavailable;
+    auto* const system = resolve_system(worldContext);
+    if (system == nullptr) {
+        return GatewayStatus::targetUnavailable;  // 无法唯一确认：瞬态有界重试。
     }
-    auto* const system = resolution.system;
 
     // 阶段一（预检）：解析并快照全部字段，任一缺失或类型漂移即整笔拒绝——结构
     // 不兼容的运行时不得被触碰（AGENTS.md：缺少读取能力时禁止开始写入）。
@@ -200,19 +191,14 @@ auto restore(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
     if (!originals.has_value()) {
         return GatewayStatus::succeeded;
     }
-    // unknown（锚无效/候选歧义）与 confirmed absent 必须区分——歧义时候选对象
-    // 仍存在、可能带着本功能的覆盖值，清账即放弃真实存在的恢复责任；只有
-    // 确认无候选（全对象扫描为空或当前世界零匹配）才可解除责任。
-    const auto resolution = resolve_system(worldContext);
-    if (resolution.ambiguous) {
-        return GatewayStatus::targetUnavailable;  // 歧义=unknown：保留账本瞬态重试。
+    // "目标已销毁"无法从对象注册表直接证明（pending-kill 对象仍持值、注册表
+    // 时序不可证）：候选缺失或歧义一律按瞬态保留账本重试，不设"确认不存在即
+    // 清账"分支。责任解除只经：恢复成功 / 条件跳过全部退役 / LoadMap 重置；
+    // 世界已退出场景（菜单卸载等）由有界重试耗尽走保留实例的失败处置。
+    auto* const system = resolve_system(worldContext);
+    if (system == nullptr) {
+        return GatewayStatus::targetUnavailable;
     }
-    if (resolution.system == nullptr) {
-        // 确认不存在：覆盖值随旧世界对象销毁，新世界天然使用原生值。
-        ledger.clear_records();
-        return GatewayStatus::succeeded;
-    }
-    auto* const system = resolution.system;
 
     // 阶段一（预检）：解析并读取全部未退役字段，任一缺失或类型漂移即整笔拒绝
     // （零写入）——逐字段交织会在后续字段漂移时留下"部分恢复"的中间态，违反
