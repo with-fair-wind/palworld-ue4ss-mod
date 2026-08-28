@@ -98,15 +98,17 @@ struct FieldAccess {
 
 }  // namespace
 
-/** @brief 解析当前世界的锚（非 pending-kill 的 inventory）并派生本地玩家控制器。
+/** @brief 解析当前世界的锚（inventory）并派生本地玩家控制器。
  *  @details 裸 FindFirstOf(inventory) 在 LoadMap 的 GC 窗口期可能返回旧世界实例；
  *           GetLocalPalPlayerController 把传入对象原样作为 WorldContextObject（在
- *           给定世界上解析，不是全局找当前玩家），因此必须先过滤旧实例——旧世界
- *           对象被标记 RF_PendingKill 后即被排除；按内部注册序号显式选择最新候选，
- *           不依赖 ForEachUObject 的遍历方向。只在触发沿/有界重试调用。 */
+ *           给定世界上解析，不是全局找当前玩家），因此必须过滤旧实例。内部注册
+ *           序号不可靠（槽位可复用，新对象可能拿到更低的 index），不用于选择——
+ *           采用与子系统消歧一致的唯一性判定：非 pending-kill 候选恰好一个才使用，
+ *           多个（无法确定活动世界）返回空，由既有有界重试等旧的被回收后收敛。
+ *           只在触发沿/有界重试调用。 */
 [[nodiscard]] auto resolve_world_anchor() -> UObject* {
     UObject* candidate{};
-    std::optional<SystemCandidateRank> selectedRank;
+    std::size_t candidateCount{};
     UObjectGlobals::ForEachUObject([&](UObject* obj, int32_t, int32_t) -> LoopAction {
         auto* const cls = obj->GetClassPrivate();
         if (cls == nullptr || cls->GetName() != STR("PalPlayerInventoryData")) {
@@ -116,14 +118,14 @@ struct FieldAccess {
         if (item == nullptr || item->IsPendingKill()) {
             return LoopAction::Continue;  // 旧世界待回收实例。
         }
-        const SystemCandidateRank rank{.internalIndex = obj->GetInternalIndex()};
-        if (should_select_system_candidate(rank, selectedRank)) {
-            selectedRank = rank;
-            candidate = obj;
-        }
+        ++candidateCount;
+        candidate = obj;
         return LoopAction::Continue;
     });
-    return candidate == nullptr ? nullptr : pal_game::local_player_controller(candidate);
+    if (candidateCount != 1) {
+        return nullptr;  // 零候选或并存歧义：无法唯一确认活动世界，瞬态重试。
+    }
+    return pal_game::local_player_controller(candidate);
 }
 
 auto apply(Ledger& ledger, UObject* worldContext) -> GatewayStatus {
