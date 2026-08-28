@@ -1115,6 +1115,9 @@ auto PalworldEditorMod::process_fishing_boost_work(const bool worldContextReady)
         fishingBoostLedger_.has_records() &&
         (!fishingBoostLedger_.desired() || safetyDisabled || fishingRestorePending_);
     if (!(wantsOn || wantsRecovery)) {
+        // 无待办也要发布 phase：waiting 耗尽后用户关开关（desired=false、无记录）
+        // 时借此把 UI 从 waiting 提示切回 off，否则提示永久滞留。
+        fishingBoostPhase_.store(fishingBoostLedger_.phase(), std::memory_order_release);
         return;
     }
     if (std::chrono::steady_clock::now() < nextFishingSystemAttempt_) {

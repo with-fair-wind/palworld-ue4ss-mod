@@ -114,6 +114,13 @@ struct FieldAccess {
         if (cls == nullptr || cls->GetName() != STR("PalPlayerInventoryData")) {
             return LoopAction::Continue;
         }
+        // 排除 CDO/archetype（类名相同且永不 pending-kill，直遍无 FindAllOf 的
+        // IsValidObjectForFindXOf 谓词）——不滤则 candidateCount 恒 ≥2，锚永远
+        // 无法唯一确认，功能整体失效。
+        if (obj->HasAnyFlags(static_cast<EObjectFlags>(EObjectFlags::RF_ClassDefaultObject |
+                                                       EObjectFlags::RF_ArchetypeObject))) {
+            return LoopAction::Continue;
+        }
         const auto* const item = UObjectArray::IndexToObject(obj->GetInternalIndex());
         if (item == nullptr || item->IsPendingKill()) {
             return LoopAction::Continue;  // 旧世界待回收实例。
