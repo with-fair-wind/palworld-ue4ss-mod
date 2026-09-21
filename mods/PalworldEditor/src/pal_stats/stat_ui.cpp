@@ -82,7 +82,7 @@ void PalworldEditorMod::render_pal_stats(PalworldEditorMod* self,
         workSuitabilityLabels{
             "生火", "浇水", "播种", "发电", "手工作业", "采集", "伐木",
             "采矿", "采油", "制药", "冷却", "搬运",     "牧场",
-        };
+    };
     if (ImGui::TreeNode("工作适应性永久附加值##stat-work-suitability")) {
         ImGui::TextDisabled(
             "直接编辑存档永久附加值；原生接口按当前值差量提交，不会创建物种没有的适应性。");

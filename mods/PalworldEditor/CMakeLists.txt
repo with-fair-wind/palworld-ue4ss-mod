@@ -88,3 +88,4 @@ endif()
 # One-click deploy into the Palworld game install (see cmake/Deploy.cmake).
 include(${CMAKE_SOURCE_DIR}/cmake/Deploy.cmake)
 palworld_add_deploy_target(${TARGET})
+palworld_add_ue4ss_deploy_target()

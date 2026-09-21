@@ -59,6 +59,15 @@ ctest --test-dir build --output-on-failure
 # 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
 cmake --build --preset ninja-msvc-x64 --target deploy
 
+# 6b. 部署 UE4SS 运行时全套 -> ue4ss/UE4SS.dll、Pal/Binaries/Win64/dwmapi.dll（代理）
+#     与 ue4ss/ 下的资源套件（settings.ini 用 copy_if_different，不覆盖用户已改配置）。
+#     升级 RE-UE4SS 子项目后必须先执行（运行时与 mod DLL 须成对部署）：
+cmake --build --preset ninja-msvc-x64 --target deploy-ue4ss
+
+# 升级 RE-UE4SS 子项目（RE-UE4SS/ 是独立 git 仓库）：
+cd RE-UE4SS && git pull --ff-only origin main && git submodule update --init --recursive && cd ..
+# 然后删除 build/ 全量重建，再依次 deploy-ue4ss 与 deploy。
+
 # 完全重新构建
 Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --build --preset ninja-msvc-x64
 ```
@@ -469,7 +478,10 @@ BlueprintResearch 或等价的仓储登记/材料路径 mod 同时启用。热�
 出的 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，
 **或**者在 `ue4ss/Mods/mods.txt` 中 `Keybinds` 行的上方加一行 `<ModName> : 1`。`deploy` target
 （`cmake/Deploy.cmake`）通过 `$<TARGET_FILE:PalworldEditor>` 自动完成这件事，因此无论当前 triplet
-输出目录是哪个，源文件路径都始终正确。
+输出目录是哪个，源文件路径都始终正确。`deploy-ue4ss` target（同文件）部署 UE4SS 运行时全套
+（`ue4ss/UE4SS.dll`、`Pal/Binaries/Win64/dwmapi.dll` 代理与 `RE-UE4SS/assets` 资源套件，settings.ini
+用 copy_if_different 不覆盖用户配置）——升级 RE-UE4SS 子项目后必须先执行它再 `deploy`，运行时
+与 mod DLL 必须成对部署，旧运行时配新 mod DLL 属于未定义行为。
 
 ## 工具链（clangd / clang-tidy / clang-format）
 
