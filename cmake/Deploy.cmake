@@ -66,10 +66,19 @@ endfunction()
 # Deployed layout (relative to PALWORLD_INSTALL_DIR):
 #   Pal/Binaries/Win64/dwmapi.dll            (proxy entry point, loads UE4SS)
 #   Pal/Binaries/Win64/ue4ss/UE4SS.dll
-#   Pal/Binaries/Win64/ue4ss/UE4SS-settings.ini
+#   Pal/Binaries/Win64/ue4ss/UE4SS-settings.ini  (first install only)
+#   Pal/Binaries/Win64/ue4ss/LICENSE
 #   Pal/Binaries/Win64/ue4ss/{CustomGameConfigs,MemberVarLayoutTemplates,
 #                             VTableLayoutTemplates,UE4SS_Signatures,
 #                             Default_UVTD_Configs,Mods}/
+#
+# This is a full-assets deployment (equivalent to the official zDEV package):
+# CustomGameConfigs/Palworld.ini is required for Palworld, and the diagnostics
+# console stays available for in-game verification. The official player-facing
+# UE4SS_v*.zip additionally strips UE4SS_Signatures/VTableLayoutTemplates/
+# MemberVarLayoutTemplates/CustomGameConfigs/MapGenBP and flips six settings
+# keys to quiet release values (console off, hot reload off...) — none of that
+# applies to a self-built developer install.
 function(palworld_add_ue4ss_deploy_target)
     if(NOT PALWORLD_INSTALL_DIR OR PALWORLD_INSTALL_DIR STREQUAL "")
         add_custom_target(deploy-ue4ss
@@ -98,10 +107,16 @@ function(palworld_add_ue4ss_deploy_target)
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_ue4ss_root}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_ue4ss_dll}" "${_ue4ss_root}/UE4SS.dll"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_proxy_dll}" "${_win64_root}/dwmapi.dll"
-        # 2. Settings: copy_if_different preserves user-edited configs.
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_assets_dir}/UE4SS-settings.ini"
-                                                      "${_ue4ss_root}/UE4SS-settings.ini"
-        # 3. Asset directories (signatures, layout templates, bundled mods...).
+        # 2. Settings: first-install only — an existing file is user configuration
+        #    (upstream upgrades add keys; users merge them by hand), never overwritten.
+        COMMAND ${CMAKE_COMMAND}
+                -DSETTINGS_SRC=${_assets_dir}/UE4SS-settings.ini
+                -DSETTINGS_DST=${_ue4ss_root}/UE4SS-settings.ini
+                -P ${CMAKE_SOURCE_DIR}/cmake/DeploySettings.cmake
+        # 3. License, matching both official release and dev packages.
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_SOURCE_DIR}/RE-UE4SS/LICENSE"
+                                                      "${_ue4ss_root}/LICENSE"
+        # 4. Asset directories (signatures, layout templates, bundled mods...).
         COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${_assets_dir}/CustomGameConfigs"
                                                                 "${_ue4ss_root}/CustomGameConfigs"
         COMMAND ${CMAKE_COMMAND} -E copy_directory_if_different "${_assets_dir}/MemberVarLayoutTemplates"

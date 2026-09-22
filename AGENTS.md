@@ -60,8 +60,9 @@ ctest --test-dir build --output-on-failure
 cmake --build --preset ninja-msvc-x64 --target deploy
 
 # 6b. 部署 UE4SS 运行时全套 -> ue4ss/UE4SS.dll、Pal/Binaries/Win64/dwmapi.dll（代理）
-#     与 ue4ss/ 下的资源套件（settings.ini 用 copy_if_different，不覆盖用户已改配置）。
-#     升级 RE-UE4SS 子项目后必须先执行（运行时与 mod DLL 须成对部署）：
+#     与 ue4ss/ 下的资源套件（settings.ini 仅首次安装部署；已存在的属于用户配置，
+#     升级新增配置项需手动对照仓库默认值合并）。升级 RE-UE4SS 子项目后必须先执行
+#     （运行时与 mod DLL 须成对部署）：
 cmake --build --preset ninja-msvc-x64 --target deploy-ue4ss
 
 # 升级 RE-UE4SS 子项目（RE-UE4SS/ 是独立 git 仓库）：
@@ -479,9 +480,10 @@ BlueprintResearch 或等价的仓储登记/材料路径 mod 同时启用。热�
 **或**者在 `ue4ss/Mods/mods.txt` 中 `Keybinds` 行的上方加一行 `<ModName> : 1`。`deploy` target
 （`cmake/Deploy.cmake`）通过 `$<TARGET_FILE:PalworldEditor>` 自动完成这件事，因此无论当前 triplet
 输出目录是哪个，源文件路径都始终正确。`deploy-ue4ss` target（同文件）部署 UE4SS 运行时全套
-（`ue4ss/UE4SS.dll`、`Pal/Binaries/Win64/dwmapi.dll` 代理与 `RE-UE4SS/assets` 资源套件，settings.ini
-用 copy_if_different 不覆盖用户配置）——升级 RE-UE4SS 子项目后必须先执行它再 `deploy`，运行时
-与 mod DLL 必须成对部署，旧运行时配新 mod DLL 属于未定义行为。
+（`ue4ss/UE4SS.dll`、`Pal/Binaries/Win64/dwmapi.dll` 代理与 `RE-UE4SS/assets` 资源套件，
+settings.ini 仅首次安装部署——已存在的属于用户配置，升级新增的配置项须手动对照仓库默认值
+合并）——升级 RE-UE4SS 子项目后必须先执行它再 `deploy`，运行时与 mod DLL 必须成对部署，
+旧运行时配新 mod DLL 属于未定义行为。
 
 ## 工具链（clangd / clang-tidy / clang-format）
 
