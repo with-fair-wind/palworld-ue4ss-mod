@@ -1,32 +1,54 @@
-﻿#Requires -Version 5.1
-<#
-.SYNOPSIS
-    构建并把 PalworldEditor 部署到 Palworld 游戏目录（执行 'deploy' target）。
-.DESCRIPTION
-    需要在配置时已设置 PALWORLD_INSTALL_DIR
-    （通过 -DPALWORLD_INSTALL_DIR=<路径> 或 PALWORLD_INSTALL_DIR 环境变量）。
-#>
-
-$ErrorActionPreference = "Stop"
-try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new() } catch {}
-$OutputEncoding = [System.Text.UTF8Encoding]::new()
-
-Set-Location -Path (Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path))
-
-if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
-    Write-Host "错误：PATH 中找不到 'cl.exe'（MSVC）。" -ForegroundColor Red
-    Write-Host "请在「x64 Native Tools Command Prompt for VS 2022」或 VS Developer PowerShell 中运行。" -ForegroundColor Red
-    exit 1
+#Requires -Version 7.0
+# Update an existing installation; no assets, settings, loader, or other mods are copied.
+[CmdletBinding()]
+param(
+    [string]$BuildDirectory = "$PSScriptRoot/../build/msvc",
+    [string]$InstallDirectory = $env:PALWORLD_INSTALL_DIR,
+    [string]$RuntimeDirectory
+)
+$ErrorActionPreference = 'Stop'
+if (Get-Process -Name 'Palworld*', 'PalServer*' -ErrorAction SilentlyContinue) {
+    throw 'Exit Palworld and PalServer completely before deployment.'
 }
-
-if (-not (Test-Path build)) {
-    Write-Host "未找到 build/ —— 先进行配置（cmake --preset ninja-msvc-x64）..." -ForegroundColor Cyan
-    cmake --preset ninja-msvc-x64
-    if ($LASTEXITCODE -ne 0) { throw "配置失败。" }
+if (-not $RuntimeDirectory) {
+    if (-not $InstallDirectory) { throw 'Pass -InstallDirectory or the actual -RuntimeDirectory.' }
+    $win64 = Join-Path $InstallDirectory 'Pal/Binaries/Win64'
+    if (Test-Path -LiteralPath (Join-Path $win64 'override.txt')) {
+        throw 'override.txt redirects UE4SS. Pass the actual -RuntimeDirectory explicitly.'
+    }
+    $RuntimeDirectory = Join-Path $win64 'ue4ss'
 }
-
-Write-Host "正在部署（cmake --build --preset ninja-msvc-x64 --target deploy）..." -ForegroundColor Cyan
-cmake --build --preset ninja-msvc-x64 --target deploy
-if ($LASTEXITCODE -ne 0) { throw "部署失败。" }
-
-Write-Host "部署完成。" -ForegroundColor Green
+$RuntimeDirectory = [IO.Path]::GetFullPath($RuntimeDirectory)
+if (-not (Test-Path -LiteralPath (Join-Path $RuntimeDirectory 'UE4SS.dll') -PathType Leaf)) {
+    throw 'An existing UE4SS installation is required. Install the compatible runtime and game adaptation first.'
+}
+$info = Get-Content -LiteralPath (Join-Path $BuildDirectory 'deployment-build.json') -Raw | ConvertFrom-Json
+$sources = @($info.runtimeDll, $info.modDll)
+$destinations = @((Join-Path $RuntimeDirectory 'UE4SS.dll'),
+    (Join-Path $RuntimeDirectory 'Mods/PalworldEditor/dlls/main.dll'))
+# Open both inputs and destinations before changing either DLL, so missing/locked files fail early.
+$inputs = @()
+$outputs = @()
+try {
+    foreach ($source in $sources) {
+        if (-not $source -or -not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Build both DLLs first: $source" }
+        if ($destinations -contains [IO.Path]::GetFullPath($source)) { throw 'Build outputs must be separate from the installed DLLs.' }
+        $inputs += [IO.File]::Open($source, 'Open', 'Read', 'Read')
+        if ($inputs[-1].Length -eq 0) { throw "Empty build output: $source" }
+    }
+    foreach ($destination in $destinations) {
+        [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($destination)) | Out-Null
+        $outputs += [IO.File]::Open($destination, 'OpenOrCreate', 'Write', 'None')
+    }
+    for ($i = 0; $i -lt 2; $i++) {
+        $outputs[$i].SetLength(0)
+        $inputs[$i].CopyTo($outputs[$i])
+        $outputs[$i].Flush($true)
+    }
+} catch {
+    throw "Deployment failed. Keep the game closed; fix the error and redeploy both DLLs before launching. Cause: $_"
+} finally {
+    foreach ($stream in $outputs + $inputs) { $stream.Dispose() }
+}
+Write-Host "Updated UE4SS.dll and Mods/PalworldEditor/dlls/main.dll in $RuntimeDirectory"
+Write-Host 'For a first mod install, enable PalworldEditor in your existing mod configuration. Cold-start the game and verify the UE4SS log and GUI.'

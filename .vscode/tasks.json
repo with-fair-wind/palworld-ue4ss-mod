@@ -23,6 +23,7 @@
                 "--preset",
                 "ninja-msvc-x64",
                 "--target",
+                "UE4SS",
                 "PalworldEditor"
             ],
             "options": {

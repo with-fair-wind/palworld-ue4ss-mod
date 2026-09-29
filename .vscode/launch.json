@@ -6,7 +6,7 @@
             "type": "cppvsdbg",
             "request": "attach",
             "processId": "${command:pickProcess}",
-            "symbolSearchPath": "${workspaceFolder}\\build\\Game__Shipping__Win64\\bin",
+            "symbolSearchPath": "${workspaceFolder}\\build\\msvc\\Game__Shipping__Win64\\bin",
             "requireExactSource": true,
             "logging": {
                 "engineLogging": false,

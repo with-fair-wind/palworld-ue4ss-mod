@@ -32,26 +32,19 @@ Palworld 1.0 需要 UE4SS **Experimental (Palworld)** 运行时 + PalSchema（�
 
 - **Visual Studio 2022**（最新）+ "使用 C++ 的桌面开发"工作负载（MSVC + Ninja）；C++23 通过
   `/std:c++latest` 启用；
-- **CMake ≥ 3.22** 与 **Git**（`scripts/setup.ps1` 依赖）；
+- **CMake ≥ 3.26** 与 **Git**（`scripts/setup.ps1` 依赖）；
 - **Rust stable**（`cargo`/`rustc`）：RE-UE4SS 的 `UE4SS` target 会构建 Rust 实现的 PatternSleuth
   依赖。
 
 ### 初始化与构建
 
-所有 CMake 命令都必须在 **VS x64 开发者环境**（"x64 Native Tools Command Prompt for VS 2022" 或
-VS Developer PowerShell）中运行。
-
-```powershell
-pwsh scripts/setup.ps1                          # 首次：克隆 RE-UE4SS 并初始化子模块
-$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"   # 可选；必须在首次配置前设置
-cmake --preset ninja-msvc-x64                   # 配置
-cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
-```
-
-- 输出 DLL：`build/Game__Shipping__Win64/bin/PalworldEditor.dll`；
-- 部署：`cmake --build --preset ninja-msvc-x64 --target deploy` → 游戏
-  `Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll`；游戏运行时会锁定该 DLL，部署前需
-  退出游戏。
+使用 PowerShell 7。`pwsh scripts/setup.ps1` 首次获取 UE4SS 和递归子模块；
+`pwsh scripts/setup.ps1 -Update` 显式更新到上游 main，子模块跟随父提交，不用 --remote。
+`pwsh scripts/build.ps1 -Test` 加载 VS x64 环境，构建 UE4SS、PalworldEditor 并测试，默认 build/msvc。
+依赖或工具链变化时使用新的 -BuildDirectory。
+完全退出游戏后执行 deploy.ps1，只替换已有安装中的 UE4SS.dll 和本 mod main.dll。
+加载器、适配文件、用户配置和其他 mod 保留。首次安装运行时由兼容发行包或创意工坊完成。
+完整用法见 [README 更新与部署参数](README.md#更新与部署参数)，deploy-ue4ss 为 deploy 的兼容别名。
 
 ### 验证
 
@@ -59,7 +52,7 @@ cmake --build --preset ninja-msvc-x64 --target PalworldEditor   # 构建
 
 ```powershell
 cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorFishingBoostTests PalworldEditorWaypointTeleportTests
-ctest --test-dir build --output-on-failure
+ctest --test-dir build/msvc --output-on-failure
 git diff --check
 ```
 
@@ -208,7 +201,7 @@ RE-UE4SS 用自有的构建 triplet（`Game__Shipping__Win64`、`CasePreserving_
 triplet 时这些宏才生效。Ninja 是单配置生成器，preset 必须**显式**设置
 `CMAKE_BUILD_TYPE=Game__Shipping__Win64`：RE-UE4SS 拉取的 imgui 依赖在其 examples 中把缺省
 `CMAKE_BUILD_TYPE` 强制为 `Debug`，若不显式指定，关键宏不会定义，编译失败。这就是输出 DLL 落在
-`build/Game__Shipping__Win64/bin/` 的原因。
+`build/msvc/Game__Shipping__Win64/bin/` 的原因。
 
 ### 入口点契约（`src/mod/dllmain.cpp`）
 
@@ -240,7 +233,7 @@ Unreal 数组地址，解析得到的 `UObject*` 只在当次回调内使用。
 
 ### 工具链
 
-clangd 读取 `build/compile_commands.json`（preset 已设 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`），自动把
+clangd 读取 `build/msvc/compile_commands.json`（preset 已设 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`），自动把
 其中的 `cl.exe` 调用翻译为 clang-cl，无需单独 clang 工具链。修改 CMake 或新增源文件后，重新运行
 `cmake --preset ninja-msvc-x64` 刷新该文件。clangd 若报 "system header not found" / 找不到
 Windows SDK，允许它查询 MSVC 驱动（如
@@ -333,5 +326,6 @@ UBIM Lite、BlueprintResearch 或其他修改相同资源路径的 mod 同时测
 C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建出的 DLL 改名；
 用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，**或**者在
 `ue4ss/Mods/mods.txt` 中 `Keybinds` 行的上方加一行 `<ModName> : 1`。`deploy` target
-（`cmake/Deploy.cmake`）通过 `$<TARGET_FILE:PalworldEditor>` 自动完成这件事，因此无论当前 triplet
-输出目录是哪个，源文件路径都始终正确。
+（`cmake/Deploy.cmake`）通过 `$<TARGET_FILE:PalworldEditor>` 和 `$<TARGET_FILE:UE4SS>` 获取产物路径，
+构建后复制两个 DLL；不自动启用 mod，不更新配置或适配文件。测试独立执行，无暂存或事务回滚。
+详细参数见 README.md 的“更新与部署参数”。

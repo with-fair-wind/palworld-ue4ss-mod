@@ -9,11 +9,25 @@
 # The mod targets link the `UE4SS` static library, which transitively provides all
 # headers, compile flags, and definitions (including the C++23 language standard).
 
-cmake_minimum_required(VERSION 3.22)
+cmake_minimum_required(VERSION 3.26)
+
+find_package(Git REQUIRED)
+execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}/RE-UE4SS" rev-parse HEAD
+    OUTPUT_VARIABLE palworld_dependency_commit OUTPUT_STRIP_TRAILING_WHITESPACE
+    RESULT_VARIABLE palworld_git_result)
+if(NOT palworld_git_result EQUAL 0)
+    message(FATAL_ERROR "Run pwsh scripts/setup.ps1 before configuring.")
+endif()
+if(DEFINED PALWORLD_CONFIGURED_UE4SS_COMMIT AND
+   NOT PALWORLD_CONFIGURED_UE4SS_COMMIT STREQUAL palworld_dependency_commit)
+    message(FATAL_ERROR "UE4SS changed. Select a new build directory; keep the old artifacts.")
+endif()
+set(PALWORLD_CONFIGURED_UE4SS_COMMIT "${palworld_dependency_commit}" CACHE INTERNAL "Configured UE4SS identity")
 
 project(PalworldMods LANGUAGES CXX)
 
 include(CTest)
+set(FETCHCONTENT_UPDATES_DISCONNECTED ON CACHE BOOL "Do not advance already populated third-party dependencies during normal builds")
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(PalworldTooling)

@@ -29,7 +29,7 @@ release）。F10 游戏控制台不可用，所有交互都通过 UE4SS GUI 中�
 - **Visual Studio 2022**（最新版），勾选 *"使用 C++ 的桌面开发"*（Desktop development with C++）
   工作负载——提供 MSVC（`cl.exe`）和 Ninja。C++23 通过 `/std:c++latest` 启用，因此需要较新的
   VS 2022；
-- **CMake ≥ 3.22**，在 PATH 中；
+- **CMake ≥ 3.26**，在 PATH 中；
 - **Git**，在 PATH 中（供 `scripts/setup.ps1` 使用）；
 - **Rust stable（`cargo` / `rustc`）**。虽然 preset 关闭 `UE4SS_VERSION_CHECK` 且不构建独立 UVTD
   程序，当前 RE-UE4SS 的 `UE4SS` target 仍会构建 Rust 实现的 PatternSleuth 依赖。
@@ -39,42 +39,22 @@ VS Developer PowerShell——以保证 `cl.exe` 和 `ninja` 在 PATH 中。
 
 ### 常用命令
 
+需要 PowerShell 7。推荐通过脚本加载 VS x64 环境；直接执行 CMake 时仍需自行准备开发者环境。
+
 ```powershell
-# 1. 首次初始化：克隆 RE-UE4SS 并初始化子模块
-pwsh scripts/setup.ps1
-
-# 2.（一次性）把部署目标指向你的游戏安装目录（须在首次配置前设置）
-$env:PALWORLD_INSTALL_DIR = "C:\Program Files (x86)\Steam\steamapps\common\Palworld"
-
-# 3. 配置（请在 VS x64 开发者命令行中运行）
-cmake --preset ninja-msvc-x64
-
-# 4. 构建   -> build/Game__Shipping__Win64/bin/PalworldEditor.dll
-cmake --build --preset ninja-msvc-x64 --target PalworldEditor
-
-# 5. 构建并运行不链接 UE4SS 的纯 C++ 测试
-cmake --build --preset ninja-msvc-x64 --target PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorFishingBoostTests PalworldEditorWaypointTeleportTests
-ctest --test-dir build --output-on-failure
-
-# 6. 部署到游戏 -> Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll（+ enabled.txt）
-cmake --build --preset ninja-msvc-x64 --target deploy
-
-# 6b. 部署 UE4SS 运行时全套 -> ue4ss/UE4SS.dll、Pal/Binaries/Win64/dwmapi.dll（代理）
-#     与 ue4ss/ 下的资源套件（settings.ini 仅首次安装部署；已存在的属于用户配置，
-#     升级新增配置项需手动对照仓库默认值合并）。升级 RE-UE4SS 子项目后必须先执行
-#     （运行时与 mod DLL 须成对部署）：
-cmake --build --preset ninja-msvc-x64 --target deploy-ue4ss
-
-# 升级 RE-UE4SS 子项目（RE-UE4SS/ 是独立 git 仓库）：
-cd RE-UE4SS && git pull --ff-only origin main && git submodule update --init --recursive && cd ..
-# 然后删除 build/ 全量重建，再依次 deploy-ue4ss 与 deploy。
-
-# 完全重新构建
-Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --build --preset ninja-msvc-x64
+pwsh scripts/setup.ps1                        # 首次获取 UE4SS 和递归子模块
+pwsh scripts/setup.ps1 -Update                # 显式更新到上游 main
+pwsh scripts/build.ps1 -Test                  # MSVC，build/msvc；构建两个 DLL 并运行测试
+# 完全退出游戏后复制两个 DLL
+pwsh scripts/deploy.ps1 -InstallDirectory 'F:/Games/Palworld'
 ```
 
-部署 target 依赖 `PALWORLD_INSTALL_DIR`；配置完成后修改该变量需重新运行
-`cmake --preset ninja-msvc-x64`。游戏运行时会锁定已部署的 `main.dll`，部署前需退出游戏。
+已有可用 UE4SS 安装时，只替换 UE4SS.dll 与 PalworldEditor main.dll，不更新代理、布局/签名、
+配置或其他 mod。首次安装运行时和游戏适配由兼容发行包或创意工坊完成。自定义加载路径必须通过
+-RuntimeDirectory 指定实际工作目录，详见 [README 更新与部署参数](README.md#更新与部署参数)。
+升级后使用新的 -BuildDirectory，并在部署时传入相同目录。子模块跟随父提交，禁止独立 --remote 更新。
+普通配置/构建/部署不更新 UE4SS；不要删除旧构建产物。deploy-ue4ss 是 deploy 的兼容别名。
+游戏运行时 DLL 被固定到进程退出，必须完全退出游戏后部署。
 
 ### 验证一次改动
 
@@ -82,11 +62,11 @@ Remove-Item -Recurse -Force build ; cmake --preset ninja-msvc-x64 ; cmake --buil
 
 ```powershell
 cmake --build --preset ninja-msvc-x64 --target format-check PalworldEditor PalworldEditorTests PalworldEditorCommonTests PalworldEditorModLifecycleTests PalworldEditorBaseResourceSharingTests PalworldEditorRemotePalboxTests PalworldEditorCaptureOverrideTests PalworldEditorReviveTimerTests PalworldEditorFishingBoostTests PalworldEditorWaypointTeleportTests
-ctest --test-dir build --output-on-failure
+ctest --test-dir build/msvc --output-on-failure
 git diff --check
 ```
 
-九个测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、卸载清理调度、物品目录、技能目录、技能编辑
+九个纯 C++ 测试 target/CTest 覆盖不依赖 Unreal 的参数方向判定、卸载清理调度、物品目录、技能目录、技能编辑
 服务、配置、资源池、能力判断、恢复账本、远程终端、捕获覆盖、复活计时、钓鱼圣手账本与标记传送决策和生命周期逻辑。
 反射调用、ImGui 和 Palworld 存档效果仍需游戏内端到端验证。
 
@@ -311,7 +291,7 @@ EngineTick 在游戏线程恢复覆盖并注销业务 Hook；立即执行一次�
 `CMAKE_BUILD_TYPE=Game__Shipping__Win64`（即 UE4SS 的默认值）。**必须显式设置**：RE-UE4SS 拉取的
 imgui 依赖里，其 examples 含有 `if(NOT CMAKE_BUILD_TYPE) set(CMAKE_BUILD_TYPE Debug ... FORCE)`；
 若不显式指定，这个默认就会"赢"，使 `$<CONFIG>` 变成 `Debug` 而不匹配任何 triplet，UE4SS 的关键
-宏不会被定义，编译会失败。这就是输出 DLL 落在 `build/Game__Shipping__Win64/bin/` 的原因。
+宏不会被定义，编译会失败。这就是输出 DLL 落在 `build/msvc/Game__Shipping__Win64/bin/` 的原因。
 
 **Mod 入口点契约**（`mods/PalworldEditor/src/mod/dllmain.cpp`）：`PalworldEditorMod` 继承
 `RC::CppUserModBase`，设置元数据并重写 `on_update`、`on_unreal_init`；`on_update()` 保持为空，
@@ -475,22 +455,19 @@ BlueprintResearch 或等价的仓储登记/材料路径 mod 同时启用。热�
 的有界策略恢复账本并注销业务 Hook；本模块恢复失败属瞬态（账本保留恢复责任），仅捕获事务恢复
 失败为永久并立即终结等待，析构线程自身不得访问 Unreal。
 
-**部署契约。** C++ mod 安装到游戏 `Pal/Binaries/Win64/ue4ss/Mods/<ModName>/dlls/main.dll`（把构建
-出的 DLL 改名；用 `<ModName>.dll` 也可以）。启用方式：在 mod 文件夹里放一个空的 `enabled.txt`，
-**或**者在 `ue4ss/Mods/mods.txt` 中 `Keybinds` 行的上方加一行 `<ModName> : 1`。`deploy` target
-（`cmake/Deploy.cmake`）通过 `$<TARGET_FILE:PalworldEditor>` 自动完成这件事，因此无论当前 triplet
-输出目录是哪个，源文件路径都始终正确。`deploy-ue4ss` target（同文件）部署 UE4SS 运行时全套
-（`ue4ss/UE4SS.dll`、`Pal/Binaries/Win64/dwmapi.dll` 代理与 `RE-UE4SS/assets` 资源套件，
-settings.ini 仅首次安装部署——已存在的属于用户配置，升级新增的配置项须手动对照仓库默认值
-合并）——升级 RE-UE4SS 子项目后必须先执行它再 `deploy`，运行时与 mod DLL 必须成对部署，
-旧运行时配新 mod DLL 属于未定义行为。
+**部署契约。** C++ mod 位于 `Pal/Binaries/Win64/ue4ss/Mods/PalworldEditor/dlls/main.dll`，
+使用 enabled.txt 或现有 mod 配置启用。cmake/Deploy.cmake 的 deploy 只依赖 UE4SS 与 PalworldEditor，
+然后复制两个 DLL；不构建 proxy，不安装全量资源。deploy.ps1 可单独部署已有构建结果。
+部署前检查游戏进程及文件占用，不覆盖加载器、适配文件、mods.txt/json、其他 mod 或用户配置。
+不提供安装事务或自动回滚；失败后保持游戏关闭，修复问题并重新部署两个 DLL。
+详情与参数以 README.md 的“更新与部署参数”为准。
 
 ## 工具链（clangd / clang-tidy / clang-format）
 
 `.clangd`、`.clang-tidy`、`.clang-format`、`.editorconfig` 和 `.gitattributes` 负责编辑器内的分析
 与格式化；行尾统一为 LF。
 
-clangd 读取 `build/compile_commands.json`（preset 里设置了 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`）。
+clangd 读取 `build/msvc/compile_commands.json`（preset 里设置了 `CMAKE_EXPORT_COMPILE_COMMANDS=ON`）。
 本工程用 MSVC 构建，所以该文件里记录的是 `cl.exe` 调用，clangd 会自动把它们翻译成自己的 clang-cl
 前端——不需要单独的 clang 工具链。修改 `CMakeLists.txt` 或新增源文件后，请重新运行
 `cmake --preset ninja-msvc-x64` 来刷新它。
