@@ -23,20 +23,56 @@
 
 ## 快速开始
 
-需要 VS 2022（C++ 桌面开发）、CMake ≥ 3.22、Git、Rust stable，以及游戏内装好
-**UE4SS Experimental (Palworld)** + PalSchema。所有命令在 **VS x64 开发者环境**中运行：
+需要 PowerShell 7、VS C++ 桌面工作负载、CMake ≥ 3.26、Git 和 Rust stable。
+通过显式更新选择最新 UE4SS，普通构建不更新依赖。可直接使用 CMake，也可用
+`pwsh scripts/build.ps1 -Test` 自动加载 VS x64 环境并构建、测试。
 
 ```powershell
-pwsh scripts/setup.ps1                                     # 首次：克隆 RE-UE4SS
-$env:PALWORLD_INSTALL_DIR = "F:\...\Palworld"              # 可选；配置前设置
-cmake --preset ninja-msvc-x64
-cmake --build --preset ninja-msvc-x64 --target PalworldEditor
-ctest --test-dir build --output-on-failure                 # 纯 C++ 契约测试
-cmake --build --preset ninja-msvc-x64 --target deploy      # 部署到游戏（需先退出游戏）
+pwsh scripts/setup.ps1 -Update                 # 首次获取或显式更新 UE4SS 及子模块
+# 以下命令在 VS x64 开发者环境中执行
+cmake --preset ninja-msvc-x64 -DPALWORLD_INSTALL_DIR="F:/Games/Palworld"
+cmake --build --preset ninja-msvc-x64          # 构建 UE4SS 和 PalworldEditor
+# 完全退出游戏后
+cmake --build --preset deploy
 ```
+
+已有可用 UE4SS 安装时，部署只替换 UE4SS.dll 和本 mod 的 main.dll；不覆盖加载器、适配文件、
+用户配置或其他 mod。更新 UE4SS 后使用新的构建目录。
 
 进入游戏后：UE4SS GUI → `PalworldEditor` 页签 → 浮动窗口。详细操作方式见下文架构/已知限制，
 完整验证清单见 `AGENTS.md`。
+
+### 更新与部署参数
+
+`setup.ps1` 首次获取上游 main，已有源码时只同步当前提交的递归子模块；
+`-Update` 才获取最新提交，也可用 `-Update -Ref <分支/tag/提交>`。
+更新前拒绝源码或子模块中的本地修改；子模块跟随父仓库记录的版本，不使用 `--remote`。
+
+默认构建目录为 `build/msvc`。依赖或工具链变化后，保留旧产物并选择新目录：
+
+```powershell
+cmake --preset ninja-msvc-x64 -B build/msvc-next -DPALWORLD_INSTALL_DIR="F:/Games/Palworld"
+cmake --build build/msvc-next --target UE4SS PalworldEditor
+# 完全退出游戏后
+cmake --build build/msvc-next --target deploy
+```
+
+`-B` 不会修改 preset，后续命令必须使用同一目录。
+也可执行 `pwsh scripts/build.ps1 -BuildDirectory build/msvc-next -Test`，
+然后用 `pwsh scripts/deploy.ps1 -BuildDirectory build/msvc-next -InstallDirectory 'F:/Games/Palworld'`
+复制已有构建结果。CMake 的 `deploy` 会先构建，独立部署脚本不会；
+`deploy-ue4ss` 是 `deploy` 的兼容别名。
+
+部署要求已有可用 UE4SS 安装，首次运行时安装及 Palworld 适配由兼容发行包或创意工坊完成。
+默认工作目录为 `Pal/Binaries/Win64/ue4ss`。有创意工坊、override.txt 或启动参数重定向时，
+配置 `-DPALWORLD_UE4SS_DIR="实际工作目录"`，或向部署脚本传入 `-RuntimeDirectory`。
+该目录须同时包含 UE4SS.dll 和 Mods；若使用分离目录的自定义安装，应手动复制到各自实际位置。
+首次添加本 mod 时，自行创建 `Mods/PalworldEditor/enabled.txt` 或在现有 mod 配置中启用。
+
+脚本在写入前检查游戏进程、两个源文件和目标文件占用，不改动加载器、布局/签名或配置。
+复制不是跨文件原子事务；磁盘错误或中断后应保持游戏关闭，排除故障并重新部署两个 DLL。
+不提供自动备份或回滚，需要恢复时部署保留的旧构建产物。调试 PDB 直接使用构建目录中的匹配文件。
+替换后必须冷启动验证新日志、GUI 和存档中的基本功能；编译成功不等于最新上游与当前 Palworld 适配兼容。
 
 ### VS Code 附加调试
 
@@ -44,7 +80,7 @@ cmake --build --preset ninja-msvc-x64 --target deploy      # 部署到游戏（�
 VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSVC 环境，然后按以下顺序操作：
 
 1. 游戏退出时运行任务 `CMake: deploy PalworldEditor`，确保部署的 `main.dll` 与
-   `build/Game__Shipping__Win64/bin/PalworldEditor.pdb` 来自同一次构建；
+   `build/msvc/Game__Shipping__Win64/bin/PalworldEditor.pdb` 来自同一次构建；
 2. 启动 Palworld，等待 UE4SS 输出 `PalworldEditor loaded`；
 3. 在 VS Code 的“运行和调试”中选择 `Attach to Palworld (MSVC)`，按 F5，然后选择
    `Palworld-Win64-Shipping.exe`（不同发行渠道名称可能略有差异）；
@@ -61,7 +97,7 @@ VS x64 开发者命令行运行 `code .`，使 VS Code 的构建任务继承 MSV
 - **Super-build**：根 `CMakeLists.txt` = `add_subdirectory(RE-UE4SS)` + `add_subdirectory(mods)`；
   RE-UE4SS 提供 `UE4SS` 静态库 target（头文件、编译宏、C++23）；每个 mod 是链接它的 `SHARED` 库；
 - **UE4SS triplet**：preset 显式设 `CMAKE_BUILD_TYPE=Game__Shipping__Win64` 以驱动
-  `UE_GAME` 等宏；产物落在 `build/Game__Shipping__Win64/bin/`；
+  `UE_GAME` 等宏；产物落在 `build/msvc/Game__Shipping__Win64/bin/`；
 - **三层分层**：纯值领域层（`inc/`，只依赖标准库，可单测）→ 游戏线程适配层（`src/<feature>/`，反射
   读写只在 EngineTick 或 UFunction 回调内）→ ImGui UI 层（`src/<feature>/*_ui.cpp`，只传标准库快照/原子
   请求/互斥锁参数）；
